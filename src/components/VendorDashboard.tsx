@@ -88,6 +88,8 @@ export function VendorDashboard({
   const [payoutMethod, setPayoutMethod] = useState<'bkash' | 'nagad' | 'bank'>('bkash');
   const [payoutAccount, setPayoutAccount] = useState('01712345678');
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>('platform');
+  const [regLogoUrl, setRegLogoUrl] = useState('');
+  const [regCoverUrl, setRegCoverUrl] = useState('');
   const [submittingReg, setSubmittingReg] = useState(false);
 
   // Add food item form
@@ -124,6 +126,9 @@ export function VendorDashboard({
   const [editMinOrder, setEditMinOrder] = useState('150');
   const [editHours, setEditHours] = useState('10:00 AM - 11:30 PM');
   const [editMode, setEditMode] = useState<DeliveryMode>('platform');
+  const [editLogoUrl, setEditLogoUrl] = useState('');
+  const [editCoverUrl, setEditCoverUrl] = useState('');
+  const [savingSettings, setSavingSettings] = useState(false);
 
   // Payout request
   const [payoutAmt, setPayoutAmt] = useState('500');
@@ -156,6 +161,8 @@ export function VendorDashboard({
         setEditMinOrder(String(res.restaurant.minOrder));
         setEditHours(res.restaurant.openingHours);
         setEditMode(res.restaurant.deliveryMode);
+        setEditLogoUrl(res.restaurant.logoUrl || '');
+        setEditCoverUrl(res.restaurant.coverUrl || '');
       } else {
         setShowOnboarding(true);
       }
@@ -197,6 +204,8 @@ export function VendorDashboard({
           nidNumber,
           payoutMethod,
           payoutAccount,
+          logoUrl: regLogoUrl.trim(),
+          coverUrl: regCoverUrl.trim(),
           deliveryFee: 49,
           minOrder: 150,
           deliveryMode,
@@ -230,6 +239,14 @@ export function VendorDashboard({
   };
 
   const uploadProductPhoto = async (file: File, onSuccess: (url: string) => void) => {
+    if (file.size > 4.5 * 1024 * 1024) {
+      setFeedback(
+        lang === 'bn'
+          ? 'ছবির সাইজ ৪.৫ এমবি-র কম হতে হবে।'
+          : 'Image must be smaller than 4.5 MB.'
+      );
+      return;
+    }
     setUploadingImage(true);
     setFeedback(null);
     try {
@@ -244,7 +261,7 @@ export function VendorDashboard({
         body: JSON.stringify({ dataUrl, filename: file.name }),
       });
       onSuccess(res.imageUrl);
-      setFeedback(lang === 'bn' ? 'ছবি আপলোড সম্পন্ন হয়েছে।' : 'Product image uploaded.');
+      setFeedback(lang === 'bn' ? 'ছবি আপলোড সম্পন্ন হয়েছে।' : 'Image uploaded successfully.');
     } catch (err: unknown) {
       setFeedback(err instanceof Error ? err.message : 'Image upload failed');
     } finally {
@@ -345,18 +362,28 @@ export function VendorDashboard({
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!restaurant) return;
-    await apiFetch('/api/vendor/restaurant', {
-      method: 'PATCH',
-      body: JSON.stringify({
-        restaurantId: restaurant.id,
-        openingHours: editHours,
-        deliveryFee: Number(editFee) || 0,
-        minOrder: Number(editMinOrder) || 0,
-        deliveryMode: editMode,
-      }),
-    });
-    setFeedback(lang === 'bn' ? 'স্টোর সেটিংস আপডেট হয়েছে।' : 'Store settings updated.');
-    await loadWorkspace();
+    setSavingSettings(true);
+    setFeedback(null);
+    try {
+      await apiFetch('/api/vendor/restaurant', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          restaurantId: restaurant.id,
+          openingHours: editHours,
+          deliveryFee: Number(editFee) || 0,
+          minOrder: Number(editMinOrder) || 0,
+          deliveryMode: editMode,
+          logoUrl: editLogoUrl.trim(),
+          coverUrl: editCoverUrl.trim(),
+        }),
+      });
+      setFeedback(lang === 'bn' ? 'স্টোর সেটিংস ও লোগো আপডেট হয়েছে।' : 'Store settings and branding updated.');
+      await loadWorkspace();
+    } catch (err: unknown) {
+      setFeedback(err instanceof Error ? err.message : 'Failed to save store settings');
+    } finally {
+      setSavingSettings(false);
+    }
   };
 
   const handleToggleOpen = async () => {
@@ -561,6 +588,79 @@ export function VendorDashboard({
                     placeholder="Authentic charcoal kababs, biriyani & Bengali platters"
                     className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
                   />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                      {lang === 'bn' ? 'রেস্টুরেন্ট লোগো (ঐচ্ছিক)' : 'Restaurant Logo (Optional)'}
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {regLogoUrl && (
+                        <img
+                          src={regLogoUrl}
+                          alt="Logo preview"
+                          className="w-9 h-9 rounded-lg object-cover border border-neutral-200 shrink-0"
+                        />
+                      )}
+                      <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 bg-neutral-50 hover:border-[#E21B70] text-xs font-semibold shrink-0">
+                        <Upload className="w-3.5 h-3.5 text-[#E21B70]" />
+                        <span>{uploadingImage ? 'Uploading...' : 'Upload Logo'}</span>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,image/gif"
+                          className="sr-only"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            e.target.value = '';
+                            if (f) uploadProductPhoto(f, (url) => setRegLogoUrl(url));
+                          }}
+                        />
+                      </label>
+                      <input
+                        type="text"
+                        value={regLogoUrl}
+                        onChange={(e) => setRegLogoUrl(e.target.value)}
+                        placeholder="https://..."
+                        className="flex-1 min-w-0 px-2.5 py-2 text-xs border border-neutral-200 rounded-lg"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                      {lang === 'bn' ? 'কভার ছবি (ঐচ্ছিক)' : 'Cover Image (Optional)'}
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {regCoverUrl && (
+                        <img
+                          src={regCoverUrl}
+                          alt="Cover preview"
+                          className="w-12 h-9 rounded-lg object-cover border border-neutral-200 shrink-0"
+                        />
+                      )}
+                      <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 bg-neutral-50 hover:border-[#E21B70] text-xs font-semibold shrink-0">
+                        <Upload className="w-3.5 h-3.5 text-[#E21B70]" />
+                        <span>{uploadingImage ? 'Uploading...' : 'Upload Cover'}</span>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,image/gif"
+                          className="sr-only"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            e.target.value = '';
+                            if (f) uploadProductPhoto(f, (url) => setRegCoverUrl(url));
+                          }}
+                        />
+                      </label>
+                      <input
+                        type="text"
+                        value={regCoverUrl}
+                        onChange={(e) => setRegCoverUrl(e.target.value)}
+                        placeholder="https://..."
+                        className="flex-1 min-w-0 px-2.5 py-2 text-xs border border-neutral-200 rounded-lg"
+                      />
+                    </div>
+                  </div>
                 </div>
 
                 <div className="flex justify-end">
@@ -771,9 +871,17 @@ export function VendorDashboard({
           {/* Vendor Header & KPI Summary */}
           <div className="bg-white rounded-2xl border border-neutral-200 p-5 flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-3.5">
-              <div className="w-12 h-12 rounded-xl bg-[#FFF0F6] text-[#E21B70] flex items-center justify-center">
-                <Store className="w-6 h-6" />
-              </div>
+              {restaurant.logoUrl ? (
+                <img
+                  src={restaurant.logoUrl}
+                  alt={restaurant.name}
+                  className="w-12 h-12 rounded-xl object-cover border border-neutral-200 bg-white shrink-0"
+                />
+              ) : (
+                <div className="w-12 h-12 rounded-xl bg-[#FFF0F6] text-[#E21B70] flex items-center justify-center shrink-0">
+                  <Store className="w-6 h-6" />
+                </div>
+              )}
               <div>
                 <div className="flex items-center gap-2">
                   <h1 className="text-xl font-bold text-[#2E3138]">
@@ -1541,8 +1649,99 @@ export function VendorDashboard({
               className="bg-white rounded-2xl border border-neutral-200 p-6 max-w-2xl space-y-4"
             >
               <h2 className="font-bold text-base text-[#2E3138]">
-                {lang === 'bn' ? 'ডেলিভারি ও সময়সূচি সেটিংস' : 'Kitchen Operations & Delivery Settings'}
+                {lang === 'bn'
+                  ? 'লোগো, ব্র্যান্ডিং ও ডেলিভারি সেটিংস'
+                  : 'Restaurant Branding, Logo & Delivery Settings'}
               </h2>
+
+              <div className="grid grid-cols-1 gap-4 p-4 rounded-xl bg-[#FAFAFB] border border-neutral-200">
+                <div className="space-y-1.5 text-xs">
+                  <label className="block font-semibold text-neutral-700">
+                    {lang === 'bn' ? 'রেস্টুরেন্ট লোগো ছবি (Logo)' : 'Restaurant Logo Image'}
+                  </label>
+                  <div className="flex items-center gap-2.5">
+                    {editLogoUrl ? (
+                      <img
+                        src={editLogoUrl}
+                        alt="Restaurant logo"
+                        className="w-12 h-12 rounded-xl object-cover border border-neutral-200 bg-white shrink-0"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 rounded-xl border border-dashed border-neutral-300 bg-white flex items-center justify-center text-neutral-400 shrink-0">
+                        <Store className="w-5 h-5" />
+                      </div>
+                    )}
+                    <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 bg-white hover:border-[#E21B70] font-semibold shrink-0">
+                      <Upload className="w-3.5 h-3.5 text-[#E21B70]" />
+                      <span>{uploadingImage ? 'Uploading...' : 'Upload Logo'}</span>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        className="sr-only"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          e.target.value = '';
+                          if (f) uploadProductPhoto(f, (url) => setEditLogoUrl(url));
+                        }}
+                      />
+                    </label>
+                    <input
+                      type="text"
+                      value={editLogoUrl}
+                      onChange={(e) => setEditLogoUrl(e.target.value)}
+                      placeholder="https://... or /uploads/..."
+                      className="flex-1 min-w-0 px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white"
+                    />
+                    {editLogoUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setEditLogoUrl('')}
+                        aria-label="Clear restaurant logo"
+                        className="p-2 rounded-lg border border-neutral-200 bg-white text-neutral-500 hover:text-red-600"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5 text-xs">
+                  <label className="block font-semibold text-neutral-700">
+                    {lang === 'bn' ? 'রেস্টুরেন্ট কভার ছবি (Cover Banner)' : 'Storefront Cover Image'}
+                  </label>
+                  <div className="flex items-center gap-2.5">
+                    {editCoverUrl && (
+                      <img
+                        src={editCoverUrl}
+                        alt="Restaurant cover"
+                        className="w-16 h-12 rounded-lg object-cover border border-neutral-200 bg-neutral-100 shrink-0"
+                      />
+                    )}
+                    <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 bg-white hover:border-[#E21B70] font-semibold shrink-0">
+                      <Upload className="w-3.5 h-3.5 text-[#E21B70]" />
+                      <span>{uploadingImage ? 'Uploading...' : 'Upload Cover'}</span>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        className="sr-only"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          e.target.value = '';
+                          if (f) uploadProductPhoto(f, (url) => setEditCoverUrl(url));
+                        }}
+                      />
+                    </label>
+                    <input
+                      type="text"
+                      value={editCoverUrl}
+                      onChange={(e) => setEditCoverUrl(e.target.value)}
+                      placeholder="https://... or /uploads/..."
+                      className="flex-1 min-w-0 px-3 py-2 text-xs border border-neutral-200 rounded-lg bg-white"
+                    />
+                  </div>
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-neutral-700 mb-1">Opening Hours</label>
@@ -1585,9 +1784,16 @@ export function VendorDashboard({
               </div>
               <button
                 type="submit"
-                className="px-5 py-2.5 rounded-xl bg-[#E21B70] text-white text-xs font-semibold"
+                disabled={savingSettings || uploadingImage}
+                className="px-5 py-2.5 rounded-xl bg-[#E21B70] text-white text-xs font-semibold disabled:opacity-50"
               >
-                {lang === 'bn' ? 'সেটিংস সংরক্ষণ করুন' : 'Save Settings'}
+                {savingSettings
+                  ? lang === 'bn'
+                    ? 'সংরক্ষণ হচ্ছে...'
+                    : 'Saving...'
+                  : lang === 'bn'
+                  ? 'সেটিংস ও লোগো সংরক্ষণ করুন'
+                  : 'Save Settings & Branding'}
               </button>
             </form>
           )}

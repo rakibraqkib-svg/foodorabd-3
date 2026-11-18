@@ -11,6 +11,7 @@ import {
   ExternalLink,
   Filter,
   Heart,
+  KeyRound,
   LocateFixed,
   Lock,
   LogIn,
@@ -76,6 +77,7 @@ function MarketplaceApp() {
     signInWithGoogle,
     signInWithEmail,
     registerWithEmail,
+    unlockAdminWithPin,
     signInSandboxPersona,
     signOut,
     refreshUser,
@@ -190,6 +192,9 @@ function MarketplaceApp() {
   >([]);
   const [osmSearching, setOsmSearching] = useState(false);
   const [locatingGps, setLocatingGps] = useState(false);
+  const [pendingAdminRedirect, setPendingAdminRedirect] = useState(false);
+  const [showAdminPinBox, setShowAdminPinBox] = useState(false);
+  const [adminPinInput, setAdminPinInput] = useState('');
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -504,6 +509,27 @@ function MarketplaceApp() {
 
   const isPrivilegedAdmin = Boolean(user && (user.role === 'admin' || user.role === 'super_admin'));
 
+  useEffect(() => {
+    if (pendingAdminRedirect && isPrivilegedAdmin) {
+      setPendingAdminRedirect(false);
+      setAuthModalOpen(false);
+      setView({ type: 'admin' });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [pendingAdminRedirect, isPrivilegedAdmin]);
+
+  const openAdminOrPromptSignIn = useCallback(() => {
+    if (isPrivilegedAdmin) {
+      setView({ type: 'admin' });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    clearError();
+    setPendingAdminRedirect(true);
+    setShowAdminPinBox(true);
+    setAuthModalOpen(true);
+  }, [isPrivilegedAdmin, clearError]);
+
   const filteredRestaurants = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const list = restaurants.filter((r) => {
@@ -623,20 +649,21 @@ function MarketplaceApp() {
               <span className="hidden sm:inline">{t(lang, 'riderCta')}</span>
               <span className="sm:hidden">Rider</span>
             </button>
-            {isPrivilegedAdmin && (
-              <button
-                type="button"
-                onClick={() => {
-                  setView({ type: 'admin' });
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
-                }}
-                className="px-3 sm:px-4 py-1 rounded-lg border border-white/80 hover:bg-white/15 font-bold text-[10px] sm:text-[11px] uppercase tracking-wide inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-              >
-                <Shield className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">{t(lang, 'adminCta')}</span>
-                <span className="sm:hidden">Admin</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={openAdminOrPromptSignIn}
+              className="px-3 sm:px-4 py-1 rounded-lg border border-white/80 hover:bg-white/15 font-bold text-[10px] sm:text-[11px] uppercase tracking-wide inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+            >
+              <Shield className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">
+                {isPrivilegedAdmin
+                  ? t(lang, 'adminCta')
+                  : lang === 'bn'
+                  ? 'অ্যাডমিন প্যানেল'
+                  : 'Admin Panel'}
+              </span>
+              <span className="sm:hidden">Admin</span>
+            </button>
           </div>
         </div>
       )}
@@ -692,10 +719,13 @@ function MarketplaceApp() {
                       setView({ type: 'admin' });
                       window.scrollTo({ top: 0, behavior: 'smooth' });
                     }}
-                    className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#2E3138] hover:bg-black text-white text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
+                    className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg bg-[#2E3138] hover:bg-black text-white text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
                   >
                     <Shield className="w-3.5 h-3.5 text-[#E21B70]" />
-                    <span>{user.role === 'super_admin' ? 'Super Admin' : 'Admin'}</span>
+                    <span className="hidden sm:inline">
+                      {user.role === 'super_admin' ? 'Super Admin' : 'Admin'}
+                    </span>
+                    <span className="sm:hidden">Admin</span>
                   </button>
                 )}
                 <button
@@ -1659,6 +1689,15 @@ function MarketplaceApp() {
                               </span>
                             ) : null}
 
+                            {rest.logoUrl && (
+                              <img
+                                src={rest.logoUrl}
+                                alt={`${rest.name} logo`}
+                                referrerPolicy="no-referrer"
+                                className="w-11 h-11 rounded-xl object-cover border-2 border-white shadow-md bg-white absolute bottom-2.5 left-2.5"
+                              />
+                            )}
+
                             <button
                               type="button"
                               aria-label={`Favorite ${rest.name}`}
@@ -1815,15 +1854,7 @@ function MarketplaceApp() {
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  if (isPrivilegedAdmin) {
-                    setView({ type: 'admin' });
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
-                  } else {
-                    clearError();
-                    setAuthModalOpen(true);
-                  }
-                }}
+                onClick={openAdminOrPromptSignIn}
                 className="block hover:text-[#E21B70]"
               >
                 {isPrivilegedAdmin
@@ -2033,6 +2064,9 @@ function MarketplaceApp() {
                 onClick={() => {
                   clearError();
                   clearGoogleRedirectUrl();
+                  setPendingAdminRedirect(false);
+                  setShowAdminPinBox(false);
+                  setAdminPinInput('');
                   setAuthModalOpen(false);
                 }}
                 className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100"
@@ -2040,6 +2074,87 @@ function MarketplaceApp() {
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {!isPrivilegedAdmin && (showAdminPinBox || pendingAdminRedirect) && (
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!adminPinInput.trim()) return;
+                  clearError();
+                  setAuthSubmitting(true);
+                  try {
+                    await unlockAdminWithPin(adminPinInput.trim());
+                    setAdminPinInput('');
+                    setShowAdminPinBox(false);
+                    setPendingAdminRedirect(false);
+                    setAuthModalOpen(false);
+                    setView({ type: 'admin' });
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                    showToast(
+                      lang === 'bn'
+                        ? 'সুপার অ্যাডমিন প্যানেল আনলক হয়েছে'
+                        : 'Super Admin Panel unlocked'
+                    );
+                  } catch {
+                    // error banner shown in AuthContext
+                  } finally {
+                    setAuthSubmitting(false);
+                  }
+                }}
+                className="p-3.5 rounded-xl bg-[#FFF0F6] border border-[#E21B70]/30 space-y-2.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-[#2E3138]">
+                    <KeyRound className="w-4 h-4 text-[#E21B70]" />
+                    <span>
+                      {lang === 'bn'
+                        ? 'অ্যাডমিন প্যানেল PIN আনলক'
+                        : 'Admin Panel PIN Unlock'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAdminPinBox(false);
+                      setPendingAdminRedirect(false);
+                    }}
+                    className="text-[11px] font-semibold text-neutral-500 hover:text-[#2E3138]"
+                  >
+                    {lang === 'bn' ? 'বন্ধ করুন' : 'Hide'}
+                  </button>
+                </div>
+                <p className="text-[11px] text-neutral-600 leading-relaxed">
+                  {lang === 'bn'
+                    ? 'সরাসরি সুপার অ্যাডমিন প্যানেল খুলতে আপনার অ্যাডমিন PIN দিন (অথবা নিচের Google / ইমেইল ব্যবহার করুন)।'
+                    : 'Enter your Admin PIN to unlock the Super Admin Panel directly (or sign in via Google / Email below).'}
+                </p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    required
+                    minLength={4}
+                    maxLength={16}
+                    value={adminPinInput}
+                    onChange={(e) => setAdminPinInput(e.target.value)}
+                    placeholder={lang === 'bn' ? 'অ্যাডমিন PIN লিখুন' : 'Enter Admin PIN'}
+                    aria-label="Admin PIN"
+                    className="flex-1 min-w-0 px-3 py-2 rounded-lg border border-neutral-300 bg-white text-xs text-[#2E3138] tracking-widest focus:outline-none focus:border-[#E21B70]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={authSubmitting || adminPinInput.trim().length < 4}
+                    className="px-4 py-2 rounded-lg bg-[#2E3138] hover:bg-black disabled:opacity-50 text-white text-xs font-bold shrink-0 transition-colors"
+                  >
+                    {authSubmitting
+                      ? '...'
+                      : lang === 'bn'
+                      ? 'আনলক'
+                      : 'Unlock'}
+                  </button>
+                </div>
+              </form>
+            )}
 
             {authError && (
               <div
@@ -2090,6 +2205,7 @@ function MarketplaceApp() {
               <button
                 type="button"
                 onClick={() => {
+                  setPendingAdminRedirect(false);
                   setAuthModalOpen(false);
                   setView({ type: 'admin' });
                   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2318,9 +2434,9 @@ function MarketplaceApp() {
 
             <div className="pt-2 border-t border-neutral-100 space-y-2">
               <p className="text-[11px] font-bold uppercase text-neutral-500">
-                {lang === 'bn' ? 'ডেমো ওয়ার্কস্পেস পরিবর্তন (কাস্টমার / ভেন্ডর / রাইডার)' : 'Switch Demo Workspace'}
+                {lang === 'bn' ? 'ওয়ার্কস্পেস পরিবর্তন' : 'Switch Workspace'}
               </p>
-              <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                 <button
                   type="button"
                   onClick={() => handleSwitchWorkspace('customer', { type: 'customer' })}
@@ -2345,11 +2461,29 @@ function MarketplaceApp() {
                   <Bike className="w-4 h-4 text-[#E21B70] mb-1" />
                   Rider
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isPrivilegedAdmin) {
+                      setAuthModalOpen(false);
+                      setView({ type: 'admin' });
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    } else {
+                      clearError();
+                      setPendingAdminRedirect(true);
+                      setShowAdminPinBox(true);
+                    }
+                  }}
+                  className="p-2.5 rounded-xl border border-[#E21B70]/40 bg-[#FFF9FB] hover:border-[#E21B70] text-left font-semibold text-[#2E3138]"
+                >
+                  <KeyRound className="w-4 h-4 text-[#E21B70] mb-1" />
+                  Admin PIN
+                </button>
               </div>
               <p className="text-[11px] text-neutral-400">
                 {lang === 'bn'
-                  ? 'অ্যাডমিন ও সুপার অ্যাডমিন কন্ট্রোল শুধুমাত্র অনুমোদিত অ্যাডমিন লগইনের জন্য সংরক্ষিত।'
-                  : 'Admin & Super Admin control is restricted to verified Admin accounts.'}
+                  ? 'অ্যাডমিন প্যানেল খুলতে Admin PIN বা অনুমোদিত অ্যাডমিন অ্যাকাউন্ট ব্যবহার করুন।'
+                  : 'Admin & Super Admin control requires Admin PIN or verified Admin sign-in.'}
               </p>
             </div>
           </div>

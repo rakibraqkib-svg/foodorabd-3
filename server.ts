@@ -44,12 +44,14 @@ import {
 } from './src/db/queries.ts';
 import {
   AuthRequest,
+  getOrCreateUser,
   optionalAuth,
   requireAuth,
   requireRole,
   signSandboxToken,
   UserRole,
 } from './src/middleware/auth.ts';
+import { supabaseServer } from './src/lib/supabase-admin.ts';
 import {
   calculateCartItemUnitPrice,
   calculateOrderFinancials,
@@ -237,6 +239,149 @@ function verifyPasswordScrypt(password: string, stored: string): boolean {
   return crypto.timingSafeEqual(derived, storedBuf);
 }
 
+const ADMIN_PIN_VAULT_KEY = '__admin_panel_pin__';
+const ADMIN_PIN_VAULT_UID = 'admin-pin-vault';
+
+function getFallbackAdminPin(): string {
+  return process.env.ADMIN_ACCESS_PIN || '2026';
+}
+
+async function verifyAdminPinValue(pin: string): Promise<boolean> {
+  const rows = await db
+    .select({ passwordHash: localCredentials.passwordHash })
+    .from(localCredentials)
+    .where(eq(localCredentials.email, ADMIN_PIN_VAULT_KEY))
+    .limit(1);
+
+  if (rows.length > 0) {
+    return verifyPasswordScrypt(pin, rows[0].passwordHash);
+  }
+
+  const fallback = getFallbackAdminPin();
+  const a = Buffer.from(pin, 'utf8');
+  const b = Buffer.from(fallback, 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+app.post('/api/auth/admin-pin', async (req, res) => {
+  const schema = z.object({
+    pin: z.string().min(4).max(16),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Please enter a valid 4–16 character Admin PIN.' });
+  }
+
+  try {
+    const valid = await verifyAdminPinValue(parsed.data.pin.trim());
+    if (!valid) {
+      return res.status(401).json({ error: 'Incorrect Admin PIN. Please try again.' });
+    }
+
+    const adminRows = await db
+      .select()
+      .from(users)
+      .where(
+        or(
+          sql`lower(${users.email}) = 'rakibraqkib@gmail.com'`,
+          eq(users.role, 'super_admin')
+        )
+      )
+      .limit(1);
+
+    const adminRecord = adminRows[0];
+    const uid = adminRecord?.uid || 'demo-admin-uid';
+    const email = adminRecord?.email || 'rakibraqkib@gmail.com';
+    const fullName = adminRecord?.fullName || 'Super Admin';
+    const role: UserRole = 'super_admin';
+
+    const dbUser = await getOrCreateUser(uid, email, fullName, 'super_admin');
+    const token = signSandboxToken({
+      uid: dbUser.uid,
+      email: dbUser.email,
+      fullName: dbUser.fullName,
+      role,
+      isSandbox: false,
+    });
+
+    try {
+      await db.insert(auditLogs).values({
+        actorUid: dbUser.uid,
+        action: 'admin_pin_unlock',
+        targetType: 'auth',
+        targetId: dbUser.uid,
+        details: 'Super Admin workspace unlocked via Admin PIN',
+      });
+    } catch {
+      // non-fatal audit log skip
+    }
+
+    return res.json({
+      token,
+      user: {
+        uid: dbUser.uid,
+        email: dbUser.email,
+        fullName: dbUser.fullName,
+        role,
+        isSandbox: false,
+      },
+    });
+  } catch (error: any) {
+    console.error('Admin PIN unlock failed:', error);
+    return res.status(500).json({ error: error.message || 'Failed to verify Admin PIN' });
+  }
+});
+
+app.post(
+  '/api/admin/pin',
+  requireAuth,
+  requireRole(['super_admin']),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      currentPin: z.string().min(4).max(16),
+      newPin: z.string().min(4).max(16),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Current PIN and new PIN (4–16 characters) are required.' });
+    }
+
+    try {
+      const valid = await verifyAdminPinValue(parsed.data.currentPin.trim());
+      if (!valid) {
+        return res.status(401).json({ error: 'Current Admin PIN is incorrect.' });
+      }
+
+      const nextHash = hashPasswordScrypt(parsed.data.newPin.trim());
+      await db
+        .insert(localCredentials)
+        .values({
+          email: ADMIN_PIN_VAULT_KEY,
+          uid: ADMIN_PIN_VAULT_UID,
+          passwordHash: nextHash,
+        })
+        .onConflictDoUpdate({
+          target: localCredentials.email,
+          set: { passwordHash: nextHash },
+        });
+
+      await db.insert(auditLogs).values({
+        actorUid: req.user!.uid,
+        action: 'admin_pin_updated',
+        targetType: 'security',
+        targetId: ADMIN_PIN_VAULT_UID,
+        details: 'Admin Panel PIN updated by Super Admin',
+      });
+
+      return res.json({ ok: true, message: 'Admin Panel PIN updated successfully.' });
+    } catch (error: any) {
+      console.error('Admin PIN update failed:', error);
+      return res.status(500).json({ error: error.message || 'Failed to update Admin PIN' });
+    }
+  }
+);
+
 function isMissingTableError(err: any): boolean {
   const code = err?.code || err?.cause?.code;
   return code === '42P01';
@@ -356,9 +501,44 @@ app.post('/api/auth/login', async (req, res) => {
       .limit(1);
 
     if (credRows.length === 0) {
+      // Fallback: check if user registered via Supabase Email & Password
+      try {
+        const { data: supaAuth, error: supaErr } = await supabaseServer.auth.signInWithPassword({
+          email: emailLower,
+          password: parsed.data.password,
+        });
+        if (!supaErr && supaAuth?.user) {
+          const meta = (supaAuth.user.user_metadata || {}) as Record<string, unknown>;
+          const metaName =
+            (typeof meta.full_name === 'string' && meta.full_name.trim()) ||
+            (typeof meta.name === 'string' && meta.name.trim()) ||
+            emailLower.split('@')[0];
+          const dbUser = await getOrCreateUser(supaAuth.user.id, emailLower, metaName, 'customer');
+          if (dbUser.status === 'suspended') {
+            return { status: 403 as const, body: { error: 'This account has been suspended by an administrator.' } };
+          }
+          const role = (dbUser.role as UserRole) || 'customer';
+          const token = signSandboxToken({
+            uid: dbUser.uid,
+            email: dbUser.email,
+            fullName: dbUser.fullName,
+            role,
+            isSandbox: false,
+          });
+          return {
+            status: 200 as const,
+            body: {
+              token,
+              user: { uid: dbUser.uid, email: dbUser.email, fullName: dbUser.fullName, role, isSandbox: false },
+            },
+          };
+        }
+      } catch {
+        // ignore Supabase fallback network error and return 401
+      }
       return {
         status: 401 as const,
-        body: { error: 'No account found with this email. Please create an account first.' },
+        body: { error: 'No password account found for this email. Try Google Sign-In or Create Account.' },
       };
     }
 
@@ -1078,6 +1258,8 @@ app.post('/api/restaurants/register', requireAuth, async (req: AuthRequest, res)
     nidNumber: z.string().min(5),
     payoutMethod: z.enum(['bkash', 'nagad', 'bank']),
     payoutAccount: z.string().min(5),
+    logoUrl: z.string().optional().default(''),
+    coverUrl: z.string().optional().default(''),
     deliveryFee: z.number().int().min(0).max(300).default(49),
     minOrder: z.number().int().min(50).max(5000).default(150),
     deliveryMode: z.enum(['platform', 'restaurant', 'third_party']).default('platform'),
@@ -1110,7 +1292,8 @@ app.post('/api/restaurants/register', requireAuth, async (req: AuthRequest, res)
         lng: parsed.data.lng,
         phone: parsed.data.phone,
         email: parsed.data.email,
-        coverUrl: IMG_BANGLA,
+        logoUrl: parsed.data.logoUrl?.trim() || '',
+        coverUrl: parsed.data.coverUrl?.trim() || IMG_BANGLA,
         tradeLicense: parsed.data.tradeLicense,
         nidNumber: parsed.data.nidNumber,
         payoutMethod: parsed.data.payoutMethod,
@@ -1320,6 +1503,9 @@ app.patch(
       deliveryFee: z.number().int().min(0).max(500).optional(),
       minOrder: z.number().int().min(0).max(5000).optional(),
       deliveryMode: z.enum(['platform', 'restaurant', 'third_party']).optional(),
+      logoUrl: z.string().optional(),
+      coverUrl: z.string().optional(),
+      description: z.string().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Invalid restaurant settings' });
@@ -1344,6 +1530,16 @@ app.patch(
           deliveryFee: parsed.data.deliveryFee ?? rows[0].deliveryFee,
           minOrder: parsed.data.minOrder ?? rows[0].minOrder,
           deliveryMode: parsed.data.deliveryMode ?? rows[0].deliveryMode,
+          logoUrl:
+            parsed.data.logoUrl !== undefined ? parsed.data.logoUrl.trim() : rows[0].logoUrl,
+          coverUrl:
+            parsed.data.coverUrl !== undefined && parsed.data.coverUrl.trim()
+              ? parsed.data.coverUrl.trim()
+              : rows[0].coverUrl,
+          description:
+            parsed.data.description !== undefined
+              ? parsed.data.description.trim()
+              : rows[0].description,
           updatedAt: new Date(),
         })
         .where(eq(restaurants.id, rows[0].id))
@@ -1732,7 +1928,6 @@ app.patch(
 app.post(
   '/api/upload-image',
   requireAuth,
-  requireRole(['restaurant_owner', 'admin', 'super_admin']),
   async (req: AuthRequest, res) => {
     const schema = z.object({
       dataUrl: z.string().min(20),
@@ -1804,6 +1999,7 @@ app.post(
       phone: z.string().default('+8801710000000'),
       email: z.string().email().default('partner@foodora.bd'),
       description: z.string().default(''),
+      logoUrl: z.string().default(''),
       coverUrl: z.string().default(IMG_BANGLA),
       deliveryFee: z.number().int().min(0).max(500).default(49),
       minOrder: z.number().int().min(0).max(10000).default(150),
@@ -1841,6 +2037,7 @@ app.post(
           lng: 90.4066,
           phone: parsed.data.phone,
           email: parsed.data.email,
+          logoUrl: parsed.data.logoUrl?.trim() || '',
           coverUrl: parsed.data.coverUrl || IMG_BANGLA,
           deliveryFee: parsed.data.deliveryFee,
           minOrder: parsed.data.minOrder,
@@ -1886,6 +2083,7 @@ app.patch(
       area: z.string().min(2).optional(),
       address: z.string().min(3).optional(),
       description: z.string().optional(),
+      logoUrl: z.string().optional(),
       coverUrl: z.string().optional(),
       deliveryFee: z.number().int().min(0).max(500).optional(),
       minOrder: z.number().int().min(0).max(10000).optional(),
@@ -1917,6 +2115,7 @@ app.patch(
           area: parsed.data.area ?? current.area,
           address: parsed.data.address ?? current.address,
           description: parsed.data.description ?? current.description,
+          logoUrl: parsed.data.logoUrl !== undefined ? parsed.data.logoUrl.trim() : current.logoUrl,
           coverUrl: parsed.data.coverUrl || current.coverUrl,
           deliveryFee: parsed.data.deliveryFee ?? current.deliveryFee,
           minOrder: parsed.data.minOrder ?? current.minOrder,

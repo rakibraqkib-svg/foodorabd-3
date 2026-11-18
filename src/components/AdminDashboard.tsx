@@ -7,6 +7,7 @@ import {
   CreditCard,
   Database,
   Download,
+  KeyRound,
   LayoutTemplate,
   Package,
   Pencil,
@@ -90,6 +91,7 @@ interface RestaurantFormState {
   area: string;
   address: string;
   description: string;
+  logoUrl: string;
   coverUrl: string;
   deliveryFee: string;
   minOrder: string;
@@ -148,6 +150,13 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
   const [minOrderDefault, setMinOrderDefault] = useState('150');
   const [savingSettings, setSavingSettings] = useState(false);
 
+  // Admin Panel Security PIN Change Form
+  const [currentPin, setCurrentPin] = useState('');
+  const [newPin, setNewPin] = useState('');
+  const [confirmPin, setConfirmPin] = useState('');
+  const [savingPin, setSavingPin] = useState(false);
+  const [pinMsg, setPinMsg] = useState<string | null>(null);
+
   // Backend Control State
   const [backendStatus, setBackendStatus] = useState<BackendStatusSummary | null>(null);
   const [loadingBackend, setLoadingBackend] = useState(false);
@@ -175,6 +184,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
   // Restaurant Create / Edit Modal
   const [restaurantModal, setRestaurantModal] = useState<RestaurantFormState | null>(null);
   const [savingRestaurant, setSavingRestaurant] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
 
   // New coupon form
   const [code, setCode] = useState('');
@@ -271,7 +281,17 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
   }, [products, productRestFilter, productSearch]);
 
   const handleUploadImage = async (file: File, onUploaded: (url: string) => void) => {
+    if (file.size > 4.5 * 1024 * 1024) {
+      const msg =
+        lang === 'bn'
+          ? 'ছবির সাইজ ৪.৫ এমবি-র কম হতে হবে।'
+          : 'Image must be smaller than 4.5 MB.';
+      setModalError(msg);
+      setFeedback(msg);
+      return;
+    }
     setUploadingPhoto(true);
+    setModalError(null);
     setFeedback(null);
     try {
       const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -287,7 +307,9 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       onUploaded(res.imageUrl);
       setFeedback(lang === 'bn' ? 'ছবি সফলভাবে আপলোড হয়েছে।' : 'Image uploaded successfully.');
     } catch (err: unknown) {
-      setFeedback(err instanceof Error ? err.message : 'Image upload failed');
+      const msg = err instanceof Error ? err.message : 'Image upload failed';
+      setModalError(msg);
+      setFeedback(msg);
     } finally {
       setUploadingPhoto(false);
     }
@@ -316,6 +338,42 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       await onRestaurantsMutated();
     } finally {
       setSavingSettings(false);
+    }
+  };
+
+  const handleUpdateAdminPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPinMsg(null);
+    if (newPin.trim().length < 4) {
+      setPinMsg(lang === 'bn' ? 'নতুন PIN কমপক্ষে ৪ অক্ষরের হতে হবে।' : 'New PIN must be at least 4 characters.');
+      return;
+    }
+    if (newPin.trim() !== confirmPin.trim()) {
+      setPinMsg(lang === 'bn' ? 'নতুন PIN দুইবার মিলছে না।' : 'New PIN and confirmation do not match.');
+      return;
+    }
+    setSavingPin(true);
+    try {
+      await apiFetch('/api/admin/pin', {
+        method: 'POST',
+        body: JSON.stringify({
+          currentPin: currentPin.trim(),
+          newPin: newPin.trim(),
+        }),
+      });
+      setCurrentPin('');
+      setNewPin('');
+      setConfirmPin('');
+      setFeedback(
+        lang === 'bn'
+          ? 'অ্যাডমিন প্যানেল PIN সফলভাবে পরিবর্তন হয়েছে।'
+          : 'Admin Panel security PIN updated successfully.'
+      );
+      await loadAdmin();
+    } catch (err: unknown) {
+      setPinMsg(err instanceof Error ? err.message : 'Failed to update Admin PIN');
+    } finally {
+      setSavingPin(false);
     }
   };
 
@@ -549,6 +607,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
   };
 
   const openCreateRestaurantModal = () => {
+    setModalError(null);
     setRestaurantModal({
       name: '',
       nameBn: '',
@@ -556,6 +615,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       area: DHAKA_AREAS[0].name,
       address: '',
       description: '',
+      logoUrl: '',
       coverUrl: '',
       deliveryFee: '49',
       minOrder: '150',
@@ -570,6 +630,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
   };
 
   const openEditRestaurantModal = (r: Restaurant) => {
+    setModalError(null);
     setRestaurantModal({
       id: r.id,
       name: r.name,
@@ -578,6 +639,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       area: r.area,
       address: r.address,
       description: r.description,
+      logoUrl: r.logoUrl || '',
       coverUrl: r.coverUrl,
       deliveryFee: String(r.deliveryFee),
       minOrder: String(r.minOrder),
@@ -595,6 +657,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
     e.preventDefault();
     if (!restaurantModal) return;
     setSavingRestaurant(true);
+    setModalError(null);
     try {
       const payload = {
         name: restaurantModal.name.trim(),
@@ -603,6 +666,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
         area: restaurantModal.area.trim(),
         address: restaurantModal.address.trim(),
         description: restaurantModal.description.trim(),
+        logoUrl: restaurantModal.logoUrl.trim(),
         coverUrl: restaurantModal.coverUrl.trim(),
         deliveryFee: Number(restaurantModal.deliveryFee) || 0,
         minOrder: Number(restaurantModal.minOrder) || 0,
@@ -630,6 +694,8 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       setRestaurantModal(null);
       await loadAdmin();
       await onRestaurantsMutated();
+    } catch (err: unknown) {
+      setModalError(err instanceof Error ? err.message : 'Failed to save restaurant');
     } finally {
       setSavingRestaurant(false);
     }
@@ -979,6 +1045,81 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
 
           {/* Payment Gateways, Couriers & Clean ZIP Export */}
           <div className="lg:col-span-6 space-y-6">
+            {currentUser.role === 'super_admin' && (
+              <form
+                onSubmit={handleUpdateAdminPin}
+                className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3"
+              >
+                <h2 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-[#E21B70]" />
+                  <span>
+                    {lang === 'bn'
+                      ? 'অ্যাডমিন প্যানেল সিকিউরিটি PIN পরিবর্তন'
+                      : 'Admin Panel Security PIN'}
+                  </span>
+                </h2>
+                {pinMsg && (
+                  <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                    {pinMsg}
+                  </p>
+                )}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">Current PIN</label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      required
+                      minLength={4}
+                      maxLength={16}
+                      value={currentPin}
+                      onChange={(e) => setCurrentPin(e.target.value)}
+                      placeholder="••••"
+                      className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">New PIN</label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      required
+                      minLength={4}
+                      maxLength={16}
+                      value={newPin}
+                      onChange={(e) => setNewPin(e.target.value)}
+                      placeholder="4–16 chars"
+                      className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">Confirm PIN</label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      required
+                      minLength={4}
+                      maxLength={16}
+                      value={confirmPin}
+                      onChange={(e) => setConfirmPin(e.target.value)}
+                      placeholder="Repeat PIN"
+                      className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  disabled={savingPin}
+                  className="px-4 py-2 rounded-xl bg-[#2E3138] hover:bg-black text-white text-xs font-semibold disabled:opacity-50"
+                >
+                  {savingPin
+                    ? 'Updating...'
+                    : lang === 'bn'
+                    ? 'নতুন PIN সংরক্ষণ করুন'
+                    : 'Update Admin PIN'}
+                </button>
+              </form>
+            )}
             <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
               <h2 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
                 <CreditCard className="w-4 h-4 text-[#E21B70]" />
@@ -1923,11 +2064,20 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                 className="bg-white rounded-2xl border border-neutral-200 p-4 flex flex-wrap items-center justify-between gap-4"
               >
                 <div className="flex items-center gap-3">
-                  <img
-                    src={rest.coverUrl}
-                    alt={rest.name}
-                    className="w-14 h-14 rounded-xl object-cover bg-neutral-100 shrink-0"
-                  />
+                  <div className="relative shrink-0">
+                    <img
+                      src={rest.coverUrl}
+                      alt={rest.name}
+                      className="w-14 h-14 rounded-xl object-cover bg-neutral-100"
+                    />
+                    {rest.logoUrl && (
+                      <img
+                        src={rest.logoUrl}
+                        alt={`${rest.name} logo`}
+                        className="w-6 h-6 rounded-lg object-cover border-2 border-white shadow-xs bg-white absolute -bottom-1 -right-1"
+                      />
+                    )}
+                  </div>
                   <div className="space-y-0.5">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h3 className="font-bold text-sm text-[#2E3138]">
@@ -2747,18 +2897,93 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
               </div>
             </div>
 
+            {modalError && (
+              <div
+                role="alert"
+                className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700"
+              >
+                {modalError}
+              </div>
+            )}
+
             <div className="space-y-1.5 text-xs">
-              <label className="block font-semibold text-neutral-700">Cover Image</label>
-              <div className="flex items-center gap-2">
-                <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 bg-neutral-50 hover:border-[#E21B70] font-semibold">
+              <label className="block font-semibold text-neutral-700">
+                {lang === 'bn' ? 'রেস্টুরেন্ট লোগো ছবি (Logo)' : 'Restaurant Logo Image'}
+              </label>
+              <div className="flex items-center gap-2.5">
+                {restaurantModal.logoUrl ? (
+                  <img
+                    src={restaurantModal.logoUrl}
+                    alt="Restaurant logo preview"
+                    className="w-11 h-11 rounded-xl object-cover border border-neutral-200 bg-white shrink-0"
+                  />
+                ) : (
+                  <div className="w-11 h-11 rounded-xl border border-dashed border-neutral-300 bg-neutral-50 flex items-center justify-center text-neutral-400 shrink-0">
+                    <Store className="w-4 h-4" />
+                  </div>
+                )}
+                <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 bg-neutral-50 hover:border-[#E21B70] font-semibold shrink-0">
                   <Upload className="w-3.5 h-3.5 text-[#E21B70]" />
-                  <span>Upload Cover</span>
+                  <span>{uploadingPhoto ? 'Uploading...' : 'Upload Logo'}</span>
                   <input
                     type="file"
-                    accept="image/*"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
                     className="sr-only"
                     onChange={(e) => {
                       const f = e.target.files?.[0];
+                      e.target.value = '';
+                      if (f) {
+                        handleUploadImage(f, (url) =>
+                          setRestaurantModal((prev) => (prev ? { ...prev, logoUrl: url } : null))
+                        );
+                      }
+                    }}
+                  />
+                </label>
+                <input
+                  type="text"
+                  value={restaurantModal.logoUrl}
+                  onChange={(e) =>
+                    setRestaurantModal({ ...restaurantModal, logoUrl: e.target.value })
+                  }
+                  placeholder="https://... or /uploads/..."
+                  className="flex-1 min-w-0 px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                />
+                {restaurantModal.logoUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setRestaurantModal({ ...restaurantModal, logoUrl: '' })}
+                    aria-label="Clear logo"
+                    className="p-2 rounded-lg border border-neutral-200 text-neutral-500 hover:text-red-600"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-1.5 text-xs">
+              <label className="block font-semibold text-neutral-700">
+                {lang === 'bn' ? 'কভার ব্যানার ছবি (Cover Image)' : 'Cover Image'}
+              </label>
+              <div className="flex items-center gap-2.5">
+                {restaurantModal.coverUrl && (
+                  <img
+                    src={restaurantModal.coverUrl}
+                    alt="Restaurant cover preview"
+                    className="w-16 h-11 rounded-lg object-cover border border-neutral-200 bg-neutral-100 shrink-0"
+                  />
+                )}
+                <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 bg-neutral-50 hover:border-[#E21B70] font-semibold shrink-0">
+                  <Upload className="w-3.5 h-3.5 text-[#E21B70]" />
+                  <span>{uploadingPhoto ? 'Uploading...' : 'Upload Cover'}</span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    className="sr-only"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      e.target.value = '';
                       if (f) {
                         handleUploadImage(f, (url) =>
                           setRestaurantModal((prev) => (prev ? { ...prev, coverUrl: url } : null))

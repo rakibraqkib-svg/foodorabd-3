@@ -13,6 +13,7 @@ interface AuthContextValue {
   signInWithGoogle: () => Promise<boolean>;
   signInWithEmail: (email: string, password: string) => Promise<AppUser>;
   registerWithEmail: (fullName: string, email: string, password: string) => Promise<AppUser>;
+  unlockAdminWithPin: (pin: string) => Promise<AppUser>;
   signInSandboxPersona: (role: 'customer' | 'restaurant_owner' | 'rider') => Promise<AppUser>;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -241,6 +242,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const unlockAdminWithPin = useCallback(async (pin: string): Promise<AppUser> => {
+    setError(null);
+    try {
+      const res = await apiFetch<{ token: string; user: AppUser }>('/api/auth/admin-pin', {
+        method: 'POST',
+        body: JSON.stringify({ pin }),
+      });
+      try {
+        sessionStorage.removeItem(SIGNED_OUT_FLAG);
+      } catch {
+        // ignore
+      }
+      setAuthToken(res.token);
+      setUser(res.user);
+      return res.user;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Admin PIN verification failed';
+      setError(msg);
+      throw err;
+    }
+  }, []);
+
   const signInSandboxPersona = useCallback(
     async (role: 'customer' | 'restaurant_owner' | 'rider') => {
       setError(null);
@@ -294,6 +317,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signInWithGoogle,
         signInWithEmail,
         registerWithEmail,
+        unlockAdminWithPin,
         signInSandboxPersona,
         signOut,
         refreshUser,
