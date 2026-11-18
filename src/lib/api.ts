@@ -41,9 +41,19 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
     headers,
   });
 
-  const data = await res.json().catch(() => ({}));
+  const rawText = await res.text().catch(() => '');
+  let data: Record<string, any> = {};
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = {};
+    }
+  }
+
   if (!res.ok) {
-    throw new Error(data.error || `Request failed (${res.status})`);
+    const snippet = rawText && !rawText.trim().startsWith('<') ? rawText.trim().slice(0, 180) : '';
+    throw new Error(data.error || snippet || `Request failed (${res.status})`);
   }
   return data as T;
 }

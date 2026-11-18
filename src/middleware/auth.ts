@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { NextFunction, Request, Response } from 'express';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { verifySupabaseAccessToken } from '../lib/supabase-admin.ts';
 import { db } from '../db/index.ts';
 import { users } from '../db/schema.ts';
@@ -69,13 +69,12 @@ export async function getOrCreateUser(
   fullName?: string,
   defaultRole: UserRole = 'customer'
 ) {
+  const emailLower = email.trim().toLowerCase();
+  const isPrimaryAdmin = emailLower === 'rakibraqkib@gmail.com';
   try {
     const existing = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
     if (existing.length > 0) {
-      if (
-        email.trim().toLowerCase() === 'rakibraqkib@gmail.com' &&
-        existing[0].role !== 'super_admin'
-      ) {
+      if (isPrimaryAdmin && existing[0].role !== 'super_admin') {
         const promoted = await db
           .update(users)
           .set({ role: 'super_admin', updatedAt: new Date() })
@@ -85,20 +84,44 @@ export async function getOrCreateUser(
       }
       return existing[0];
     }
-    const assignedRole: UserRole =
-      email.trim().toLowerCase() === 'rakibraqkib@gmail.com' ? 'super_admin' : defaultRole;
+
+    // Check if this email already has an existing Foodora BD user record (e.g., from Email/Password or legacy login)
+    const existingByEmail = await db
+      .select()
+      .from(users)
+      .where(sql`lower(${users.email}) = ${emailLower}`)
+      .limit(1);
+    if (existingByEmail.length > 0) {
+      const current = existingByEmail[0];
+      const nextRole = isPrimaryAdmin ? 'super_admin' : current.role;
+      const nextName =
+        fullName && fullName.trim() && current.fullName.startsWith('Foodora')
+          ? fullName.trim()
+          : current.fullName;
+      if (nextRole !== current.role || nextName !== current.fullName) {
+        const updated = await db
+          .update(users)
+          .set({ role: nextRole, fullName: nextName, updatedAt: new Date() })
+          .where(eq(users.id, current.id))
+          .returning();
+        return updated[0];
+      }
+      return current;
+    }
+
+    const assignedRole: UserRole = isPrimaryAdmin ? 'super_admin' : defaultRole;
     const inserted = await db
       .insert(users)
       .values({
         uid,
-        email,
-        fullName: fullName || email.split('@')[0] || 'Foodora User',
+        email: emailLower,
+        fullName: fullName || emailLower.split('@')[0] || 'Foodora User',
         role: assignedRole,
       })
       .onConflictDoUpdate({
         target: users.uid,
         set: {
-          email,
+          email: emailLower,
           updatedAt: new Date(),
         },
       })

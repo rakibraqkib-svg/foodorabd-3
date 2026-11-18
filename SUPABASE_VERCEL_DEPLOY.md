@@ -3,7 +3,7 @@
 This project is a full-stack TypeScript application with:
 - **Frontend**: React 19 + Vite + Tailwind CSS v4 (`src/`)
 - **Node.js Backend**: Express API (`server.ts`)
-- **Vercel Serverless Entry**: `api/index.ts` + `vercel.json` (routes `/api/*` to Node.js serverless and all pages to `dist/index.html`)
+- **Vercel Serverless Entry**: `api/index.mjs` + `vercel.json` (routes `/api/*` to Node.js serverless and all pages to `dist/index.html`)
 - **Authentication**: **Supabase Auth** (`@supabase/supabase-js` Google OAuth + Email/Password)
 - **Database**: **Supabase PostgreSQL** + Drizzle ORM (`src/db/schema.ts`) with automatic table bootstrap & seeding on cold start
 
@@ -35,7 +35,7 @@ This project is a full-stack TypeScript application with:
 3. Vercel automatically deploys with `vercel.json`:
    - **Build Command**: `npm run build`
    - **Output Directory**: `dist`
-   - **Node.js API Serverless Handler**: `api/index.ts` -> `server.ts`
+   - **Node.js API Serverless Handler**: `api/index.mjs` (pre-bundled from `server.ts` during `npm run build`)
 4. On the first `/api/*` request, `ensureSchemaTables()` & `ensureDatabaseSeeded()` automatically initialize all PostgreSQL tables and seed restaurants, dishes, riders, and coupons if empty!
 
 ---

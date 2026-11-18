@@ -60,6 +60,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     async function bootstrapSession() {
       try {
+        if (typeof window !== 'undefined') {
+          const searchParams = new URLSearchParams(window.location.search);
+          const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+          const oauthErrDesc =
+            searchParams.get('error_description') ||
+            hashParams.get('error_description') ||
+            searchParams.get('error') ||
+            hashParams.get('error');
+          if (oauthErrDesc) {
+            setError(formatSupabaseAuthError(oauthErrDesc));
+            window.history.replaceState({}, document.title, window.location.pathname);
+          }
+        }
         // 1. Check active Supabase OAuth / session first
         const { data: sessionData } = await supabase.auth.getSession();
         const supaToken = sessionData.session?.access_token;

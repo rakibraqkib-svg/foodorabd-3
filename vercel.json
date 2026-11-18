@@ -3,9 +3,8 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/index.ts": {
-      "maxDuration": 30,
-      "includeFiles": "src/**"
+    "api/index.mjs": {
+      "maxDuration": 30
     }
   },
   "rewrites": [
