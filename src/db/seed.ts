@@ -39,7 +39,16 @@ export async function ensureDatabaseSeeded(): Promise<void> {
 }
 
 async function runSeedIfEmpty(): Promise<void> {
-  await ensureSchemaTables();
+  try {
+    const existing = await db.select({ total: count() }).from(restaurants);
+    if (Number(existing[0]?.total ?? 0) > 0) {
+      return;
+    }
+  } catch {
+    // Table may not exist yet on a brand-new database; bootstrap schema next.
+    await ensureSchemaTables();
+  }
+
   const existing = await db.select({ total: count() }).from(restaurants);
   if (Number(existing[0]?.total ?? 0) > 0) {
     return;
