@@ -25,6 +25,7 @@ import {
   riders,
   users,
 } from './src/db/schema.ts';
+import { ensureSchemaTables } from './src/db/ensure-schema.ts';
 import { ensureDatabaseSeeded, IMG_BANGLA } from './src/db/seed.ts';
 import {
   getActiveCoupons,
@@ -236,6 +237,16 @@ function verifyPasswordScrypt(password: string, stored: string): boolean {
   return crypto.timingSafeEqual(derived, storedBuf);
 }
 
+function isMissingTableError(err: any): boolean {
+  const code = err?.code || err?.cause?.code;
+  return code === '42P01';
+}
+
+function isUniqueViolationError(err: any): boolean {
+  const code = err?.code || err?.cause?.code;
+  return code === '23505';
+}
+
 app.post('/api/auth/register', async (req, res) => {
   const schema = z.object({
     fullName: z.string().min(2).max(100),
@@ -250,48 +261,78 @@ app.post('/api/auth/register', async (req, res) => {
   const emailLower = parsed.data.email.trim().toLowerCase();
   const fullName = parsed.data.fullName.trim();
 
-  try {
+  const attemptRegister = async () => {
     const existingCred = await db
       .select({ uid: localCredentials.uid })
       .from(localCredentials)
       .where(eq(localCredentials.email, emailLower))
       .limit(1);
     if (existingCred.length > 0) {
-      return res.status(409).json({ error: 'An account with this email already exists. Please sign in.' });
+      return { status: 409 as const, body: { error: 'An account with this email already exists. Please sign in.' } };
     }
 
-    const existingUser = await db.select().from(users).where(eq(users.email, emailLower)).limit(1);
+    const existingUser = await db
+      .select()
+      .from(users)
+      .where(sql`lower(${users.email}) = ${emailLower}`)
+      .limit(1);
     if (existingUser.length > 0) {
-      return res.status(409).json({
-        error: 'An account with this email already exists. Please sign in with Google or your existing credentials.',
-      });
+      return {
+        status: 409 as const,
+        body: {
+          error: 'An account with this email already exists. Please sign in with Google or your existing credentials.',
+        },
+      };
     }
 
     const uid = `usr-${crypto.randomBytes(8).toString('hex')}`;
     const role: UserRole = emailLower === 'rakibraqkib@gmail.com' ? 'super_admin' : 'customer';
-
     const passwordHash = hashPasswordScrypt(parsed.data.password);
-    await db.insert(localCredentials).values({
-      email: emailLower,
-      uid,
-      passwordHash,
-    });
 
-    await db.insert(users).values({
-      uid,
-      email: emailLower,
-      fullName,
-      role,
+    await db.transaction(async (tx) => {
+      await tx.insert(localCredentials).values({
+        email: emailLower,
+        uid,
+        passwordHash,
+      });
+
+      await tx.insert(users).values({
+        uid,
+        email: emailLower,
+        fullName,
+        role,
+      });
     });
 
     const token = signSandboxToken({ uid, email: emailLower, fullName, role, isSandbox: false });
-    res.status(201).json({
-      token,
-      user: { uid, email: emailLower, fullName, role, isSandbox: false },
-    });
+    return {
+      status: 201 as const,
+      body: {
+        token,
+        user: { uid, email: emailLower, fullName, role, isSandbox: false },
+      },
+    };
+  };
+
+  try {
+    let result;
+    try {
+      result = await attemptRegister();
+    } catch (err: any) {
+      if (isMissingTableError(err)) {
+        await ensureSchemaTables();
+        result = await attemptRegister();
+      } else {
+        throw err;
+      }
+    }
+    return res.status(result.status).json(result.body);
   } catch (error: any) {
+    if (isUniqueViolationError(error)) {
+      return res.status(409).json({ error: 'An account with this email already exists. Please sign in.' });
+    }
     console.error('Register failed:', error);
-    res.status(500).json({ error: error.message || 'Registration failed' });
+    return res.status(500).json({ error: error.message || 'Registration failed' });
   }
 });
 
@@ -307,7 +348,7 @@ app.post('/api/auth/login', async (req, res) => {
 
   const emailLower = parsed.data.email.trim().toLowerCase();
 
-  try {
+  const attemptLogin = async () => {
     const credRows = await db
       .select()
       .from(localCredentials)
@@ -315,31 +356,53 @@ app.post('/api/auth/login', async (req, res) => {
       .limit(1);
 
     if (credRows.length === 0) {
-      return res.status(401).json({ error: 'No account found with this email. Please create an account first.' });
+      return {
+        status: 401 as const,
+        body: { error: 'No account found with this email. Please create an account first.' },
+      };
     }
 
     const { uid, passwordHash: storedHash } = credRows[0];
     if (!verifyPasswordScrypt(parsed.data.password, storedHash)) {
-      return res.status(401).json({ error: 'Incorrect password. Please try again.' });
+      return { status: 401 as const, body: { error: 'Incorrect password. Please try again.' } };
     }
 
     const userRows = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
     const dbUser = userRows[0];
     if (dbUser?.status === 'suspended') {
-      return res.status(403).json({ error: 'This account has been suspended by an administrator.' });
+      return { status: 403 as const, body: { error: 'This account has been suspended by an administrator.' } };
     }
 
-    const role: UserRole = (dbUser?.role as UserRole) || (emailLower === 'rakibraqkib@gmail.com' ? 'super_admin' : 'customer');
+    const role: UserRole =
+      (dbUser?.role as UserRole) || (emailLower === 'rakibraqkib@gmail.com' ? 'super_admin' : 'customer');
     const fullName = dbUser?.fullName || emailLower.split('@')[0];
 
     const token = signSandboxToken({ uid, email: emailLower, fullName, role, isSandbox: false });
-    res.json({
-      token,
-      user: { uid, email: emailLower, fullName, role, isSandbox: false },
-    });
+    return {
+      status: 200 as const,
+      body: {
+        token,
+        user: { uid, email: emailLower, fullName, role, isSandbox: false },
+      },
+    };
+  };
+
+  try {
+    let result;
+    try {
+      result = await attemptLogin();
+    } catch (err: any) {
+      if (isMissingTableError(err)) {
+        await ensureSchemaTables();
+        result = await attemptLogin();
+      } else {
+        throw err;
+      }
+    }
+    return res.status(result.status).json(result.body);
   } catch (error: any) {
     console.error('Login failed:', error);
-    res.status(500).json({ error: error.message || 'Sign in failed' });
+    return res.status(500).json({ error: error.message || 'Sign in failed' });
   }
 });
 

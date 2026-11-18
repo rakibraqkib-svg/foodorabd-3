@@ -49,6 +49,22 @@ async function runCreateTablesIfMissing(): Promise<void> {
     return;
   }
 
+  try {
+    await createMissingTables(existingSet);
+  } catch (err: any) {
+    const code = err?.code || err?.cause?.code;
+    if (code === '42501') {
+      console.warn(
+        `Skipping runtime DDL creation (role lacks CREATE on schema public). Missing tables: ${missingTables.join(', ')}`
+      );
+      return;
+    }
+    throw err;
+  }
+}
+
+async function createMissingTables(existingSet: Set<string>): Promise<void> {
+
   if (!existingSet.has('users')) {
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS users (
