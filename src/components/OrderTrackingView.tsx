@@ -4,21 +4,36 @@ import {
   Bike,
   CheckCircle2,
   Clock,
+  Copy,
   CreditCard,
+  Eye,
   LocateFixed,
+  Mail,
   Phone,
   RefreshCw,
+  Send,
   ShieldCheck,
   Star,
   Truck,
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
-import { calculateLiveRiderEta, formatBdt } from '../lib/marketplace-logic';
+import {
+  buildOrderTrackingUrl,
+  calculateLiveRiderEta,
+  formatBdt,
+} from '../lib/marketplace-logic';
 import { DhakaMapPicker } from './DhakaMapPicker';
-import type { Lang, OrderRecord, Restaurant, RiderLiveLocation } from '../types/marketplace';
+import type {
+  Lang,
+  OrderEmailLog,
+  OrderRecord,
+  Restaurant,
+  RiderLiveLocation,
+} from '../types/marketplace';
 
 interface OrderTrackingViewProps {
   orderId: number;
+  initialToken?: string;
   lang: Lang;
   mapsApiKey: string;
   onBack: () => void;
@@ -34,38 +49,63 @@ const STEPS = [
   { key: 'delivered', labelBn: 'ডেলিভারি সম্পন্ন', labelEn: 'Delivered' },
 ];
 
-export function OrderTrackingView({ orderId, lang, mapsApiKey, onBack }: OrderTrackingViewProps) {
+export function OrderTrackingView({
+  orderId,
+  initialToken,
+  lang,
+  mapsApiKey,
+  onBack,
+}: OrderTrackingViewProps) {
   const [order, setOrder] = useState<OrderRecord | null>(null);
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [riderLocation, setRiderLocation] = useState<RiderLiveLocation | null>(null);
-  const [history, setHistory] = useState<Array<{ id: number; status: string; note: string; createdAt: string }>>([]);
+  const [emailLogs, setEmailLogs] = useState<OrderEmailLog[]>([]);
+  const [history, setHistory] = useState<
+    Array<{ id: number; status: string; note: string; createdAt: string }>
+  >([]);
   const [loading, setLoading] = useState(true);
   const [verifying, setVerifying] = useState(false);
+
+  // Email tracking state
+  const [trackEmailInput, setTrackEmailInput] = useState('');
+  const [sendingEmail, setSendingEmail] = useState(false);
+  const [emailNotice, setEmailNotice] = useState<string | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [previewLogId, setPreviewLogId] = useState<number | null>(null);
 
   // Review state
   const [rating, setRating] = useState(5);
   const [comment, setComment] = useState('');
   const [reviewSubmitted, setReviewSubmitted] = useState(false);
-  const [routeEstimate, setRouteEstimate] = useState<{ distanceKm: number; drivingMinutes: number } | null>(null);
+  const [routeEstimate, setRouteEstimate] = useState<{
+    distanceKm: number;
+    drivingMinutes: number;
+  } | null>(null);
 
   const loadOrder = useCallback(async () => {
     try {
+      const qs = initialToken ? `?token=${encodeURIComponent(initialToken)}` : '';
       const res = await apiFetch<{
         order: OrderRecord;
         restaurant: Restaurant | null;
         riderLocation?: RiderLiveLocation | null;
+        emailLogs?: OrderEmailLog[];
         history: Array<{ id: number; status: string; note: string; createdAt: string }>;
-      }>(`/api/orders/${orderId}`);
+      }>(`/api/orders/${orderId}${qs}`);
       setOrder(res.order);
       setRestaurant(res.restaurant);
       setRiderLocation(res.riderLocation ?? null);
+      setEmailLogs(res.emailLogs ?? []);
       setHistory(res.history);
+      if (res.order.customerEmail && !trackEmailInput) {
+        setTrackEmailInput(res.order.customerEmail);
+      }
     } catch (err) {
       console.error(err);
     } finally {
       setLoading(false);
     }
-  }, [orderId]);
+  }, [orderId, initialToken]);
 
   const isTerminal = order?.status === 'delivered' || order?.status === 'cancelled';
 
@@ -106,6 +146,36 @@ export function OrderTrackingView({ orderId, lang, mapsApiKey, onBack }: OrderTr
     }
   };
 
+  const handleSendTrackingEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!order) return;
+    setSendingEmail(true);
+    setEmailNotice(null);
+    try {
+      const res = await apiFetch<{
+        ok: boolean;
+        customerEmail: string;
+        emailLog: OrderEmailLog | null;
+      }>(`/api/orders/${order.id}/send-tracking-email`, {
+        method: 'POST',
+        body: JSON.stringify({
+          email: trackEmailInput.trim() || order.customerEmail,
+          token: initialToken || order.trackingToken || undefined,
+        }),
+      });
+      setEmailNotice(
+        lang === 'bn'
+          ? `অর্ডার ট্র্যাকিং ইমেইল পাঠানো হয়েছে: ${res.customerEmail}`
+          : `Live tracking update dispatched to ${res.customerEmail}`
+      );
+      await loadOrder();
+    } catch (err: unknown) {
+      setEmailNotice(err instanceof Error ? err.message : 'Failed to dispatch tracking email');
+    } finally {
+      setSendingEmail(false);
+    }
+  };
+
   const handleSubmitReview = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!order || !comment.trim()) return;
@@ -132,6 +202,14 @@ export function OrderTrackingView({ orderId, lang, mapsApiKey, onBack }: OrderTr
 
   const currentIdx = STEPS.findIndex((s) => s.key === order.status);
   const isCancelled = order.status === 'cancelled';
+  const shareUrl =
+    typeof window !== 'undefined'
+      ? buildOrderTrackingUrl(
+          window.location.origin,
+          order.id,
+          initialToken || order.trackingToken || undefined
+        )
+      : '';
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-6">
@@ -163,9 +241,7 @@ export function OrderTrackingView({ orderId, lang, mapsApiKey, onBack }: OrderTr
               {order.orderNumber} · {order.deliveryProvider}
               {order.consignmentId ? ` (${order.consignmentId})` : ''}
             </p>
-            <h1 className="text-2xl font-bold text-[#2E3138] mt-1">
-              {order.restaurantName}
-            </h1>
+            <h1 className="text-2xl font-bold text-[#2E3138] mt-1">{order.restaurantName}</h1>
             <p className="text-sm text-neutral-600 mt-1">
               {lang === 'bn' ? 'ডেলিভারি ঠিকানা:' : 'Delivering to:'} {order.deliveryAddress}
             </p>
@@ -254,12 +330,16 @@ export function OrderTrackingView({ orderId, lang, mapsApiKey, onBack }: OrderTr
         )}
       </div>
 
-      {/* Live Map + Receipt */}
+      {/* Live Map + Receipt + Email Tracking */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <div className="lg:col-span-7 bg-white rounded-2xl border border-neutral-200 p-5 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-bold text-[#2E3138] flex items-center gap-2">
-              <span>{lang === 'bn' ? 'লাইভ ডেলিভারি রুট ও রাইডার ট্র্যাকিং' : 'Live Delivery Route & Rider GPS'}</span>
+              <span>
+                {lang === 'bn'
+                  ? 'লাইভ ডেলিভারি রুট ও রাইডার ট্র্যাকিং'
+                  : 'Live Delivery Route & Rider GPS'}
+              </span>
               {riderLocation && !isTerminal && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -300,8 +380,10 @@ export function OrderTrackingView({ orderId, lang, mapsApiKey, onBack }: OrderTr
           {riderLocation ? (
             (() => {
               const goingToRestaurant = order.status === 'rider_assigned' && Boolean(restaurant);
-              const targetLat = goingToRestaurant && restaurant ? restaurant.lat : order.deliveryLat;
-              const targetLng = goingToRestaurant && restaurant ? restaurant.lng : order.deliveryLng;
+              const targetLat =
+                goingToRestaurant && restaurant ? restaurant.lat : order.deliveryLat;
+              const targetLng =
+                goingToRestaurant && restaurant ? restaurant.lng : order.deliveryLng;
               const liveEta = calculateLiveRiderEta(
                 riderLocation.lat,
                 riderLocation.lng,
@@ -343,10 +425,19 @@ export function OrderTrackingView({ orderId, lang, mapsApiKey, onBack }: OrderTr
                     {!isTerminal && (
                       <div className="text-right tabular-nums">
                         <p className="text-xs font-bold text-emerald-800">
-                          {liveEta.remainingKm.toFixed(2)} km {goingToRestaurant ? (lang === 'bn' ? 'রেস্টুরেন্টের পথে' : 'to pickup') : (lang === 'bn' ? 'দূরে' : 'away')}
+                          {liveEta.remainingKm.toFixed(2)} km{' '}
+                          {goingToRestaurant
+                            ? lang === 'bn'
+                              ? 'রেস্টুরেন্টের পথে'
+                              : 'to pickup'
+                            : lang === 'bn'
+                            ? 'দূরে'
+                            : 'away'}
                         </p>
                         <p className="text-[11px] text-neutral-600">
-                          {lang === 'bn' ? `প্রায় ${liveEta.etaMinutes} মিনিট বাকি` : `~${liveEta.etaMinutes} min live ETA`}
+                          {lang === 'bn'
+                            ? `প্রায় ${liveEta.etaMinutes} মিনিট বাকি`
+                            : `~${liveEta.etaMinutes} min live ETA`}
                         </p>
                       </div>
                     )}
@@ -378,7 +469,8 @@ export function OrderTrackingView({ orderId, lang, mapsApiKey, onBack }: OrderTr
             {history.map((h) => (
               <div key={h.id} className="flex items-start justify-between text-xs text-neutral-600">
                 <span>
-                  <strong className="text-[#2E3138] uppercase">{h.status.replace('_', ' ')}</strong> — {h.note}
+                  <strong className="text-[#2E3138] uppercase">{h.status.replace('_', ' ')}</strong> —{' '}
+                  {h.note}
                 </span>
                 <span className="font-mono-nums text-neutral-400 shrink-0 ml-2">
                   {new Date(h.createdAt).toLocaleTimeString()}
@@ -430,8 +522,112 @@ export function OrderTrackingView({ orderId, lang, mapsApiKey, onBack }: OrderTr
             </div>
           </div>
 
+          {/* Email Order Tracking & Notification Log Card */}
+          <div
+            data-testid="email-order-tracking-card"
+            className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-bold text-[#2E3138] flex items-center gap-2">
+                <Mail className="w-4 h-4 text-[#E21B70]" />
+                <span>
+                  {lang === 'bn' ? 'ইমেইলে অর্ডার ট্র্যাকিং' : 'Email Order Tracking'}
+                </span>
+              </h2>
+              {shareUrl && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(shareUrl).catch(() => {});
+                    setCopiedLink(true);
+                    setTimeout(() => setCopiedLink(false), 2000);
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-neutral-200 text-[11px] font-semibold text-neutral-700 hover:border-[#E21B70]"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span>{copiedLink ? 'Copied!' : 'Copy Link'}</span>
+                </button>
+              )}
+            </div>
+
+            <p className="text-xs text-neutral-500">
+              {lang === 'bn'
+                ? 'অর্ডারের প্রতিটি আপডেট ও রাইডারের লাইভ ট্র্যাকিং লিংক এই ইমেইলে পাঠানো হচ্ছে।'
+                : 'Live order updates and your direct tracking link are sent to this email address.'}
+            </p>
+
+            <form onSubmit={handleSendTrackingEmail} className="flex gap-2">
+              <input
+                type="email"
+                required
+                value={trackEmailInput}
+                onChange={(e) => setTrackEmailInput(e.target.value)}
+                placeholder="customer@example.com"
+                className="flex-1 min-w-0 px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+              />
+              <button
+                type="submit"
+                disabled={sendingEmail}
+                className="px-3.5 py-2 rounded-lg bg-[#2E3138] hover:bg-black text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>{sendingEmail ? 'Sending...' : 'Send Email'}</span>
+              </button>
+            </form>
+
+            {emailNotice && (
+              <p className="text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                {emailNotice}
+              </p>
+            )}
+
+            {emailLogs.length > 0 && (
+              <div className="space-y-2 pt-2 border-t border-neutral-100">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
+                  Dispatched Email Updates ({emailLogs.length})
+                </p>
+                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                  {emailLogs.map((log) => (
+                    <div
+                      key={log.id}
+                      className="p-2.5 rounded-xl border border-neutral-200 bg-neutral-50 text-xs space-y-1.5"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-[#2E3138] truncate">{log.subject}</p>
+                          <p className="text-[11px] text-neutral-500 truncate">
+                            To: {log.recipientEmail} · {new Date(log.sentAt).toLocaleTimeString()}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPreviewLogId((prev) => (prev === log.id ? null : log.id))
+                          }
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-neutral-200 bg-white text-[10px] font-semibold text-neutral-700 hover:border-[#E21B70] shrink-0"
+                        >
+                          <Eye className="w-3 h-3" />
+                          <span>{previewLogId === log.id ? 'Hide' : 'Preview'}</span>
+                        </button>
+                      </div>
+                      {previewLogId === log.id && log.htmlPreview && (
+                        <div
+                          className="p-3 rounded-lg bg-white border border-neutral-200 text-xs overflow-auto max-h-52"
+                          dangerouslySetInnerHTML={{ __html: log.htmlPreview }}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           {order.status === 'delivered' && !reviewSubmitted && (
-            <form onSubmit={handleSubmitReview} className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
+            <form
+              onSubmit={handleSubmitReview}
+              className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3"
+            >
               <h2 className="text-sm font-bold text-[#2E3138]">
                 {lang === 'bn' ? 'রেস্টুরেন্টকে রেটিং দিন' : 'Rate Your Experience'}
               </h2>
@@ -471,7 +667,9 @@ export function OrderTrackingView({ orderId, lang, mapsApiKey, onBack }: OrderTr
 
           {reviewSubmitted && (
             <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-800">
-              {lang === 'bn' ? 'ধন্যবাদ! আপনার রিভিউ প্রকাশিত হয়েছে।' : 'Thank you! Your verified review has been published.'}
+              {lang === 'bn'
+                ? 'ধন্যবাদ! আপনার রিভিউ প্রকাশিত হয়েছে।'
+                : 'Thank you! Your verified review has been published.'}
             </div>
           )}
         </div>

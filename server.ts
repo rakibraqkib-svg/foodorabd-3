@@ -65,6 +65,7 @@ import {
   canActorModifyUserAccount,
   canTransitionOrderStatus,
   DeliveryMode,
+  doesEmailMatchOrder,
   estimateDeliveryFeeAndEta,
   evaluateCoupon,
   isProtectedSuperAdminEmail,
@@ -85,6 +86,7 @@ import {
   searchMealDbDishes,
   searchOsmPlaces,
 } from './src/services/free-apis.ts';
+import { sendAndLogOrderTrackingEmail } from './src/services/order-email.ts';
 import {
   getGatewayAvailability,
   initiatePaymentSession,
@@ -1289,6 +1291,45 @@ app.get('/api/customer/orders', requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
+app.get('/api/orders/track-by-email', async (req, res) => {
+  const email = String(req.query.email || '').trim().toLowerCase();
+  const orderNumber = String(req.query.orderNumber || '').trim().toUpperCase();
+  if (!email || !email.includes('@') || !orderNumber) {
+    return res.status(400).json({ error: 'Please provide both your email address and order number.' });
+  }
+
+  try {
+    const matched = await db
+      .select()
+      .from(orders)
+      .where(sql`upper(${orders.orderNumber}) = ${orderNumber}`)
+      .limit(1);
+
+    if (matched.length === 0) {
+      return res.status(404).json({ error: `Order ${orderNumber} was not found.` });
+    }
+    const ord = matched[0];
+    let matches = doesEmailMatchOrder(ord.customerEmail, email);
+    if (!matches && ord.customerUid) {
+      const custUsers = await db.select().from(users).where(eq(users.uid, ord.customerUid)).limit(1);
+      if (custUsers[0] && doesEmailMatchOrder(custUsers[0].email, email)) {
+        matches = true;
+      }
+    }
+    if (!matches) {
+      return res.status(403).json({
+        error: 'The email address does not match the tracking email on this order.',
+      });
+    }
+
+    const detail = await getOrderById(ord.id);
+    if (!detail) return res.status(404).json({ error: 'Order not found' });
+    return res.json(detail);
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message || 'Failed to look up order by email' });
+  }
+});
+
 app.get('/api/orders/:id', optionalAuth, async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
@@ -1297,9 +1338,99 @@ app.get('/api/orders/:id', optionalAuth, async (req: AuthRequest, res) => {
   try {
     const detail = await getOrderById(id);
     if (!detail) return res.status(404).json({ error: 'Order not found' });
+    const providedToken = String(req.query.token || '').trim();
+    const isAdmin = req.user?.role === 'super_admin' || req.user?.role === 'admin';
+    const isOwner = Boolean(req.user?.uid && req.user.uid === detail.order.customerUid);
+    const hasTokenAccess = Boolean(
+      providedToken && detail.order.trackingToken && providedToken === detail.order.trackingToken
+    );
+    if (!isAdmin && !isOwner && !hasTokenAccess) {
+      return res.json({
+        ...detail,
+        order: {
+          ...detail.order,
+          trackingToken: '',
+        },
+        emailLogs: [],
+      });
+    }
     res.json(detail);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/orders/:id/send-tracking-email', optionalAuth, async (req: AuthRequest, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ error: 'Invalid order ID' });
+  }
+  const schema = z.object({
+    email: z.string().trim().email().optional(),
+    token: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Please enter a valid email address.' });
+  }
+
+  try {
+    const orderRows = await db.select().from(orders).where(eq(orders.id, id)).limit(1);
+    if (orderRows.length === 0) return res.status(404).json({ error: 'Order not found' });
+    let order = orderRows[0];
+
+    const isAdmin = req.user?.role === 'super_admin' || req.user?.role === 'admin';
+    const isOwner = Boolean(req.user?.uid && req.user.uid === order.customerUid);
+    const hasToken = Boolean(
+      parsed.data.token && order.trackingToken && parsed.data.token.trim() === order.trackingToken
+    );
+
+    if (!isAdmin && !isOwner && !hasToken) {
+      return res.status(403).json({ error: 'Sign in or use your order tracking token to email updates.' });
+    }
+
+    const targetEmail = (parsed.data.email || order.customerEmail || req.user?.email || '')
+      .trim()
+      .toLowerCase();
+    if (!targetEmail || !targetEmail.includes('@')) {
+      return res.status(400).json({ error: 'Please provide an email address for tracking updates.' });
+    }
+
+    const nextToken = order.trackingToken || crypto.randomBytes(12).toString('hex');
+    if (targetEmail !== order.customerEmail || nextToken !== order.trackingToken) {
+      const upd = await db
+        .update(orders)
+        .set({ customerEmail: targetEmail, trackingToken: nextToken, updatedAt: new Date() })
+        .where(eq(orders.id, order.id))
+        .returning();
+      order = upd[0] || order;
+    }
+
+    const emailLog = await sendAndLogOrderTrackingEmail({
+      origin: getRequestOrigin(req),
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      trackingToken: nextToken,
+      customerName: order.customerName,
+      customerEmail: targetEmail,
+      restaurantName: order.restaurantName,
+      deliveryArea: order.deliveryArea,
+      totalAmount: order.totalAmount,
+      paymentMethod: order.paymentMethod,
+      status: order.status,
+      statusEvent: order.status,
+      statusNote: `Live tracking update requested (${order.status.replace(/_/g, ' ')})`,
+      riderName: order.riderName,
+    });
+
+    return res.json({
+      ok: true,
+      customerEmail: targetEmail,
+      emailLog,
+      trackingUrl: emailLog?.trackingUrl || '',
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message || 'Failed to send tracking email' });
   }
 });
 
@@ -1309,6 +1440,7 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
     restaurantId: z.number().int().positive(),
     customerName: z.string().min(2),
     customerPhone: z.string().min(6),
+    customerEmail: z.string().trim().email().optional().or(z.literal('')),
     deliveryAddress: z.string().min(5),
     deliveryArea: z.string().min(2),
     deliveryLat: z.number(),
@@ -1336,6 +1468,13 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
   }
 
   const input = parsed.data;
+  const resolvedCustomerEmail = (
+    input.customerEmail?.trim() ||
+    (req.user!.email && req.user!.email.includes('@') ? req.user!.email : '')
+  )
+    .trim()
+    .toLowerCase();
+  const trackingToken = crypto.randomBytes(12).toString('hex');
   const normalizedMethod = normalizeGatewayCode(input.paymentMethod);
 
   try {
@@ -1528,6 +1667,8 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
           customerUid: req.user!.uid,
           customerName: input.customerName,
           customerPhone: input.customerPhone,
+          customerEmail: resolvedCustomerEmail,
+          trackingToken,
           restaurantId: rest.id,
           restaurantName: rest.name,
           deliveryAddress: input.deliveryAddress,
@@ -1588,7 +1729,25 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
       return { order: newOrder, paymentSession: paymentInit, deliveryDispatch };
     });
 
-    res.status(201).json(created);
+    const emailLog = resolvedCustomerEmail
+      ? await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: created.order.id,
+          orderNumber: created.order.orderNumber,
+          trackingToken: created.order.trackingToken,
+          customerName: created.order.customerName,
+          customerEmail: resolvedCustomerEmail,
+          restaurantName: created.order.restaurantName,
+          deliveryArea: created.order.deliveryArea,
+          totalAmount: created.order.totalAmount,
+          paymentMethod: created.order.paymentMethod,
+          status: created.order.status,
+          statusEvent: 'confirmed',
+          statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`,
+        })
+      : null;
+
+    res.status(201).json({ ...created, emailLog });
   } catch (error: any) {
     console.error('Order creation failed:', error);
     res.status(400).json({ error: error.message || 'Could not place order' });
@@ -2533,6 +2692,25 @@ app.patch(
         relatedOrderId: order.id,
       });
 
+      if (updated[0].customerEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: updated[0].id,
+          orderNumber: updated[0].orderNumber,
+          trackingToken: updated[0].trackingToken,
+          customerName: updated[0].customerName,
+          customerEmail: updated[0].customerEmail,
+          restaurantName: updated[0].restaurantName,
+          deliveryArea: updated[0].deliveryArea,
+          totalAmount: updated[0].totalAmount,
+          paymentMethod: updated[0].paymentMethod,
+          status: updated[0].status,
+          statusEvent: parsed.data.status,
+          statusNote: parsed.data.note || `${order.restaurantName} updated order status`,
+          riderName: updated[0].riderName,
+        });
+      }
+
       res.json({ order: updated[0] });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -2586,29 +2764,187 @@ app.post(
 
 // ---------- Delivery Rider Routes ----------
 
+// Open public Rider Job Application & instant activation anywhere in Bangladesh
+app.post('/api/riders/apply', async (req, res) => {
+  const schema = z.object({
+    fullName: z.string().trim().min(2).max(100),
+    phone: z.string().trim().min(6).max(30),
+    email: z.string().trim().email(),
+    password: z.string().min(6).max(128).optional().or(z.literal('')),
+    vehicleType: z.string().trim().min(2).max(40).default('Motorbike'),
+    zone: z.string().trim().min(2).max(120),
+    nidNumber: z.string().trim().min(4).max(50),
+    lat: z.number().min(-90).max(90).optional(),
+    lng: z.number().min(-180).max(180).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Please complete all rider job application fields.' });
+  }
+
+  const emailLower = parsed.data.email.trim().toLowerCase();
+  if (isProtectedSuperAdminEmail(emailLower)) {
+    return res.status(409).json({
+      error: 'This email belongs to a Super Admin account. Please use a rider email.',
+    });
+  }
+
+  try {
+    const existingUsers = await db
+      .select()
+      .from(users)
+      .where(sql`lower(${users.email}) = ${emailLower}`)
+      .limit(1);
+
+    let uid = existingUsers[0]?.uid || '';
+    if (existingUsers[0]) {
+      if (existingUsers[0].status === 'suspended') {
+        return res.status(403).json({ error: 'This account has been suspended by an administrator.' });
+      }
+      if (['admin', 'super_admin'].includes(existingUsers[0].role)) {
+        return res.status(409).json({
+          error: 'This email belongs to an Admin account. Please use a separate rider email.',
+        });
+      }
+      const credRows = await db
+        .select()
+        .from(localCredentials)
+        .where(eq(localCredentials.email, emailLower))
+        .limit(1);
+      if (credRows.length > 0 && parsed.data.password) {
+        if (!verifyPasswordScrypt(parsed.data.password, credRows[0].passwordHash)) {
+          return res.status(401).json({
+            error: 'An account with this email already exists. Enter your matching password or leave password blank if applying with Google/existing session.',
+          });
+        }
+      }
+      await db
+        .update(users)
+        .set({
+          fullName: parsed.data.fullName,
+          phone: parsed.data.phone,
+          role: existingUsers[0].role === 'restaurant_owner' ? 'rider' : 'rider',
+          updatedAt: new Date(),
+        })
+        .where(eq(users.uid, uid));
+    } else {
+      uid = `rdr-${crypto.randomBytes(8).toString('hex')}`;
+      await db.insert(users).values({
+        uid,
+        email: emailLower,
+        fullName: parsed.data.fullName,
+        phone: parsed.data.phone,
+        role: 'rider',
+      });
+      if (parsed.data.password && parsed.data.password.length >= 6) {
+        await db
+          .insert(localCredentials)
+          .values({
+            email: emailLower,
+            uid,
+            passwordHash: hashPasswordScrypt(parsed.data.password),
+          })
+          .onConflictDoNothing();
+      }
+    }
+
+    const startLat = Number.isFinite(parsed.data.lat) ? Math.round((parsed.data.lat as number) * 1e6) / 1e6 : 23.7949;
+    const startLng = Number.isFinite(parsed.data.lng) ? Math.round((parsed.data.lng as number) * 1e6) / 1e6 : 90.4144;
+
+    const inserted = await db
+      .insert(riders)
+      .values({
+        uid,
+        fullName: parsed.data.fullName,
+        phone: parsed.data.phone,
+        email: emailLower,
+        vehicleType: parsed.data.vehicleType,
+        zone: parsed.data.zone,
+        nidNumber: parsed.data.nidNumber,
+        currentLat: startLat,
+        currentLng: startLng,
+        locationUpdatedAt: new Date(),
+        isAvailable: true,
+        status: 'approved',
+      })
+      .onConflictDoUpdate({
+        target: riders.uid,
+        set: {
+          fullName: parsed.data.fullName,
+          phone: parsed.data.phone,
+          email: emailLower,
+          vehicleType: parsed.data.vehicleType,
+          zone: parsed.data.zone,
+          nidNumber: parsed.data.nidNumber,
+          currentLat: startLat,
+          currentLng: startLng,
+          locationUpdatedAt: new Date(),
+          isAvailable: true,
+          status: 'approved',
+        },
+      })
+      .returning();
+
+    await db.insert(notifications).values({
+      recipientUid: 'demo-admin-uid',
+      roleTarget: 'super_admin',
+      title: 'New Delivery Rider Joined',
+      message: `${parsed.data.fullName} (${parsed.data.vehicleType}) joined for ${parsed.data.zone}, Bangladesh.`,
+      type: 'system',
+    });
+
+    const userPayload = {
+      uid,
+      email: emailLower,
+      fullName: parsed.data.fullName,
+      role: 'rider' as UserRole,
+      isSandbox: false,
+    };
+    const token = signSandboxToken(userPayload);
+
+    return res.status(201).json({
+      token,
+      user: userPayload,
+      rider: inserted[0],
+    });
+  } catch (error: any) {
+    console.error('Rider application failed:', error);
+    return res.status(500).json({ error: error.message || 'Could not submit rider application' });
+  }
+});
+
 app.post('/api/riders/register', requireAuth, async (req: AuthRequest, res) => {
   const schema = z.object({
-    fullName: z.string().min(2),
-    phone: z.string().min(6),
-    email: z.string().email(),
-    vehicleType: z.enum(['Motorbike', 'Bicycle', 'Scooter']),
-    zone: z.string().min(2),
-    nidNumber: z.string().min(5),
+    fullName: z.string().trim().min(2).max(100),
+    phone: z.string().trim().min(6).max(30),
+    email: z.string().trim().email(),
+    vehicleType: z.string().trim().min(2).max(40),
+    zone: z.string().trim().min(2).max(120),
+    nidNumber: z.string().trim().min(4).max(50),
+    lat: z.number().min(-90).max(90).optional(),
+    lng: z.number().min(-180).max(180).optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid rider registration data' });
 
   try {
+    const startLat = Number.isFinite(parsed.data.lat) ? Math.round((parsed.data.lat as number) * 1e6) / 1e6 : 23.7949;
+    const startLng = Number.isFinite(parsed.data.lng) ? Math.round((parsed.data.lng as number) * 1e6) / 1e6 : 90.4144;
+
     const inserted = await db
       .insert(riders)
       .values({
         uid: req.user!.uid,
         fullName: parsed.data.fullName,
         phone: parsed.data.phone,
-        email: parsed.data.email,
+        email: parsed.data.email.trim().toLowerCase(),
         vehicleType: parsed.data.vehicleType,
         zone: parsed.data.zone,
         nidNumber: parsed.data.nidNumber,
+        currentLat: startLat,
+        currentLng: startLng,
+        locationUpdatedAt: new Date(),
+        isAvailable: true,
         status: 'approved',
       })
       .onConflictDoUpdate({
@@ -2618,14 +2954,27 @@ app.post('/api/riders/register', requireAuth, async (req: AuthRequest, res) => {
           phone: parsed.data.phone,
           vehicleType: parsed.data.vehicleType,
           zone: parsed.data.zone,
+          nidNumber: parsed.data.nidNumber,
+          currentLat: startLat,
+          currentLng: startLng,
+          locationUpdatedAt: new Date(),
         },
       })
       .returning();
 
+    let nextUser = req.user!;
     if (req.user!.role === 'customer') {
-      await db.update(users).set({ role: 'rider' }).where(eq(users.uid, req.user!.uid));
+      await db.update(users).set({ role: 'rider', fullName: parsed.data.fullName }).where(eq(users.uid, req.user!.uid));
+      nextUser = { ...req.user!, role: 'rider', fullName: parsed.data.fullName };
     }
-    res.status(201).json({ rider: inserted[0] });
+    const freshToken = signSandboxToken({
+      uid: nextUser.uid,
+      email: nextUser.email,
+      fullName: nextUser.fullName,
+      role: nextUser.role,
+      isSandbox: nextUser.isSandbox,
+    });
+    res.status(201).json({ rider: inserted[0], token: freshToken, user: nextUser });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -2748,6 +3097,25 @@ app.post(
         relatedOrderId: existingOrder.id,
       });
 
+      if (updated[0].customerEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: updated[0].id,
+          orderNumber: updated[0].orderNumber,
+          trackingToken: updated[0].trackingToken,
+          customerName: updated[0].customerName,
+          customerEmail: updated[0].customerEmail,
+          restaurantName: updated[0].restaurantName,
+          deliveryArea: updated[0].deliveryArea,
+          totalAmount: updated[0].totalAmount,
+          paymentMethod: updated[0].paymentMethod,
+          status: updated[0].status,
+          statusEvent: 'rider_assigned',
+          statusNote: `Rider ${riderName} accepted delivery assignment`,
+          riderName,
+        });
+      }
+
       res.json({ order: updated[0] });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -2831,6 +3199,25 @@ app.patch(
         }
       }
 
+      if (updated[0].customerEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: updated[0].id,
+          orderNumber: updated[0].orderNumber,
+          trackingToken: updated[0].trackingToken,
+          customerName: updated[0].customerName,
+          customerEmail: updated[0].customerEmail,
+          restaurantName: updated[0].restaurantName,
+          deliveryArea: updated[0].deliveryArea,
+          totalAmount: updated[0].totalAmount,
+          paymentMethod: updated[0].paymentMethod,
+          status: updated[0].status,
+          statusEvent: parsed.data.status,
+          statusNote: statusLabels[parsed.data.status] || 'Delivery Update',
+          riderName: updated[0].riderName,
+        });
+      }
+
       res.json({ order: updated[0] });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -2911,6 +3298,8 @@ app.post(
       cuisine: z.string().min(2),
       area: z.string().min(2),
       address: z.string().min(3),
+      lat: z.number().min(-90).max(90).optional(),
+      lng: z.number().min(-180).max(180).optional(),
       phone: z.string().default('+8801710000000'),
       email: z.string().email().default('partner@foodora.bd'),
       description: z.string().default(''),
@@ -2944,12 +3333,12 @@ app.post(
           name: parsed.data.name,
           nameBn: parsed.data.nameBn,
           slug,
-          description: parsed.data.description || `${parsed.data.name} in ${parsed.data.area}, Dhaka.`,
+          description: parsed.data.description || `${parsed.data.name} in ${parsed.data.area}, Bangladesh.`,
           cuisine: parsed.data.cuisine,
           area: parsed.data.area,
           address: parsed.data.address,
-          lat: 23.7937,
-          lng: 90.4066,
+          lat: Number.isFinite(parsed.data.lat) ? (parsed.data.lat as number) : 23.7937,
+          lng: Number.isFinite(parsed.data.lng) ? (parsed.data.lng as number) : 90.4066,
           phone: parsed.data.phone,
           email: parsed.data.email,
           logoUrl: parsed.data.logoUrl?.trim() || '',
@@ -2997,6 +3386,8 @@ app.patch(
       cuisine: z.string().min(2).optional(),
       area: z.string().min(2).optional(),
       address: z.string().min(3).optional(),
+      lat: z.number().min(-90).max(90).optional(),
+      lng: z.number().min(-180).max(180).optional(),
       description: z.string().optional(),
       logoUrl: z.string().optional(),
       coverUrl: z.string().optional(),
@@ -3029,6 +3420,8 @@ app.patch(
           cuisine: parsed.data.cuisine ?? current.cuisine,
           area: parsed.data.area ?? current.area,
           address: parsed.data.address ?? current.address,
+          lat: parsed.data.lat ?? current.lat,
+          lng: parsed.data.lng ?? current.lng,
           description: parsed.data.description ?? current.description,
           logoUrl: parsed.data.logoUrl !== undefined ? parsed.data.logoUrl.trim() : current.logoUrl,
           coverUrl: parsed.data.coverUrl || current.coverUrl,
@@ -3333,6 +3726,26 @@ app.patch(
         targetId: String(orderId),
         details: JSON.stringify(parsed.data),
       });
+
+      if (updated[0].customerEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: updated[0].id,
+          orderNumber: updated[0].orderNumber,
+          trackingToken: updated[0].trackingToken,
+          customerName: updated[0].customerName,
+          customerEmail: updated[0].customerEmail,
+          restaurantName: updated[0].restaurantName,
+          deliveryArea: updated[0].deliveryArea,
+          totalAmount: updated[0].totalAmount,
+          paymentMethod: updated[0].paymentMethod,
+          status: updated[0].status,
+          statusEvent: parsed.data.status,
+          statusNote:
+            parsed.data.note || `Order update: ${parsed.data.status.replace(/_/g, ' ')}`,
+          riderName: updated[0].riderName,
+        });
+      }
 
       res.json({ order: updated[0] });
     } catch (error: any) {
@@ -3663,32 +4076,54 @@ app.patch(
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid rider ID' });
 
+    const schema = z.object({
+      status: z.enum(['pending', 'approved', 'suspended']).optional(),
+      isAvailable: z.boolean().optional(),
+      zone: z.string().trim().min(2).max(120).optional(),
+      vehicleType: z.string().trim().min(2).max(40).optional(),
+      currentLat: z.number().min(-90).max(90).optional(),
+      currentLng: z.number().min(-180).max(180).optional(),
+    });
+    const parsed = schema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid rider update payload' });
+    }
+
     try {
       const existing = await db.select().from(riders).where(eq(riders.id, id)).limit(1);
       if (existing.length === 0) return res.status(404).json({ error: 'Rider not found' });
       const cur = existing[0];
 
+      const hasCoords =
+        typeof parsed.data.currentLat === 'number' || typeof parsed.data.currentLng === 'number';
+
       const updated = await db
         .update(riders)
         .set({
-          status:
-            typeof req.body.status === 'string' &&
-            ['pending', 'approved', 'suspended'].includes(req.body.status)
-              ? req.body.status
-              : cur.status,
+          status: parsed.data.status ?? cur.status,
           isAvailable:
-            typeof req.body.isAvailable === 'boolean' ? req.body.isAvailable : cur.isAvailable,
-          zone: typeof req.body.zone === 'string' && req.body.zone.trim() ? req.body.zone.trim() : cur.zone,
+            typeof parsed.data.isAvailable === 'boolean' ? parsed.data.isAvailable : cur.isAvailable,
+          zone: parsed.data.zone ? parsed.data.zone : cur.zone,
+          vehicleType: parsed.data.vehicleType ? parsed.data.vehicleType : cur.vehicleType,
+          currentLat:
+            typeof parsed.data.currentLat === 'number'
+              ? Math.round(parsed.data.currentLat * 1e6) / 1e6
+              : cur.currentLat,
+          currentLng:
+            typeof parsed.data.currentLng === 'number'
+              ? Math.round(parsed.data.currentLng * 1e6) / 1e6
+              : cur.currentLng,
+          locationUpdatedAt: hasCoords ? new Date() : cur.locationUpdatedAt,
         })
         .where(eq(riders.id, id))
         .returning();
 
       await db.insert(auditLogs).values({
         actorUid: req.user!.uid,
-        action: 'rider_updated',
+        action: hasCoords ? 'rider_gps_override' : 'rider_updated',
         targetType: 'rider',
         targetId: String(id),
-        details: JSON.stringify(req.body),
+        details: JSON.stringify(parsed.data),
       });
 
       res.json({ rider: updated[0] });

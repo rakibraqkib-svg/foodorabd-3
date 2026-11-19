@@ -135,6 +135,8 @@ export interface OrderRecord {
   customerUid: string;
   customerName: string;
   customerPhone: string;
+  customerEmail?: string;
+  trackingToken?: string;
   restaurantId: number;
   restaurantName: string;
   deliveryAddress: string;
@@ -213,6 +215,7 @@ export interface RiderRecord {
   phone: string;
   email: string;
   vehicleType: string;
+  nidNumber?: string;
   zone: string;
   isAvailable: boolean;
   status: string;
@@ -221,6 +224,20 @@ export interface RiderRecord {
   locationUpdatedAt?: string;
   totalDeliveries: number;
   totalEarnings: number;
+}
+
+export interface OrderEmailLog {
+  id: number;
+  orderId: number;
+  orderNumber: string;
+  recipientEmail: string;
+  subject: string;
+  trackingUrl: string;
+  statusEvent: string;
+  deliveryProvider: string;
+  providerStatus: string;
+  htmlPreview: string;
+  sentAt: string;
 }
 
 export interface PublicPaymentGateway {

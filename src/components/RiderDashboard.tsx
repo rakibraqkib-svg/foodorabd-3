@@ -10,16 +10,21 @@ import {
   Radio,
   Wallet,
 } from 'lucide-react';
-import { apiFetch } from '../lib/api';
-import { DHAKA_AREAS } from '../lib/i18n';
-import { advanceRiderAlongRoute, calculateLiveRiderEta, formatBdt } from '../lib/marketplace-logic';
+import { apiFetch, setAuthToken } from '../lib/api';
+import { BANGLADESH_AREAS } from '../lib/i18n';
+import {
+  advanceRiderAlongRoute,
+  calculateLiveRiderEta,
+  formatBdt,
+} from '../lib/marketplace-logic';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import type { AppUser, Lang, OrderRecord, RiderRecord } from '../types/marketplace';
 
 interface RiderDashboardProps {
-  user: AppUser;
+  user: AppUser | null;
   lang: Lang;
   mapsApiKey: string;
+  initialOnboarding?: boolean;
   onRefreshUser: () => Promise<void>;
   onTrackOrder: (orderId: number) => void;
   onBack: () => void;
@@ -29,6 +34,7 @@ export function RiderDashboard({
   user,
   lang,
   mapsApiKey,
+  initialOnboarding = false,
   onRefreshUser,
   onTrackOrder,
   onBack,
@@ -37,29 +43,45 @@ export function RiderDashboard({
   const [availableOrders, setAvailableOrders] = useState<OrderRecord[]>([]);
   const [assignedOrders, setAssignedOrders] = useState<OrderRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showJobForm, setShowJobForm] = useState(initialOnboarding);
 
   // Live GPS & availability state
   const [sharingGps, setSharingGps] = useState(false);
   const [syncingLoc, setSyncingLoc] = useState(false);
   const [gpsStatusMsg, setGpsStatusMsg] = useState<string | null>(null);
-  const [selectedSyncZone, setSelectedSyncZone] = useState<string>(DHAKA_AREAS[0].name);
+  const [selectedSyncZone, setSelectedSyncZone] = useState<string>(BANGLADESH_AREAS[0].name);
+  const [customSyncZone, setCustomSyncZone] = useState<string>('');
   const watchIdRef = useRef<number | null>(null);
 
-  // Onboarding form
-  const [fullName, setFullName] = useState(user.fullName);
+  // Onboarding / Public Job Application form
+  const [fullName, setFullName] = useState(user?.isSandbox ? '' : user?.fullName || '');
   const [phone, setPhone] = useState('+8801811000003');
-  const [email, setEmail] = useState(user.email || 'rider@foodora.bd');
-  const [vehicleType, setVehicleType] = useState<'Motorbike' | 'Bicycle' | 'Scooter'>('Motorbike');
-  const [zone, setZone] = useState(DHAKA_AREAS[0].name);
+  const [email, setEmail] = useState(
+    user && !user.isSandbox && user.email ? user.email : ''
+  );
+  const [password, setPassword] = useState('');
+  const [vehicleType, setVehicleType] = useState('Motorbike');
+  const [zone, setZone] = useState(BANGLADESH_AREAS[0].name);
+  const [customZone, setCustomZone] = useState('');
   const [nidNumber, setNidNumber] = useState('1995261199887');
+  const [applyCoords, setApplyCoords] = useState({
+    lat: BANGLADESH_AREAS[0].lat,
+    lng: BANGLADESH_AREAS[0].lng,
+  });
   const [registering, setRegistering] = useState(false);
+  const [registerError, setRegisterError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setShowJobForm(initialOnboarding);
+  }, [initialOnboarding]);
 
   const canAccessRiderApi =
-    user.role === 'rider' || user.role === 'admin' || user.role === 'super_admin';
+    Boolean(user) &&
+    (user!.role === 'rider' || user!.role === 'admin' || user!.role === 'super_admin');
 
   const loadWorkspace = useCallback(
     async (silent = false) => {
-      if (!canAccessRiderApi) {
+      if (!canAccessRiderApi || showJobForm) {
         setLoading(false);
         return;
       }
@@ -79,7 +101,7 @@ export function RiderDashboard({
         if (!silent) setLoading(false);
       }
     },
-    [canAccessRiderApi]
+    [canAccessRiderApi, showJobForm]
   );
 
   useEffect(() => {
@@ -156,17 +178,53 @@ export function RiderDashboard({
     };
   }, [sharingGps, persistRiderLocation, lang]);
 
+  const resolvedApplyZone = zone === '__custom__' ? customZone.trim() : zone;
+
   const handleRegisterRider = async (e: React.FormEvent) => {
     e.preventDefault();
     setRegistering(true);
+    setRegisterError(null);
     try {
-      const res = await apiFetch<{ rider: RiderRecord }>('/api/riders/register', {
-        method: 'POST',
-        body: JSON.stringify({ fullName, phone, email, vehicleType, zone, nidNumber }),
-      });
-      setRider(res.rider);
+      const targetZone = resolvedApplyZone || 'Bangladesh';
+      if (user && !user.isSandbox && user.role !== 'admin' && user.role !== 'super_admin') {
+        const res = await apiFetch<{ rider: RiderRecord; token?: string }>('/api/riders/register', {
+          method: 'POST',
+          body: JSON.stringify({
+            fullName: fullName.trim(),
+            phone: phone.trim(),
+            email: (email || user.email).trim(),
+            vehicleType,
+            zone: targetZone,
+            nidNumber: nidNumber.trim(),
+            lat: applyCoords.lat,
+            lng: applyCoords.lng,
+          }),
+        });
+        if (res.token) setAuthToken(res.token);
+        setRider(res.rider);
+      } else {
+        const res = await apiFetch<{ token: string; rider: RiderRecord }>('/api/riders/apply', {
+          method: 'POST',
+          body: JSON.stringify({
+            fullName: fullName.trim(),
+            phone: phone.trim(),
+            email: email.trim(),
+            password: password.trim() || undefined,
+            vehicleType,
+            zone: targetZone,
+            nidNumber: nidNumber.trim(),
+            lat: applyCoords.lat,
+            lng: applyCoords.lng,
+          }),
+        });
+        setAuthToken(res.token);
+        setRider(res.rider);
+      }
+      setShowJobForm(false);
       await onRefreshUser();
       await loadWorkspace(false);
+    } catch (err: unknown) {
+      setRegisterError(err instanceof Error ? err.message : 'Rider registration failed');
     } finally {
       setRegistering(false);
     }
@@ -177,7 +235,10 @@ export function RiderDashboard({
     await loadWorkspace(true);
   };
 
-  const handleUpdateStatus = async (orderId: number, status: 'picked_up' | 'on_the_way' | 'delivered') => {
+  const handleUpdateStatus = async (
+    orderId: number,
+    status: 'picked_up' | 'on_the_way' | 'delivered'
+  ) => {
     await apiFetch(`/api/rider/orders/${orderId}/status`, {
       method: 'PATCH',
       body: JSON.stringify({ status }),
@@ -221,29 +282,56 @@ export function RiderDashboard({
     lng: rider?.currentLng ?? 90.4043,
   };
 
+  const showOnboardingView = showJobForm || (!rider && !canAccessRiderApi);
+
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-      <button
-        type="button"
-        onClick={onBack}
-        className="inline-flex items-center gap-2 text-sm font-medium text-neutral-600 hover:text-[#E21B70]"
-      >
-        <ArrowLeft className="w-4 h-4" />
-        <span>{lang === 'bn' ? 'মার্কেটপ্লেসে ফিরুন' : 'Back to Storefront'}</span>
-      </button>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={onBack}
+          className="inline-flex items-center gap-2 text-sm font-medium text-neutral-600 hover:text-[#E21B70]"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>{lang === 'bn' ? 'মার্কেটপ্লেসে ফিরুন' : 'Back to Storefront'}</span>
+        </button>
 
-      {!rider && !canAccessRiderApi ? (
+        {canAccessRiderApi && (
+          <button
+            type="button"
+            onClick={() => setShowJobForm((v) => !v)}
+            className="px-3 py-1.5 rounded-lg border border-neutral-200 bg-white text-xs font-semibold text-[#2E3138] hover:border-[#E21B70]"
+          >
+            {showOnboardingView
+              ? lang === 'bn'
+                ? 'রাইডার ড্যাশবোর্ড দেখুন'
+                : 'View Active Rider Dashboard'
+              : lang === 'bn'
+              ? 'নতুন রাইডার জব আবেদন করুন'
+              : 'Open Rider Job Form'}
+          </button>
+        )}
+      </div>
+
+      {showOnboardingView ? (
         <form
           onSubmit={handleRegisterRider}
-          className="bg-white rounded-2xl border border-neutral-200 p-6 max-w-xl mx-auto space-y-4"
+          className="bg-white rounded-2xl border border-neutral-200 p-6 max-w-2xl mx-auto space-y-4"
         >
           <div>
             <p className="text-xs font-semibold uppercase text-[#E21B70]">
-              {lang === 'bn' ? 'ডেলিভারি পার্টনার নিবন্ধন' : 'Delivery Rider Onboarding'}
+              {lang === 'bn' ? 'রাইডার জব — সারা বাংলাদেশ' : 'Delivery Rider Job — All Bangladesh'}
             </p>
             <h1 className="text-2xl font-bold text-[#2E3138] mt-1">
-              {lang === 'bn' ? 'Foodora BD রাইডার হিসেবে যোগ দিন' : 'Join Foodora BD Delivery Fleet'}
+              {lang === 'bn'
+                ? 'Foodora BD ডেলিভারি রাইডার জবে যোগ দিন'
+                : 'Join Foodora BD Delivery Fleet Anywhere in Bangladesh'}
             </h1>
+            <p className="text-xs text-neutral-500 mt-1">
+              {lang === 'bn'
+                ? 'ঢাকা, চট্টগ্রাম, সিলেট, রাজশাহী, খুলনা, বরিশাল, রংপুর, ময়মনসিংহ বা যেকোনো জেলা থেকে জব জয়েন করুন।'
+                : 'Apply from any district or area in Bangladesh and start receiving live delivery dispatches immediately.'}
+            </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -253,6 +341,7 @@ export function RiderDashboard({
                 required
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
+                placeholder="e.g. Tanvir Ahmed"
                 className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
               />
             </div>
@@ -262,6 +351,33 @@ export function RiderDashboard({
                 required
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
+                placeholder="+88017..."
+                className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                Email Address (Rider Login)
+              </label>
+              <input
+                required
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="rider@example.com"
+                className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                Account Password (Optional for New Login)
+              </label>
+              <input
+                type="password"
+                minLength={6}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Min 6 characters"
                 className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
               />
             </div>
@@ -269,29 +385,55 @@ export function RiderDashboard({
               <label className="block text-xs font-semibold text-neutral-700 mb-1">Vehicle Type</label>
               <select
                 value={vehicleType}
-                onChange={(e) => setVehicleType(e.target.value as 'Motorbike' | 'Bicycle' | 'Scooter')}
+                onChange={(e) => setVehicleType(e.target.value)}
                 className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
               >
                 <option value="Motorbike">Motorbike</option>
                 <option value="Bicycle">Bicycle</option>
                 <option value="Scooter">Scooter</option>
+                <option value="E-Bike / Van">E-Bike / Van</option>
               </select>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-neutral-700 mb-1">Dhaka Zone</label>
+              <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                Working City / Zone (All Bangladesh)
+              </label>
               <select
                 value={zone}
-                onChange={(e) => setZone(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setZone(val);
+                  if (val !== '__custom__') {
+                    const found = BANGLADESH_AREAS.find((a) => a.name === val);
+                    if (found) setApplyCoords({ lat: found.lat, lng: found.lng });
+                  }
+                }}
                 className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
               >
-                {DHAKA_AREAS.map((a) => (
+                {BANGLADESH_AREAS.map((a) => (
                   <option key={a.name} value={a.name}>
-                    {a.name} ({a.nameBn})
+                    {a.name} ({a.division}) — {a.nameBn}
                   </option>
                 ))}
+                <option value="__custom__">Other / Custom Area in Bangladesh...</option>
               </select>
             </div>
           </div>
+
+          {zone === '__custom__' && (
+            <div>
+              <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                Custom District / Area Name
+              </label>
+              <input
+                required
+                value={customZone}
+                onChange={(e) => setCustomZone(e.target.value)}
+                placeholder="e.g. Zindabazar, Sylhet or Cox's Bazar Town"
+                className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+              />
+            </div>
+          )}
 
           <div>
             <label className="block text-xs font-semibold text-neutral-700 mb-1">NID Number</label>
@@ -303,18 +445,50 @@ export function RiderDashboard({
             />
           </div>
 
+          <div>
+            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+              Pin Your Starting GPS Location Anywhere in Bangladesh
+            </label>
+            <DhakaMapPicker
+              mapsApiKey={mapsApiKey}
+              lang={lang}
+              center={applyCoords}
+              markerLabel={resolvedApplyZone || 'Rider Start Pin'}
+              interactive
+              heightClass="h-[200px]"
+              onSelectLocation={(loc) => {
+                setApplyCoords({ lat: loc.lat, lng: loc.lng });
+                if (loc.areaName && loc.areaName !== 'Current GPS') {
+                  const preset = BANGLADESH_AREAS.find((a) => a.name === loc.areaName);
+                  if (preset) {
+                    setZone(preset.name);
+                  } else {
+                    setZone('__custom__');
+                    setCustomZone(loc.areaName);
+                  }
+                }
+              }}
+            />
+          </div>
+
+          {registerError && (
+            <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+              {registerError}
+            </div>
+          )}
+
           <button
             type="submit"
             disabled={registering}
-            className="w-full py-2.5 rounded-xl bg-[#E21B70] text-white text-xs font-semibold"
+            className="w-full py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold disabled:opacity-50"
           >
             {registering
               ? lang === 'bn'
-                ? 'নিবন্ধন হচ্ছে...'
-                : 'Submitting...'
+                ? 'আবেদন জমা হচ্ছে...'
+                : 'Activating Rider Job...'
               : lang === 'bn'
-              ? 'রাইডার অ্যাকাউন্ট সক্রিয় করুন'
-              : 'Activate Rider Account'}
+              ? 'রাইডার জব জয়েন ও সক্রিয় করুন'
+              : 'Apply & Activate Rider Job Now'}
           </button>
         </form>
       ) : (
@@ -327,7 +501,7 @@ export function RiderDashboard({
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <h1 className="text-xl font-bold text-[#2E3138]">
-                    {rider?.fullName || user.fullName}
+                    {rider?.fullName || user?.fullName}
                   </h1>
                   <span
                     className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${
@@ -346,7 +520,7 @@ export function RiderDashboard({
                   </span>
                 </div>
                 <p className="text-xs text-neutral-500">
-                  {rider?.vehicleType || 'Motorbike'} · {rider?.zone || 'Gulshan 2'} ·{' '}
+                  {rider?.vehicleType || 'Motorbike'} · {rider?.zone || 'Bangladesh'} ·{' '}
                   <span className="font-mono-nums">
                     GPS {riderCoords.lat.toFixed(4)}, {riderCoords.lng.toFixed(4)}
                   </span>
@@ -382,11 +556,15 @@ export function RiderDashboard({
                 </button>
               )}
               <div>
-                <p className="text-xs text-neutral-500">{lang === 'bn' ? 'সম্পন্ন ডেলিভারি' : 'Deliveries'}</p>
+                <p className="text-xs text-neutral-500">
+                  {lang === 'bn' ? 'সম্পন্ন ডেলিভারি' : 'Deliveries'}
+                </p>
                 <p className="text-xl font-bold text-[#2E3138]">{rider?.totalDeliveries ?? 0}</p>
               </div>
               <div>
-                <p className="text-xs text-neutral-500">{lang === 'bn' ? 'মোট আয়' : 'Total Earnings'}</p>
+                <p className="text-xs text-neutral-500">
+                  {lang === 'bn' ? 'মোট আয়' : 'Total Earnings'}
+                </p>
                 <p className="text-xl font-bold text-[#E21B70]">
                   {formatBdt(rider?.totalEarnings ?? 0, lang)}
                 </p>
@@ -400,7 +578,11 @@ export function RiderDashboard({
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-base font-bold text-[#2E3138] flex items-center gap-2">
-                    <Radio className={`w-4 h-4 ${sharingGps ? 'text-emerald-600 animate-pulse' : 'text-[#E21B70]'}`} />
+                    <Radio
+                      className={`w-4 h-4 ${
+                        sharingGps ? 'text-emerald-600 animate-pulse' : 'text-[#E21B70]'
+                      }`}
+                    />
                     <span>
                       {lang === 'bn' ? 'লাইভ রাইডার GPS লোকেশন' : 'Live Rider GPS Broadcast'}
                     </span>
@@ -419,28 +601,46 @@ export function RiderDashboard({
                 <div className="flex flex-wrap items-center gap-2">
                   <select
                     value={selectedSyncZone}
-                    aria-label="Select Dhaka zone to sync rider GPS"
+                    aria-label="Select Bangladesh city or area to sync rider GPS"
                     onChange={(e) => setSelectedSyncZone(e.target.value)}
                     className="px-3 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white font-semibold"
                   >
-                    {DHAKA_AREAS.map((a) => (
+                    {BANGLADESH_AREAS.map((a) => (
                       <option key={a.name} value={a.name}>
-                        {a.name} ({a.nameBn})
+                        {a.name} ({a.division})
                       </option>
                     ))}
+                    <option value="__custom__">Custom Area...</option>
                   </select>
+                  {selectedSyncZone === '__custom__' && (
+                    <input
+                      value={customSyncZone}
+                      onChange={(e) => setCustomSyncZone(e.target.value)}
+                      placeholder="Custom BD city/area"
+                      className="px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white w-36"
+                    />
+                  )}
                   <button
                     type="button"
                     disabled={syncingLoc}
                     onClick={() => {
-                      const found = DHAKA_AREAS.find((a) => a.name === selectedSyncZone);
-                      if (found) {
+                      if (selectedSyncZone === '__custom__') {
+                        const clean = customSyncZone.trim();
+                        if (!clean) return;
                         persistRiderLocation(
-                          { lat: found.lat, lng: found.lng, zone: found.name },
-                          lang === 'bn'
-                            ? `${found.name} লোকেশনে সিঙ্ক হয়েছে`
-                            : `Rider location set to ${found.name}`
+                          { lat: riderCoords.lat, lng: riderCoords.lng, zone: clean },
+                          `Working zone updated to ${clean}`
                         );
+                      } else {
+                        const found = BANGLADESH_AREAS.find((a) => a.name === selectedSyncZone);
+                        if (found) {
+                          persistRiderLocation(
+                            { lat: found.lat, lng: found.lng, zone: found.name },
+                            lang === 'bn'
+                              ? `${found.name} লোকেশনে সিঙ্ক হয়েছে`
+                              : `Rider location set to ${found.name}`
+                          );
+                        }
                       }
                     }}
                     className="px-3 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold inline-flex items-center gap-1.5"
@@ -513,7 +713,8 @@ export function RiderDashboard({
                     {
                       lat: loc.lat,
                       lng: loc.lng,
-                      zone: loc.areaName && loc.areaName !== 'Current GPS' ? loc.areaName : undefined,
+                      zone:
+                        loc.areaName && loc.areaName !== 'Current GPS' ? loc.areaName : undefined,
                     },
                     lang === 'bn'
                       ? `লোকেশন আপডেট হয়েছে (${loc.lat.toFixed(4)}, ${loc.lng.toFixed(4)})`
@@ -529,8 +730,10 @@ export function RiderDashboard({
             <h2 className="text-base font-bold text-[#2E3138] flex items-center gap-2">
               <Navigation className="w-4 h-4 text-[#E21B70]" />
               <span>
-                {lang === 'bn' ? 'ডেলিভারির জন্য উন্মুক্ত অর্ডার' : 'Available Platform Dispatch Queue'} (
-                {availableOrders.length})
+                {lang === 'bn'
+                  ? 'ডেলিভারির জন্য উন্মুক্ত অর্ডার'
+                  : 'Available Platform Dispatch Queue'}{' '}
+                ({availableOrders.length})
               </span>
             </h2>
 
@@ -580,7 +783,8 @@ export function RiderDashboard({
             <h2 className="text-base font-bold text-[#2E3138] flex items-center gap-2">
               <PackageCheck className="w-4 h-4 text-[#2E3138]" />
               <span>
-                {lang === 'bn' ? 'আপনার নির্ধারিত ডেলিভারি' : 'Your Assigned Deliveries'} ({assignedOrders.length})
+                {lang === 'bn' ? 'আপনার নির্ধারিত ডেলিভারি' : 'Your Assigned Deliveries'} (
+                {assignedOrders.length})
               </span>
             </h2>
 
@@ -613,7 +817,9 @@ export function RiderDashboard({
                       {ord.paymentMethod === 'cod'
                         ? `Collect Cash: ${formatBdt(ord.totalAmount, lang)}`
                         : `Prepaid (${ord.paymentMethod.toUpperCase()})`}
-                      {etaInfo ? ` · ${etaInfo.remainingKm.toFixed(2)} km (~${etaInfo.etaMinutes}m)` : ''}
+                      {etaInfo
+                        ? ` · ${etaInfo.remainingKm.toFixed(2)} km (~${etaInfo.etaMinutes}m)`
+                        : ''}
                     </p>
                   </div>
 
@@ -654,7 +860,9 @@ export function RiderDashboard({
                         {lang === 'bn' ? 'পথে রয়েছি' : 'On The Way'}
                       </button>
                     )}
-                    {(ord.status === 'on_the_way' || ord.status === 'picked_up' || ord.status === 'rider_assigned') && (
+                    {(ord.status === 'on_the_way' ||
+                      ord.status === 'picked_up' ||
+                      ord.status === 'rider_assigned') && (
                       <button
                         type="button"
                         onClick={() => handleUpdateStatus(ord.id, 'delivered')}
@@ -680,4 +888,3 @@ export function RiderDashboard({
     </div>
   );
 }
-

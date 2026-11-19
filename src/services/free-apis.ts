@@ -99,9 +99,10 @@ export async function searchOsmPlaces(query: string): Promise<OsmPlaceSuggestion
   if (cached) return cached;
 
   try {
+    const queryWithCountry = q.toLowerCase().includes('bangladesh') ? q : `${q}, Bangladesh`;
     const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
-      `${q}, Dhaka, Bangladesh`
-    )}&format=json&countrycodes=bd&limit=5`;
+      queryWithCountry
+    )}&format=json&countrycodes=bd&limit=6`;
     const res = await fetch(url, {
       headers: { 'User-Agent': 'FoodoraBD-Marketplace/1.0' },
       signal: AbortSignal.timeout(3500),
@@ -146,20 +147,31 @@ export async function reverseOsmGeocode(
         suburb?: string;
         neighbourhood?: string;
         road?: string;
+        city?: string;
+        town?: string;
+        village?: string;
         city_district?: string;
+        county?: string;
+        state_district?: string;
+        state?: string;
       };
     };
     const areaName =
       data.address?.suburb ||
       data.address?.neighbourhood ||
+      data.address?.town ||
+      data.address?.city ||
       data.address?.city_district ||
-      'Dhaka';
-    const displayName = data.display_name || `${areaName}, Dhaka`;
+      data.address?.county ||
+      data.address?.state_district ||
+      data.address?.state ||
+      'Bangladesh';
+    const displayName = data.display_name || `${areaName}, Bangladesh`;
     return setCached(key, { displayName, areaName, source: 'OpenStreetMap' }, 10 * 60 * 1000);
   } catch {
     return {
-      displayName: `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}, Dhaka`,
-      areaName: 'Dhaka',
+      displayName: `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}, Bangladesh`,
+      areaName: 'Bangladesh',
       source: 'Fallback',
     };
   }

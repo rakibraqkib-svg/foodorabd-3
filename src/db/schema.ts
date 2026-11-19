@@ -167,6 +167,8 @@ export const orders = pgTable('orders', {
   customerUid: text('customer_uid').notNull(),
   customerName: text('customer_name').notNull(),
   customerPhone: text('customer_phone').notNull(),
+  customerEmail: text('customer_email').notNull().default(''),
+  trackingToken: text('tracking_token').notNull().default(''),
   restaurantId: integer('restaurant_id')
     .references(() => restaurants.id)
     .notNull(),
@@ -225,6 +227,22 @@ export const orderStatusHistory = pgTable('order_status_history', {
   note: text('note').default(''),
   actorUid: text('actor_uid').default('system'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const orderEmailLogs = pgTable('order_email_logs', {
+  id: serial('id').primaryKey(),
+  orderId: integer('order_id')
+    .references(() => orders.id, { onDelete: 'cascade' })
+    .notNull(),
+  orderNumber: text('order_number').notNull(),
+  recipientEmail: text('recipient_email').notNull(),
+  subject: text('subject').notNull(),
+  trackingUrl: text('tracking_url').notNull(),
+  statusEvent: text('status_event').notNull(),
+  deliveryProvider: text('delivery_provider').notNull().default('in_app_email_log'),
+  providerStatus: text('provider_status').notNull().default('recorded'),
+  htmlPreview: text('html_preview').notNull().default(''),
+  sentAt: timestamp('sent_at').defaultNow().notNull(),
 });
 
 export const commissionLedger = pgTable('commission_ledger', {

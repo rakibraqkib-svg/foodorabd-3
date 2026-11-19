@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Bike, CreditCard, ShieldCheck, ShoppingBag, Store, Tag, Trash2, Truck, X } from 'lucide-react';
+import { Bike, CreditCard, Mail, ShieldCheck, ShoppingBag, Store, Tag, Trash2, Truck, X } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import {
   calculateCartItemUnitPrice,
@@ -14,7 +14,7 @@ import {
   type PaymentMethod,
   toPublicPaymentGatewayView,
 } from '../lib/marketplace-logic';
-import { DHAKA_AREAS } from '../lib/i18n';
+import { BANGLADESH_AREAS } from '../lib/i18n';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import type { Lang, PublicPaymentGateway, Restaurant } from '../types/marketplace';
 
@@ -28,10 +28,11 @@ interface CartCheckoutDrawerProps {
   paymentGateways?: PublicPaymentGateway[];
   selectedArea: { name: string; lat: number; lng: number };
   customerName: string;
+  customerEmail?: string;
   onUpdateQty: (idx: number, delta: number) => void;
   onRemoveItem: (idx: number) => void;
   onClearCart: () => void;
-  onOrderCreated: (orderId: number) => void;
+  onOrderCreated: (orderId: number, trackingToken?: string) => void;
 }
 
 export function CartCheckoutDrawer({
@@ -44,6 +45,7 @@ export function CartCheckoutDrawer({
   paymentGateways,
   selectedArea,
   customerName,
+  customerEmail,
   onUpdateQty,
   onRemoveItem,
   onClearCart,
@@ -71,8 +73,9 @@ export function CartCheckoutDrawer({
 
   const [name, setName] = useState(customerName || 'Rahim Uddin');
   const [phone, setPhone] = useState('+8801711000001');
+  const [email, setEmail] = useState(customerEmail || 'customer@foodora.bd');
   const [area, setArea] = useState(selectedArea.name);
-  const [addressLine, setAddressLine] = useState(`House 24, Road 71, ${selectedArea.name}, Dhaka`);
+  const [addressLine, setAddressLine] = useState(`House 24, Road 5, ${selectedArea.name}, Bangladesh`);
   const [coords, setCoords] = useState({ lat: selectedArea.lat, lng: selectedArea.lng });
   const [instructions, setInstructions] = useState('');
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>(restaurant?.deliveryMode || 'platform');
@@ -94,6 +97,9 @@ export function CartCheckoutDrawer({
   useEffect(() => {
     setArea(selectedArea.name);
     setCoords({ lat: selectedArea.lat, lng: selectedArea.lng });
+    setAddressLine((prev) =>
+      prev.startsWith('House 24, Road ') ? `House 24, Road 5, ${selectedArea.name}, Bangladesh` : prev
+    );
   }, [selectedArea]);
 
   useEffect(() => {
@@ -101,6 +107,12 @@ export function CartCheckoutDrawer({
       setName(customerName);
     }
   }, [customerName]);
+
+  useEffect(() => {
+    if (customerEmail) {
+      setEmail(customerEmail);
+    }
+  }, [customerEmail]);
 
   useEffect(() => {
     if (restaurant) {
@@ -175,6 +187,8 @@ export function CartCheckoutDrawer({
     fixedCommission: restaurant?.fixedCommission ?? 0,
   });
 
+  const isPresetArea = BANGLADESH_AREAS.some((a) => a.name === area);
+
   const handleApplyCoupon = async () => {
     if (!restaurant || !couponInput.trim()) return;
     setCouponError(null);
@@ -216,14 +230,15 @@ export function CartCheckoutDrawer({
     setSubmitError(null);
 
     try {
-      const res = await apiFetch<{ order: { id: number } }>('/api/orders', {
+      const res = await apiFetch<{ order: { id: number; trackingToken?: string } }>('/api/orders', {
         method: 'POST',
         body: JSON.stringify({
           restaurantId: restaurant.id,
           customerName: name,
           customerPhone: phone,
+          customerEmail: email.trim(),
           deliveryAddress: addressLine,
-          deliveryArea: area,
+          deliveryArea: area.trim() || 'Bangladesh',
           deliveryLat: coords.lat,
           deliveryLng: coords.lng,
           deliveryInstructions: instructions,
@@ -241,7 +256,7 @@ export function CartCheckoutDrawer({
       });
       onClearCart();
       setStep('cart');
-      onOrderCreated(res.order.id);
+      onOrderCreated(res.order.id, res.order.trackingToken);
     } catch (err: unknown) {
       setSubmitError(err instanceof Error ? err.message : 'Order submission failed');
     } finally {
@@ -479,23 +494,62 @@ export function CartCheckoutDrawer({
 
               <div>
                 <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                  {lang === 'bn' ? 'ঢাকা এলাকা' : 'Dhaka Delivery Zone'}
+                  <span className="inline-flex items-center gap-1">
+                    <Mail className="w-3.5 h-3.5 text-[#E21B70]" />
+                    {lang === 'bn'
+                      ? 'ইমেইল ঠিকানা (ইমেইলে অর্ডার ট্র্যাকিং লিংক পেতে)'
+                      : 'Email Address (for Live Order Tracking Updates)'}
+                  </span>
+                </label>
+                <input
+                  required
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                  {lang === 'bn' ? 'বাংলাদেশের ডেলিভারি শহর / এলাকা' : 'Delivery City / Area (All Bangladesh)'}
                 </label>
                 <select
-                  value={area}
+                  value={isPresetArea ? area : '__custom__'}
                   onChange={(e) => {
-                    const found = DHAKA_AREAS.find((a) => a.name === e.target.value);
+                    if (e.target.value === '__custom__') {
+                      if (isPresetArea) setArea('');
+                      return;
+                    }
+                    const found = BANGLADESH_AREAS.find((a) => a.name === e.target.value);
                     setArea(e.target.value);
                     if (found) setCoords({ lat: found.lat, lng: found.lng });
                   }}
                   className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
                 >
-                  {DHAKA_AREAS.map((a) => (
+                  {BANGLADESH_AREAS.map((a) => (
                     <option key={a.name} value={a.name}>
-                      {a.name} ({a.nameBn})
+                      {a.name} ({a.division}) — {a.nameBn}
                     </option>
                   ))}
+                  <option value="__custom__">
+                    {lang === 'bn' ? 'অন্য যেকোনো এলাকা / উপজেলা লিখুন...' : 'Custom / Any Area in Bangladesh...'}
+                  </option>
                 </select>
+                {!isPresetArea && (
+                  <input
+                    required
+                    value={area}
+                    onChange={(e) => setArea(e.target.value)}
+                    placeholder={
+                      lang === 'bn'
+                        ? 'আপনার এলাকা বা জেলার নাম লিখুন (যেমন: বগুড়া সদর)'
+                        : 'Enter your area, thana or district (e.g. Bogura Sadar)'
+                    }
+                    className="w-full mt-2 px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                  />
+                )}
               </div>
 
               <div>
@@ -518,7 +572,7 @@ export function CartCheckoutDrawer({
                   mapsApiKey={mapsApiKey}
                   lang={lang}
                   center={coords}
-                  markerLabel={area}
+                  markerLabel={area || 'Delivery Pin'}
                   secondaryPoint={
                     restaurant ? { lat: restaurant.lat, lng: restaurant.lng, label: restaurant.name } : undefined
                   }

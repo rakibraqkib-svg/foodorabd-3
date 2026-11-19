@@ -1009,5 +1009,116 @@ export function buildSitemapXml(
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urlNodes}\n</urlset>\n`;
 }
 
+export const BANGLADESH_COORDS_BOUNDS = {
+  minLat: 20.5,
+  maxLat: 26.7,
+  minLng: 88.0,
+  maxLng: 92.7,
+} as const;
+
+export function isWithinBangladesh(lat: number, lng: number): boolean {
+  return (
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    lat >= BANGLADESH_COORDS_BOUNDS.minLat &&
+    lat <= BANGLADESH_COORDS_BOUNDS.maxLat &&
+    lng >= BANGLADESH_COORDS_BOUNDS.minLng &&
+    lng <= BANGLADESH_COORDS_BOUNDS.maxLng
+  );
+}
+
+export function resolveNearestAreaFromList<T extends { name: string; lat: number; lng: number }>(
+  lat: number,
+  lng: number,
+  areas: readonly T[]
+): { area: T | null; distanceKm: number; label: string } {
+  if (!areas || areas.length === 0) {
+    return { area: null, distanceKm: 0, label: `${lat.toFixed(4)}, ${lng.toFixed(4)}` };
+  }
+  let best = areas[0];
+  let bestDist = Infinity;
+  for (const a of areas) {
+    const d = haversineDistanceKm(lat, lng, a.lat, a.lng);
+    if (d < bestDist) {
+      bestDist = d;
+      best = a;
+    }
+  }
+  const thresholdKm = bestDist <= 18 ? best.name : `${best.name} (${lat.toFixed(3)}, ${lng.toFixed(3)})`;
+  return { area: best, distanceKm: bestDist, label: thresholdKm };
+}
+
+export function buildOrderTrackingUrl(
+  origin: string,
+  orderId: number,
+  trackingToken?: string | null
+): string {
+  const cleanOrigin = origin.replace(/\/+$/, '');
+  const base = `${cleanOrigin}/?order=${encodeURIComponent(String(orderId))}`;
+  const tok = String(trackingToken || '').trim();
+  return tok ? `${base}&token=${encodeURIComponent(tok)}` : base;
+}
+
+export function doesEmailMatchOrder(orderEmail: string | null | undefined, queryEmail: string): boolean {
+  const a = String(orderEmail || '').trim().toLowerCase();
+  const b = String(queryEmail || '').trim().toLowerCase();
+  return Boolean(a && b && a === b);
+}
+
+export function buildOrderTrackingEmailPayload(input: {
+  origin: string;
+  orderId: number;
+  orderNumber: string;
+  trackingToken?: string | null;
+  customerName: string;
+  customerEmail: string;
+  restaurantName: string;
+  deliveryArea: string;
+  totalAmount: number;
+  paymentMethod: string;
+  status: string;
+  statusNote?: string;
+  riderName?: string | null;
+}): {
+  subject: string;
+  trackingUrl: string;
+  html: string;
+  text: string;
+} {
+  const trackingUrl = buildOrderTrackingUrl(input.origin, input.orderId, input.trackingToken);
+  const niceStatus = input.status.replace(/_/g, ' ').toUpperCase();
+  const subject = `Foodora BD Order ${input.orderNumber} — ${niceStatus}`;
+  const riderLine = input.riderName ? `<p><strong>Assigned Rider:</strong> ${escapeXml(input.riderName)}</p>` : '';
+  const noteLine = input.statusNote ? `<p><strong>Update:</strong> ${escapeXml(input.statusNote)}</p>` : '';
+
+  const html = `<!doctype html>
+<html>
+  <body style="font-family:Arial,sans-serif;background:#f7f7f7;padding:24px;color:#2E3138;">
+    <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;padding:24px;border:1px solid #e5e7eb;">
+      <h2 style="margin:0 0 8px;color:#E21B70;">Foodora BD — Live Order Tracking</h2>
+      <p style="margin:0 0 16px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
+      <p style="margin:0 0 12px;font-size:14px;">Your order <strong>${escapeXml(input.orderNumber)}</strong> from <strong>${escapeXml(input.restaurantName)}</strong> is now <strong>${escapeXml(niceStatus)}</strong>.</p>
+      <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
+        <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
+        <p style="margin:4px 0;"><strong>Total Payable:</strong> ৳${input.totalAmount} (${escapeXml(input.paymentMethod.toUpperCase())})</p>
+        ${riderLine}
+        ${noteLine}
+      </div>
+      <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Track Order Live on Map</a>
+      <p style="margin:16px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Or open: ${escapeXml(trackingUrl)}</p>
+    </div>
+  </body>
+</html>`;
+
+  const text = `Foodora BD — Order ${input.orderNumber} (${niceStatus})
+Restaurant: ${input.restaurantName}
+Delivery Area: ${input.deliveryArea}
+Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()})
+${input.riderName ? `Rider: ${input.riderName}\n` : ''}${input.statusNote ? `Update: ${input.statusNote}\n` : ''}Track live: ${trackingUrl}`;
+
+  return { subject, trackingUrl, html, text };
+}
+
+
 
 

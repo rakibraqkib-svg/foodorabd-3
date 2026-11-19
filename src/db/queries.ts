@@ -9,6 +9,7 @@ import {
   foodItems,
   localCredentials,
   notifications,
+  orderEmailLogs,
   orders,
   orderStatusHistory,
   paymentGateways,
@@ -208,11 +209,18 @@ export async function getOrderById(orderId: number) {
       }
     }
 
+    const emailLogs = await db
+      .select()
+      .from(orderEmailLogs)
+      .where(eq(orderEmailLogs.orderId, orderId))
+      .orderBy(desc(orderEmailLogs.sentAt));
+
     return {
       order,
       history,
       restaurant: restRows[0] ?? null,
       riderLocation,
+      emailLogs,
     };
   } catch (error) {
     console.error('Failed to fetch order detail:', error);

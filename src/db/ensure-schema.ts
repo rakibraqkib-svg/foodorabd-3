@@ -24,6 +24,7 @@ const EXPECTED_TABLES = [
   'coupons',
   'orders',
   'order_status_history',
+  'order_email_logs',
   'commission_ledger',
   'restaurant_payouts',
   'riders',
@@ -55,6 +56,13 @@ async function runCreateTablesIfMissing(): Promise<void> {
       await db.execute(sql`
         ALTER TABLE food_items
         ADD COLUMN IF NOT EXISTS is_visible_on_storefront BOOLEAN NOT NULL DEFAULT TRUE;
+      `);
+    }
+    if (existingSet.has('orders')) {
+      await db.execute(sql`
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS customer_email TEXT NOT NULL DEFAULT '',
+        ADD COLUMN IF NOT EXISTS tracking_token TEXT NOT NULL DEFAULT '';
       `);
     }
   } catch (err: any) {
@@ -251,6 +259,8 @@ async function createMissingTables(existingSet: Set<string>): Promise<void> {
         customer_uid TEXT NOT NULL,
         customer_name TEXT NOT NULL,
         customer_phone TEXT NOT NULL,
+        customer_email TEXT NOT NULL DEFAULT '',
+        tracking_token TEXT NOT NULL DEFAULT '',
         restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
         restaurant_name TEXT NOT NULL,
         delivery_address TEXT NOT NULL,
@@ -295,6 +305,24 @@ async function createMissingTables(existingSet: Set<string>): Promise<void> {
         note TEXT DEFAULT '',
         actor_uid TEXT DEFAULT 'system',
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+
+  if (!existingSet.has('order_email_logs')) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS order_email_logs (
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        order_number TEXT NOT NULL,
+        recipient_email TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        tracking_url TEXT NOT NULL,
+        status_event TEXT NOT NULL,
+        delivery_provider TEXT NOT NULL DEFAULT 'in_app_email_log',
+        provider_status TEXT NOT NULL DEFAULT 'recorded',
+        html_preview TEXT NOT NULL DEFAULT '',
+        sent_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
     `);
   }
