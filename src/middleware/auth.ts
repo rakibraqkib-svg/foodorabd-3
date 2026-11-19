@@ -4,6 +4,7 @@ import { eq, sql } from 'drizzle-orm';
 import { verifySupabaseAccessToken } from '../lib/supabase-admin.ts';
 import { db } from '../db/index.ts';
 import { users } from '../db/schema.ts';
+import { isProtectedSuperAdminEmail } from '../lib/marketplace-logic.ts';
 
 export type UserRole = 'customer' | 'restaurant_owner' | 'rider' | 'admin' | 'super_admin';
 
@@ -70,7 +71,7 @@ export async function getOrCreateUser(
   defaultRole: UserRole = 'customer'
 ) {
   const emailLower = email.trim().toLowerCase();
-  const isPrimaryAdmin = emailLower === 'rakibraqkib@gmail.com';
+  const isPrimaryAdmin = isProtectedSuperAdminEmail(emailLower);
   try {
     const existing = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
     if (existing.length > 0) {

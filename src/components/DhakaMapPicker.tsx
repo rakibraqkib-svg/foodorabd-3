@@ -86,7 +86,56 @@ function RouteOverlay({
   return null;
 }
 
+function resolveNearestDhakaArea(lat: number, lng: number) {
+  let best = DHAKA_AREAS[0];
+  let bestDist = Infinity;
+  for (const area of DHAKA_AREAS) {
+    const d = haversineDistanceKm(lat, lng, area.lat, area.lng);
+    if (d < bestDist) {
+      bestDist = d;
+      best = area;
+    }
+  }
+  return { area: best, distanceKm: bestDist };
+}
+
+function MapCenterSync({
+  center,
+  skipPanRef,
+}: {
+  center: { lat: number; lng: number };
+  skipPanRef: React.MutableRefObject<{ lat: number; lng: number } | null>;
+}) {
+  const map = useMap();
+  const prevRef = useRef<{ lat: number; lng: number } | null>(null);
+
+  useEffect(() => {
+    if (!map) return;
+    if (
+      skipPanRef.current &&
+      Math.abs(skipPanRef.current.lat - center.lat) < 1e-6 &&
+      Math.abs(skipPanRef.current.lng - center.lng) < 1e-6
+    ) {
+      skipPanRef.current = null;
+      prevRef.current = { lat: center.lat, lng: center.lng };
+      return;
+    }
+    if (
+      prevRef.current &&
+      prevRef.current.lat === center.lat &&
+      prevRef.current.lng === center.lng
+    ) {
+      return;
+    }
+    prevRef.current = { lat: center.lat, lng: center.lng };
+    map.panTo(center);
+  }, [map, center.lat, center.lng, skipPanRef]);
+
+  return null;
+}
+
 function GoogleMapInner({
+  lang,
   center,
   markerLabel,
   secondaryPoint,
@@ -94,8 +143,22 @@ function GoogleMapInner({
   interactive,
   heightClass,
   onSelectLocation,
-}: Omit<DhakaMapPickerProps, 'mapsApiKey' | 'lang'>) {
+}: Omit<DhakaMapPickerProps, 'mapsApiKey'>) {
   const status = useApiLoadingStatus();
+  const skipPanRef = useRef<{ lat: number; lng: number } | null>(null);
+
+  const emitLocation = (lat: number, lng: number, shouldSkipPan = true) => {
+    if (!onSelectLocation) return;
+    if (shouldSkipPan) {
+      skipPanRef.current = { lat, lng };
+    }
+    const { area, distanceKm } = resolveNearestDhakaArea(lat, lng);
+    onSelectLocation({
+      lat,
+      lng,
+      areaName: distanceKm <= 3.5 ? area.name : `${area.name} (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+    });
+  };
 
   if (status === APILoadingStatus.FAILED || status === APILoadingStatus.AUTH_FAILURE) {
     return (
@@ -115,8 +178,7 @@ function GoogleMapInner({
     <div className={`relative w-full overflow-hidden rounded-xl border border-neutral-200 ${heightClass || 'h-[260px]'}`}>
       <GoogleMap
         defaultCenter={center}
-        center={center}
-        defaultZoom={13}
+        defaultZoom={14}
         mapId="DEMO_MAP_ID"
         gestureHandling="greedy"
         clickableIcons={false}
@@ -124,12 +186,30 @@ function GoogleMapInner({
         internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
         className="w-full h-full"
         onClick={(ev) => {
-          if (interactive && ev.detail.latLng && onSelectLocation) {
-            onSelectLocation({ lat: ev.detail.latLng.lat, lng: ev.detail.latLng.lng });
+          if (interactive && ev.detail.latLng) {
+            emitLocation(ev.detail.latLng.lat, ev.detail.latLng.lng);
+          }
+        }}
+        onDragend={(ev) => {
+          if (interactive && !secondaryPoint) {
+            const c = ev.map.getCenter();
+            if (c) {
+              emitLocation(c.lat(), c.lng());
+            }
           }
         }}
       >
-        <AdvancedMarker position={center} title={markerLabel || 'Selected Location'}>
+        <MapCenterSync center={center} skipPanRef={skipPanRef} />
+        <AdvancedMarker
+          position={center}
+          title={markerLabel || 'Selected Location'}
+          draggable={Boolean(interactive)}
+          onDragEnd={(ev) => {
+            if (interactive && ev.latLng) {
+              emitLocation(ev.latLng.lat(), ev.latLng.lng());
+            }
+          }}
+        >
           <Pin background="#E21B70" borderColor="#9E0B52" glyphColor="#FFFFFF" />
         </AdvancedMarker>
         {secondaryPoint && (
@@ -153,6 +233,16 @@ function GoogleMapInner({
           />
         )}
       </GoogleMap>
+      {interactive && (
+        <div className="pointer-events-none absolute bottom-7 left-2.5 bg-white/95 backdrop-blur-xs border border-neutral-200 rounded-lg px-2.5 py-1 text-[11px] font-medium text-neutral-700 shadow-xs">
+          {lang === 'bn'
+            ? 'ম্যাপ সরান, পিন টানুন বা ক্লিক করে খুঁজুন'
+            : 'Move map, drag pin, or click to find'}
+          <span className="ml-1.5 font-mono-nums text-neutral-500">
+            {center.lat.toFixed(4)}, {center.lng.toFixed(4)}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -177,16 +267,32 @@ function FallbackDhakaMap({
     return { x, y };
   };
 
+  const fromClientPoint = (ev: React.MouseEvent<HTMLDivElement>) => {
+    if (!interactive || !onSelectLocation) return;
+    const rect = ev.currentTarget.getBoundingClientRect();
+    const pctX = ((ev.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+    const pctY = ((ev.clientY - rect.top) / Math.max(1, rect.height)) * 100;
+    const lng = 90.34 + (pctX / 100) * (90.47 - 90.34);
+    const lat = 23.71 + (1 - pctY / 100) * (23.89 - 23.71);
+    const { area, distanceKm } = resolveNearestDhakaArea(lat, lng);
+    onSelectLocation({
+      lat,
+      lng,
+      areaName: distanceKm <= 3.5 ? area.name : `${area.name} (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+    });
+  };
+
   const p1 = toXY(center.lat, center.lng);
   const p2 = secondaryPoint ? toXY(secondaryPoint.lat, secondaryPoint.lng) : null;
   const pRider = riderPoint ? toXY(riderPoint.lat, riderPoint.lng) : null;
 
   return (
     <div
-      className={`relative w-full overflow-hidden rounded-xl border border-neutral-200 bg-[#F8FAFC] ${heightClass || 'h-[260px]'}`}
+      onClick={fromClientPoint}
+      className={`relative w-full overflow-hidden rounded-xl border border-neutral-200 bg-[#F8FAFC] ${interactive ? 'cursor-crosshair' : ''} ${heightClass || 'h-[260px]'}`}
     >
       {/* Subtle Dhaka arterial grid */}
-      <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+      <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
         <defs>
           <pattern id="dhakaGrid" width="12.5" height="12.5" patternUnits="userSpaceOnUse">
             <path d="M 12.5 0 L 0 0 0 12.5" fill="none" stroke="#E2E8F0" strokeWidth="0.4" />
@@ -235,9 +341,10 @@ function FallbackDhakaMap({
             <button
               key={area.name}
               type="button"
-              onClick={() =>
-                onSelectLocation?.({ lat: area.lat, lng: area.lng, areaName: area.name })
-              }
+              onClick={(ev) => {
+                ev.stopPropagation();
+                onSelectLocation?.({ lat: area.lat, lng: area.lng, areaName: area.name });
+              }}
               style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
               className={`absolute -translate-x-1/2 -translate-y-1/2 px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
                 isClose
@@ -326,8 +433,10 @@ function FallbackDhakaMap({
 
 export function DhakaMapPicker(props: DhakaMapPickerProps) {
   const [useFallback] = useState(false);
+  const effectiveApiKey =
+    props.mapsApiKey || (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || '';
 
-  if (!props.mapsApiKey || useFallback) {
+  if (!effectiveApiKey || useFallback) {
     return (
       <FallbackDhakaMap
         center={props.center}
@@ -342,8 +451,9 @@ export function DhakaMapPicker(props: DhakaMapPickerProps) {
   }
 
   return (
-    <APIProvider apiKey={props.mapsApiKey} language={props.lang} region="BD">
+    <APIProvider apiKey={effectiveApiKey} language={props.lang} region="BD">
       <GoogleMapInner
+        lang={props.lang}
         center={props.center}
         markerLabel={props.markerLabel}
         secondaryPoint={props.secondaryPoint}

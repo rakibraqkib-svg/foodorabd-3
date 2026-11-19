@@ -19,6 +19,7 @@ const EXPECTED_TABLES = [
   'customer_addresses',
   'restaurants',
   'food_items',
+  'partner_api_keys',
   'coupons',
   'orders',
   'order_status_history',
@@ -45,17 +46,21 @@ async function runCreateTablesIfMissing(): Promise<void> {
   );
 
   const missingTables = EXPECTED_TABLES.filter((t) => !existingSet.has(t));
-  if (missingTables.length === 0) {
-    return;
-  }
-
   try {
-    await createMissingTables(existingSet);
+    if (missingTables.length > 0) {
+      await createMissingTables(existingSet);
+    }
+    if (existingSet.has('food_items')) {
+      await db.execute(sql`
+        ALTER TABLE food_items
+        ADD COLUMN IF NOT EXISTS is_visible_on_storefront BOOLEAN NOT NULL DEFAULT TRUE;
+      `);
+    }
   } catch (err: any) {
     const code = err?.code || err?.cause?.code;
     if (code === '42501') {
       console.warn(
-        `Skipping runtime DDL creation (role lacks CREATE on schema public). Missing tables: ${missingTables.join(', ')}`
+        `Skipping runtime DDL creation (role lacks CREATE/ALTER on schema public). Missing tables: ${missingTables.join(', ')}`
       );
       return;
     }
@@ -172,6 +177,22 @@ async function createMissingTables(existingSet: Set<string>): Promise<void> {
         in_stock BOOLEAN NOT NULL DEFAULT TRUE,
         is_available BOOLEAN NOT NULL DEFAULT TRUE,
         is_popular BOOLEAN NOT NULL DEFAULT FALSE,
+        is_visible_on_storefront BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+
+  if (!existingSet.has('partner_api_keys')) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS partner_api_keys (
+        id SERIAL PRIMARY KEY,
+        restaurant_id INTEGER NOT NULL UNIQUE REFERENCES restaurants(id) ON DELETE CASCADE,
+        key_hash TEXT NOT NULL UNIQUE,
+        key_prefix TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT 'POS / Inventory Sync',
+        last_used_at TIMESTAMP,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );

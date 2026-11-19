@@ -107,6 +107,21 @@ export const foodItems = pgTable('food_items', {
   inStock: boolean('in_stock').notNull().default(true),
   isAvailable: boolean('is_available').notNull().default(true),
   isPopular: boolean('is_popular').notNull().default(false),
+  isVisibleOnStorefront: boolean('is_visible_on_storefront').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const partnerApiKeys = pgTable('partner_api_keys', {
+  id: serial('id').primaryKey(),
+  restaurantId: integer('restaurant_id')
+    .references(() => restaurants.id, { onDelete: 'cascade' })
+    .notNull()
+    .unique(),
+  keyHash: text('key_hash').notNull().unique(),
+  keyPrefix: text('key_prefix').notNull(),
+  label: text('label').notNull().default('POS / Inventory Sync'),
+  lastUsedAt: timestamp('last_used_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

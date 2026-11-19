@@ -494,6 +494,16 @@ export function advanceRiderAlongRoute(
 }
 
 export const PRIMARY_SUPER_ADMIN_EMAIL = 'rakibraqkib@gmail.com';
+export const ADMIN_PIN_DEFAULT_EMAIL = 'raqkibrony@gmail.com';
+export const PROTECTED_SUPER_ADMIN_EMAILS = [
+  PRIMARY_SUPER_ADMIN_EMAIL,
+  ADMIN_PIN_DEFAULT_EMAIL,
+] as const;
+
+export function isProtectedSuperAdminEmail(email: string): boolean {
+  const normalized = email.trim().toLowerCase();
+  return (PROTECTED_SUPER_ADMIN_EMAILS as readonly string[]).includes(normalized);
+}
 
 export function canActorModifyUserAccount(params: {
   actorUid: string;
@@ -508,7 +518,7 @@ export function canActorModifyUserAccount(params: {
   if (actorRole !== 'admin' && actorRole !== 'super_admin') {
     return { allowed: false, reason: 'Only authorized Admin accounts can modify user roles.' };
   }
-  if (targetEmail.trim().toLowerCase() === PRIMARY_SUPER_ADMIN_EMAIL) {
+  if (isProtectedSuperAdminEmail(targetEmail)) {
     if (nextRole !== 'super_admin' || nextStatus === 'suspended') {
       return {
         allowed: false,
@@ -576,4 +586,171 @@ export function validateBroadcastNotification(input: {
     type,
   };
 }
+
+export interface StorefrontProductFilterInput {
+  id: number;
+  name: string;
+  nameBn: string;
+  category: string;
+  description?: string;
+  price: number;
+  discountPrice: number | null;
+  inStock: boolean;
+  isAvailable: boolean;
+  isPopular: boolean;
+  isVisibleOnStorefront?: boolean;
+  restaurantName: string;
+  restaurantCuisine: string;
+  deliveryMode: string;
+}
+
+export function isProductVisibleToCustomers(item: {
+  isVisibleOnStorefront?: boolean;
+  isAvailable?: boolean;
+}): boolean {
+  return item.isVisibleOnStorefront !== false && item.isAvailable !== false;
+}
+
+export function filterStorefrontProducts<T extends StorefrontProductFilterInput>(
+  products: T[],
+  opts: {
+    cuisine?: string;
+    query?: string;
+    onlyDiscount?: boolean;
+    deliveryFleet?: 'all' | 'platform' | 'third_party';
+  } = {}
+): T[] {
+  const q = (opts.query || '').trim().toLowerCase();
+  const cuisine = (opts.cuisine || 'All').trim().toLowerCase();
+  const fleet = opts.deliveryFleet || 'all';
+
+  return products
+    .filter((item) => {
+      if (!isProductVisibleToCustomers(item)) return false;
+      if (cuisine && cuisine !== 'all') {
+        const hay = `${item.category} ${item.restaurantCuisine} ${item.name}`.toLowerCase();
+        if (!hay.includes(cuisine)) return false;
+      }
+      if (opts.onlyDiscount && !(item.discountPrice && item.discountPrice < item.price)) {
+        return false;
+      }
+      if (fleet !== 'all' && item.deliveryMode !== fleet) {
+        return false;
+      }
+      if (q) {
+        const hay = `${item.name} ${item.nameBn} ${item.category} ${item.description || ''} ${item.restaurantName}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      if (a.inStock !== b.inStock) return a.inStock ? -1 : 1;
+      if (a.isPopular !== b.isPopular) return a.isPopular ? -1 : 1;
+      return b.id - a.id;
+    });
+}
+
+export interface PartnerProductInput {
+  name?: unknown;
+  nameBn?: unknown;
+  category?: unknown;
+  description?: unknown;
+  imageUrl?: unknown;
+  price?: unknown;
+  discountPrice?: unknown;
+  inStock?: unknown;
+  isAvailable?: unknown;
+  isPopular?: unknown;
+  variations?: unknown;
+  addons?: unknown;
+}
+
+export interface NormalizedPartnerProduct {
+  name: string;
+  nameBn: string;
+  category: string;
+  description: string;
+  imageUrl: string;
+  price: number;
+  discountPrice: number | null;
+  inStock: boolean;
+  isAvailable: boolean;
+  isPopular: boolean;
+  variationsJson: Array<{ name: string; priceDelta: number }>;
+  addonsJson: Array<{ name: string; price: number }>;
+}
+
+export function normalizePartnerProductInput(
+  raw: PartnerProductInput,
+  fallbackImageUrl: string
+): { valid: true; product: NormalizedPartnerProduct } | { valid: false; reason: string } {
+  const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+  if (name.length < 2 || name.length > 140) {
+    return { valid: false, reason: 'Product name must be between 2 and 140 characters.' };
+  }
+  const nameBn =
+    typeof raw.nameBn === 'string' && raw.nameBn.trim().length > 0 ? raw.nameBn.trim() : name;
+  const category =
+    typeof raw.category === 'string' && raw.category.trim().length >= 2
+      ? raw.category.trim()
+      : 'Popular';
+  const description = typeof raw.description === 'string' ? raw.description.trim() : '';
+  const imageUrl =
+    typeof raw.imageUrl === 'string' && raw.imageUrl.trim().length > 0
+      ? raw.imageUrl.trim()
+      : fallbackImageUrl;
+  const price = Math.round(Number(raw.price));
+  if (!Number.isFinite(price) || price <= 0) {
+    return { valid: false, reason: 'Product price must be a positive number in BDT.' };
+  }
+  let discountPrice: number | null = null;
+  if (raw.discountPrice !== undefined && raw.discountPrice !== null && raw.discountPrice !== '') {
+    const parsedDiscount = Math.round(Number(raw.discountPrice));
+    if (!Number.isFinite(parsedDiscount) || parsedDiscount <= 0 || parsedDiscount >= price) {
+      return {
+        valid: false,
+        reason: 'discountPrice must be a positive number lower than regular price.',
+      };
+    }
+    discountPrice = parsedDiscount;
+  }
+
+  const variationsJson = Array.isArray(raw.variations)
+    ? raw.variations
+        .filter((v): v is { name: string; priceDelta?: number } => Boolean(v && typeof v === 'object' && typeof (v as { name?: unknown }).name === 'string'))
+        .map((v) => ({
+          name: v.name.trim() || 'Regular',
+          priceDelta: Math.round(Number(v.priceDelta) || 0),
+        }))
+    : [];
+
+  const addonsJson = Array.isArray(raw.addons)
+    ? raw.addons
+        .filter((a): a is { name: string; price?: number } => Boolean(a && typeof a === 'object' && typeof (a as { name?: unknown }).name === 'string'))
+        .map((a) => ({
+          name: a.name.trim(),
+          price: Math.max(0, Math.round(Number(a.price) || 0)),
+        }))
+        .filter((a) => a.name.length > 0)
+    : [];
+
+  return {
+    valid: true,
+    product: {
+      name,
+      nameBn,
+      category,
+      description,
+      imageUrl,
+      price,
+      discountPrice,
+      inStock: raw.inStock === undefined ? true : Boolean(raw.inStock),
+      isAvailable: raw.isAvailable === undefined ? true : Boolean(raw.isAvailable),
+      isPopular: raw.isPopular === undefined ? false : Boolean(raw.isPopular),
+      variationsJson: variationsJson.length > 0 ? variationsJson : [{ name: 'Regular', priceDelta: 0 }],
+      addonsJson,
+    },
+  };
+}
+
 

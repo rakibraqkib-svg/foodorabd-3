@@ -18,6 +18,7 @@ import {
   LogOut,
   Mail,
   MapPin,
+  Plus,
   Search,
   Shield,
   ShoppingBag,
@@ -40,7 +41,12 @@ import { VendorDashboard } from './components/VendorDashboard';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { apiFetch } from './lib/api';
 import { CUISINE_CATEGORIES, DHAKA_AREAS, localizeCouponTitle, t } from './lib/i18n';
-import { canAddToSingleRestaurantCart, type CartItemInput, formatBdt } from './lib/marketplace-logic';
+import {
+  canAddToSingleRestaurantCart,
+  type CartItemInput,
+  filterStorefrontProducts,
+  formatBdt,
+} from './lib/marketplace-logic';
 import { mergeStorefrontConfig } from './lib/storefront-config';
 import type {
   Coupon,
@@ -50,6 +56,7 @@ import type {
   PlatformSettings,
   Restaurant,
   ReviewItem,
+  StorefrontProduct,
 } from './types/marketplace';
 
 type ViewMode =
@@ -78,6 +85,11 @@ function MarketplaceApp() {
     signInWithEmail,
     registerWithEmail,
     unlockAdminWithPin,
+    requestPasswordReset,
+    confirmPasswordReset,
+    passwordRecoveryPending,
+    completeSupabasePasswordRecovery,
+    dismissPasswordRecovery,
     signInSandboxPersona,
     signOut,
     refreshUser,
@@ -91,11 +103,15 @@ function MarketplaceApp() {
       return 'en';
     }
   });
-  const [mapsApiKey, setMapsApiKey] = useState('');
+  const [mapsApiKey, setMapsApiKey] = useState(
+    () => (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || ''
+  );
   const [publicSettings, setPublicSettings] = useState<PlatformSettings | null>(null);
   const [gmpQuotaBanner, setGmpQuotaBanner] = useState(false);
 
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
+  const [storefrontProducts, setStorefrontProducts] = useState<StorefrontProduct[]>([]);
+  const [showAllProducts, setShowAllProducts] = useState(false);
   const [coupons, setCoupons] = useState<Coupon[]>([]);
   const [loadingStore, setLoadingStore] = useState(true);
 
@@ -170,11 +186,23 @@ function MarketplaceApp() {
   const [notifOpen, setNotifOpen] = useState(false);
   const notifContainerRef = useRef<HTMLDivElement | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'forgot'>('login');
+  const [authRole, setAuthRole] = useState<'customer' | 'restaurant_owner' | 'rider'>('customer');
   const [authFullName, setAuthFullName] = useState('');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [resetStep, setResetStep] = useState<'request' | 'confirm'>('request');
+  const [resetCode, setResetCode] = useState('');
+  const [resetNewPassword, setResetNewPassword] = useState('');
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+  const [resetInfo, setResetInfo] = useState<{
+    message: string;
+    previewCode?: string;
+    isAdminAccount?: boolean;
+  } | null>(null);
+  const [supaRecoveryPassword, setSupaRecoveryPassword] = useState('');
+  const [supaRecoverySaving, setSupaRecoverySaving] = useState(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
@@ -194,6 +222,7 @@ function MarketplaceApp() {
   const [locatingGps, setLocatingGps] = useState(false);
   const [pendingAdminRedirect, setPendingAdminRedirect] = useState(false);
   const [showAdminPinBox, setShowAdminPinBox] = useState(false);
+  const [adminPinEmail, setAdminPinEmail] = useState('raqkibrony@gmail.com');
   const [adminPinInput, setAdminPinInput] = useState('');
 
   const showToast = useCallback((msg: string) => {
@@ -237,8 +266,8 @@ function MarketplaceApp() {
     document.documentElement.lang = lang;
     document.title =
       lang === 'bn'
-        ? 'Foodora BD — বাংলাদেশের অনলাইন ফুড ডেলিভারি মার্কেটপ্লেস'
-        : 'Foodora BD — Multi-Vendor Food Delivery Marketplace';
+        ? 'Foodora BD — ঢাকা ও বাংলাদেশে অনলাইন ফুড অর্ডার'
+        : 'Foodora BD — Order Food Online in Dhaka & Bangladesh';
   }, [lang]);
 
   // Sync URL query param for tracking persistence across reload
@@ -290,14 +319,18 @@ function MarketplaceApp() {
   const loadStorefront = useCallback(async () => {
     setLoadingStore(true);
     try {
-      const [cfgRes, restRes, coupRes] = await Promise.all([
+      const [cfgRes, restRes, prodRes, coupRes] = await Promise.all([
         apiFetch<{ mapsApiKey: string; settings?: PlatformSettings | null }>('/api/public-config'),
         apiFetch<{ restaurants: Restaurant[] }>('/api/restaurants'),
+        apiFetch<{ products: StorefrontProduct[] }>('/api/products').catch(() => ({ products: [] })),
         apiFetch<{ coupons: Coupon[] }>('/api/coupons'),
       ]);
-      setMapsApiKey(cfgRes.mapsApiKey || '');
+      setMapsApiKey(
+        cfgRes.mapsApiKey || (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || ''
+      );
       setPublicSettings(cfgRes.settings || null);
       setRestaurants(restRes.restaurants);
+      setStorefrontProducts(prodRes.products || []);
       setCoupons(coupRes.coupons);
     } catch (err) {
       console.error('Failed to load storefront data:', err);
@@ -309,6 +342,92 @@ function MarketplaceApp() {
   useEffect(() => {
     loadStorefront();
   }, [loadStorefront]);
+
+  // Dynamic SEO Metadata & Schema.org JSON-LD Structured Data (Products + Restaurants)
+  useEffect(() => {
+    try {
+      const canonicalUrl = `${window.location.origin}${window.location.pathname}`;
+      let link = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+      if (!link) {
+        link = document.createElement('link');
+        link.rel = 'canonical';
+        document.head.appendChild(link);
+      }
+      link.href = canonicalUrl;
+
+      let ogUrl = document.querySelector<HTMLMetaElement>('meta[property="og:url"]');
+      if (!ogUrl) {
+        ogUrl = document.createElement('meta');
+        ogUrl.setAttribute('property', 'og:url');
+        document.head.appendChild(ogUrl);
+      }
+      ogUrl.content = canonicalUrl;
+
+      const scriptId = 'foodora-seo-jsonld';
+      let jsonLdEl = document.getElementById(scriptId) as HTMLScriptElement | null;
+      if (!jsonLdEl) {
+        jsonLdEl = document.createElement('script');
+        jsonLdEl.id = scriptId;
+        jsonLdEl.type = 'application/ld+json';
+        document.head.appendChild(jsonLdEl);
+      }
+
+      const structuredData = {
+        '@context': 'https://schema.org',
+        '@graph': [
+          {
+            '@type': 'ItemList',
+            name: 'Order Popular Food Dishes Online in Dhaka — Foodora BD',
+            numberOfItems: storefrontProducts.length,
+            itemListElement: storefrontProducts.slice(0, 24).map((p, idx) => ({
+              '@type': 'ListItem',
+              position: idx + 1,
+              item: {
+                '@type': 'Product',
+                name: p.name,
+                category: p.category,
+                description: p.description || `${p.name} from ${p.restaurantName}`,
+                image: p.imageUrl,
+                offers: {
+                  '@type': 'Offer',
+                  priceCurrency: 'BDT',
+                  price: p.discountPrice ?? p.price,
+                  availability: p.inStock
+                    ? 'https://schema.org/InStock'
+                    : 'https://schema.org/OutOfStock',
+                  seller: {
+                    '@type': 'Restaurant',
+                    name: p.restaurantName,
+                    servesCuisine: p.restaurantCuisine,
+                  },
+                },
+              },
+            })),
+          },
+          ...restaurants.slice(0, 12).map((r) => ({
+            '@type': 'Restaurant',
+            name: r.name,
+            servesCuisine: r.cuisine,
+            address: {
+              '@type': 'PostalAddress',
+              addressLocality: r.area,
+              addressRegion: 'Dhaka',
+              addressCountry: 'BD',
+            },
+            aggregateRating: {
+              '@type': 'AggregateRating',
+              ratingValue: Number(r.rating) || 4.5,
+              reviewCount: Math.max(1, r.reviewCount || 1),
+            },
+          })),
+        ],
+      };
+
+      jsonLdEl.textContent = JSON.stringify(structuredData);
+    } catch {
+      // non-fatal SEO injection guard
+    }
+  }, [storefrontProducts, restaurants]);
 
   // Load favorites & notifications when user session is active
   const loadUserSignals = useCallback(async () => {
@@ -466,6 +585,66 @@ function MarketplaceApp() {
     );
   };
 
+  const handleQuickAddProduct = (product: StorefrontProduct) => {
+    if (!product.inStock) {
+      showToast(lang === 'bn' ? 'দুঃখিত, খাবারটি স্টকে নেই' : 'Sorry, this dish is out of stock');
+      return;
+    }
+    const matched: Restaurant =
+      restaurants.find((r) => r.id === product.restaurantId) || {
+        id: product.restaurantId,
+        ownerUid: '',
+        name: product.restaurantName,
+        nameBn: product.restaurantNameBn,
+        slug: product.restaurantSlug,
+        cuisine: product.restaurantCuisine,
+        area: product.restaurantArea,
+        address: product.restaurantArea,
+        lat: selectedArea.lat,
+        lng: selectedArea.lng,
+        phone: '',
+        email: '',
+        description: '',
+        logoUrl: product.restaurantLogoUrl,
+        coverUrl: product.restaurantCoverUrl || product.imageUrl,
+        tradeLicense: null,
+        nidNumber: null,
+        payoutMethod: 'bkash',
+        payoutAccount: '',
+        rating: product.rating,
+        reviewCount: 0,
+        deliveryTimeMin: product.deliveryTimeMin,
+        deliveryFee: product.deliveryFee,
+        minOrder: product.minOrder,
+        discountPct: 0,
+        priceTier: '৳৳',
+        openingHours: '10:00 AM - 11:30 PM',
+        isOpen: product.isOpen,
+        isSponsored: false,
+        isNew: false,
+        deliveryMode: product.deliveryMode,
+        commissionRate: '15.00',
+        commissionType: 'percentage',
+        fixedCommission: 0,
+        subscriptionPlan: 'basic',
+        status: 'approved',
+      };
+
+    handleAddToCart(matched, {
+      foodItemId: product.id,
+      restaurantId: product.restaurantId,
+      name: product.name,
+      nameBn: product.nameBn,
+      basePrice: product.price,
+      discountPrice: product.discountPrice,
+      variationName: product.variationsJson?.[0]?.name || 'Regular',
+      variationDelta: product.variationsJson?.[0]?.priceDelta || 0,
+      addons: [],
+      quantity: 1,
+      imageUrl: product.imageUrl,
+    });
+  };
+
   const confirmSwitchRestaurantCart = () => {
     if (!pendingSwitchItem) return;
     setCartRestaurant(pendingSwitchItem.restaurant);
@@ -567,6 +746,19 @@ function MarketplaceApp() {
     return sorted;
   }, [restaurants, selectedCuisine, onlyDiscount, onlyFreeFirst, priceTierFilter, deliveryFleetFilter, searchQuery, sortBy]);
 
+  const filteredProducts = useMemo(() => {
+    return filterStorefrontProducts(storefrontProducts, {
+      cuisine: selectedCuisine,
+      query: searchQuery,
+      onlyDiscount,
+      deliveryFleet: deliveryFleetFilter,
+    });
+  }, [storefrontProducts, selectedCuisine, searchQuery, onlyDiscount, deliveryFleetFilter]);
+
+  const visibleHomepageProducts = useMemo(() => {
+    return showAllProducts ? filteredProducts : filteredProducts.slice(0, 8);
+  }, [filteredProducts, showAllProducts]);
+
   const totalCartItems = cartItems.reduce((s, i) => s + i.quantity, 0);
   const unreadNotifs = notifications.filter((n) => !n.isRead).length;
 
@@ -576,17 +768,24 @@ function MarketplaceApp() {
       {gmpQuotaBanner && (
         <div
           role="alert"
-          className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-xs text-amber-900 flex items-center justify-between gap-3 sticky top-0 z-50"
+          className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm flex items-center justify-between gap-3"
         >
-          <span>
-            {lang === 'bn'
-              ? 'Google Maps ডেমো কোটা পূর্ণ হয়েছে — ঢাকা কো-অর্ডিনেট ম্যাপ ফলব্যাক মোডে চলছে।'
-              : 'Google Maps demo quota exceeded — using interactive Dhaka coordinate map fallback.'}
+          <span className="flex-1">
+            Google Maps Platform quota reached. If you are the app owner, visit{' '}
+            <a
+              href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-semibold text-amber-950 hover:text-amber-800"
+            >
+              maps developer site
+            </a>{' '}
+            for instructions to update your account.
           </span>
           <button
             type="button"
             onClick={() => setGmpQuotaBanner(false)}
-            className="font-semibold underline shrink-0"
+            className="font-semibold underline shrink-0 text-xs"
           >
             Dismiss
           </button>
@@ -734,7 +933,7 @@ function MarketplaceApp() {
                     clearError();
                     setAuthModalOpen(true);
                   }}
-                  className="p-1.5 sm:px-3.5 sm:py-1.5 rounded-lg border border-neutral-300 hover:border-[#2E3138] text-xs font-bold text-[#2E3138] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                  className="p-1.5 sm:px-3 sm:py-1.5 rounded-lg border border-neutral-300 hover:border-[#2E3138] text-xs font-bold text-[#2E3138] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
                 >
                   <User className="w-4 h-4 text-[#E21B70]" />
                   <span className="hidden sm:inline max-w-[110px] truncate">
@@ -746,6 +945,22 @@ function MarketplaceApp() {
                     </span>
                   )}
                 </button>
+                {user.isSandbox && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearError();
+                      setShowAdminPinBox(false);
+                      setPendingAdminRedirect(false);
+                      setAuthMode('register');
+                      setAuthModalOpen(true);
+                    }}
+                    className="hidden md:inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[#E21B70]/40 bg-[#FFF0F6] hover:bg-[#FFE4EF] text-[#E21B70] text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'অ্যাকাউন্ট তৈরি' : 'Create Account'}</span>
+                  </button>
+                )}
               </>
             ) : (
               <button
@@ -1129,6 +1344,7 @@ function MarketplaceApp() {
             mapsApiKey={mapsApiKey}
             initialOnboarding={view.onboarding}
             onRefreshUser={refreshUser}
+            onMenuMutated={loadStorefront}
             onBack={() => setView({ type: 'home' })}
           />
         ) : view.type === 'rider' && user ? (
@@ -1456,6 +1672,176 @@ function MarketplaceApp() {
                 )}
               </div>
 
+              {/* Order Food Now — Direct Product Catalog at Top of Homepage (SEO + 1-Click Order) */}
+              <section
+                aria-labelledby="homepage-products-heading"
+                data-testid="homepage-products-section"
+                itemScope
+                itemType="https://schema.org/ItemList"
+                className="space-y-3.5"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h2
+                      id="homepage-products-heading"
+                      className="text-xl font-extrabold text-[#2E3138] tracking-tight"
+                    >
+                      {lang === 'bn'
+                        ? 'জনপ্রিয় খাবার — ১ ক্লিকে অর্ডার করুন'
+                        : 'Order Popular Food Now'}{' '}
+                      <span className="text-sm font-semibold text-neutral-400 tabular-nums">
+                        ({filteredProducts.length})
+                      </span>
+                    </h2>
+                    <p className="text-xs text-neutral-500 mt-0.5">
+                      {lang === 'bn'
+                        ? 'ঢাকার সেরা রেস্টুরেন্টের তাজা খাবার সরাসরি কার্টে যোগ করে অর্ডার করুন'
+                        : 'Fresh signature dishes across Dhaka — tap + Order to add straight to your cart'}
+                    </p>
+                  </div>
+                  {filteredProducts.length > 8 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllProducts((v) => !v)}
+                      className="px-3 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-xs font-bold text-[#E21B70] transition-colors"
+                    >
+                      {showAllProducts
+                        ? lang === 'bn'
+                          ? 'কম দেখুন'
+                          : 'Show Less'
+                        : lang === 'bn'
+                        ? `সব দেখুন (${filteredProducts.length})`
+                        : `View All (${filteredProducts.length})`}
+                    </button>
+                  )}
+                </div>
+
+                {loadingStore ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {[1, 2, 3, 4].map((n) => (
+                      <div key={n} className="rounded-2xl border border-neutral-200 p-3 space-y-2.5">
+                        <div className="aspect-[16/10] rounded-xl bg-neutral-100" />
+                        <div className="h-4 w-3/4 rounded bg-neutral-100" />
+                        <div className="h-3 w-1/2 rounded bg-neutral-100" />
+                      </div>
+                    ))}
+                  </div>
+                ) : visibleHomepageProducts.length === 0 ? (
+                  <div className="bg-white rounded-2xl border border-neutral-200 p-8 text-center text-xs text-neutral-500">
+                    {lang === 'bn'
+                      ? 'আপনার ফিল্টার অনুযায়ী কোনো খাবার পাওয়া যায়নি।'
+                      : 'No dishes match your active filters.'}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {visibleHomepageProducts.map((product) => {
+                      const hasOffer = Boolean(
+                        product.discountPrice && product.discountPrice < product.price
+                      );
+                      const finalPrice = product.discountPrice ?? product.price;
+                      return (
+                        <article
+                          key={product.id}
+                          itemProp="itemListElement"
+                          itemScope
+                          itemType="https://schema.org/Product"
+                          className="group bg-white rounded-2xl border border-neutral-200 hover:border-[#E21B70]/45 hover:shadow-md transition-all overflow-hidden flex flex-col"
+                        >
+                          <div className="relative aspect-[16/10] bg-neutral-100 overflow-hidden">
+                            <img
+                              src={product.imageUrl}
+                              alt={product.name}
+                              itemProp="image"
+                              referrerPolicy="no-referrer"
+                              onError={(e) => {
+                                const img = e.currentTarget;
+                                if (!img.dataset.fallbackApplied) {
+                                  img.dataset.fallbackApplied = '1';
+                                  img.src =
+                                    product.restaurantCoverUrl ||
+                                    '/src/assets/images/food_kacchi_biriyani_1794831373742.jpg';
+                                }
+                              }}
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            />
+                            {hasOffer ? (
+                              <span className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded-md bg-[#E21B70] text-white text-[10px] font-extrabold shadow-xs">
+                                {Math.round(((product.price - finalPrice) / product.price) * 100)}% OFF
+                              </span>
+                            ) : product.isPopular ? (
+                              <span className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded-md bg-[#2E3138]/85 text-white text-[10px] font-bold">
+                                {lang === 'bn' ? 'জনপ্রিয়' : 'Best Seller'}
+                              </span>
+                            ) : null}
+                            {!product.inStock && (
+                              <span className="absolute inset-0 bg-black/50 flex items-center justify-center text-white text-xs font-bold">
+                                {lang === 'bn' ? 'স্টক শেষ' : 'Out of Stock'}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="p-3.5 flex-1 flex flex-col justify-between gap-2.5">
+                            <div className="space-y-1">
+                              <p className="text-[10px] font-bold uppercase tracking-wide text-neutral-400 truncate">
+                                {product.category}
+                              </p>
+                              <h3
+                                itemProp="name"
+                                className="font-bold text-sm text-[#2E3138] leading-snug line-clamp-1"
+                              >
+                                {lang === 'bn' ? product.nameBn : product.name}
+                              </h3>
+                              <button
+                                type="button"
+                                onClick={() => openRestaurant(product.restaurantSlug)}
+                                className="text-[11px] text-neutral-500 hover:text-[#E21B70] font-medium inline-flex items-center gap-1 truncate max-w-full"
+                              >
+                                <Store className="w-3 h-3 shrink-0" />
+                                <span className="truncate">
+                                  {lang === 'bn' ? product.restaurantNameBn : product.restaurantName}
+                                </span>
+                                <span>·</span>
+                                <span className="tabular-nums shrink-0">{product.deliveryTimeMin}m</span>
+                              </button>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2 pt-1 border-t border-neutral-100">
+                              <div
+                                itemProp="offers"
+                                itemScope
+                                itemType="https://schema.org/Offer"
+                                className="tabular-nums"
+                              >
+                                <meta itemProp="priceCurrency" content="BDT" />
+                                <meta itemProp="price" content={String(finalPrice)} />
+                                <span className="font-extrabold text-sm text-[#E21B70]">
+                                  {formatBdt(finalPrice, lang)}
+                                </span>
+                                {hasOffer && (
+                                  <span className="ml-1.5 text-[11px] text-neutral-400 line-through">
+                                    {formatBdt(product.price, lang)}
+                                  </span>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                disabled={!product.inStock}
+                                onClick={() => handleQuickAddProduct(product)}
+                                style={{ backgroundColor: sc.accentColor }}
+                                className="px-3 py-1.5 rounded-lg text-white text-xs font-bold inline-flex items-center gap-1 hover:opacity-90 disabled:opacity-40 transition-opacity shrink-0"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>{lang === 'bn' ? 'অর্ডার' : 'Add'}</span>
+                              </button>
+                            </div>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+
               {/* Hero Promotional Banner (Controlled via Admin -> Frontend Control) */}
               {sc.showHero && (
                 <section className="rounded-2xl overflow-hidden bg-gradient-to-r from-[#FFF0F6] via-[#FCE6EE] to-[#FAD8E6] border border-[#F5C6D8]/70 grid grid-cols-1 lg:grid-cols-12 items-stretch">
@@ -1515,7 +1901,7 @@ function MarketplaceApp() {
               {sc.showCuisineRibbon && (
                 <section className="space-y-3.5">
                   <h2 className="text-xl font-extrabold text-[#2E3138] tracking-tight">{t(lang, 'favCuisines')}</h2>
-                  <div className="flex gap-4 overflow-x-auto pb-2 no-scrollbar">
+                  <div className="flex gap-4 overflow-x-auto pt-2 pb-2 no-scrollbar">
                     {CUISINE_CATEGORIES.map((c) => {
                       const active = selectedCuisine === c.id;
                       return (
@@ -1955,7 +2341,7 @@ function MarketplaceApp() {
                   placeholder={
                     lang === 'bn'
                       ? 'ঢাকার রাস্তার নাম বা এলাকা লিখুন (যেমন: Banani Road 11)...'
-                      : 'Search Dhaka street or landmark (OpenStreetMap)...'
+                      : 'Search Dhaka street, area, or landmark...'
                   }
                   className="w-full pl-9 pr-3 py-2 rounded-xl border border-neutral-200 text-xs focus:outline-none focus:border-[#E21B70]"
                 />
@@ -2083,7 +2469,10 @@ function MarketplaceApp() {
                   clearError();
                   setAuthSubmitting(true);
                   try {
-                    await unlockAdminWithPin(adminPinInput.trim());
+                    await unlockAdminWithPin(
+                      adminPinInput.trim(),
+                      adminPinEmail.trim() || 'raqkibrony@gmail.com'
+                    );
                     setAdminPinInput('');
                     setShowAdminPinBox(false);
                     setPendingAdminRedirect(false);
@@ -2125,33 +2514,44 @@ function MarketplaceApp() {
                 </div>
                 <p className="text-[11px] text-neutral-600 leading-relaxed">
                   {lang === 'bn'
-                    ? 'সরাসরি সুপার অ্যাডমিন প্যানেল খুলতে আপনার অ্যাডমিন PIN দিন (অথবা নিচের Google / ইমেইল ব্যবহার করুন)।'
-                    : 'Enter your Admin PIN to unlock the Super Admin Panel directly (or sign in via Google / Email below).'}
+                    ? 'অ্যাডমিন ইমেইল ও PIN দিয়ে সরাসরি সুপার অ্যাডমিন প্যানেল আনলক করুন।'
+                    : 'Enter your Admin Email & PIN to unlock the Super Admin Panel directly.'}
                 </p>
-                <div className="flex items-center gap-2">
+                <div className="space-y-2">
                   <input
-                    type="password"
-                    inputMode="numeric"
+                    type="email"
                     required
-                    minLength={4}
-                    maxLength={16}
-                    value={adminPinInput}
-                    onChange={(e) => setAdminPinInput(e.target.value)}
-                    placeholder={lang === 'bn' ? 'অ্যাডমিন PIN লিখুন' : 'Enter Admin PIN'}
-                    aria-label="Admin PIN"
-                    className="flex-1 min-w-0 px-3 py-2 rounded-lg border border-neutral-300 bg-white text-xs text-[#2E3138] tracking-widest focus:outline-none focus:border-[#E21B70]"
+                    value={adminPinEmail}
+                    onChange={(e) => setAdminPinEmail(e.target.value)}
+                    placeholder="raqkibrony@gmail.com"
+                    aria-label="Admin Email"
+                    className="w-full px-3 py-2 rounded-lg border border-neutral-300 bg-white text-xs text-[#2E3138] focus:outline-none focus:border-[#E21B70]"
                   />
-                  <button
-                    type="submit"
-                    disabled={authSubmitting || adminPinInput.trim().length < 4}
-                    className="px-4 py-2 rounded-lg bg-[#2E3138] hover:bg-black disabled:opacity-50 text-white text-xs font-bold shrink-0 transition-colors"
-                  >
-                    {authSubmitting
-                      ? '...'
-                      : lang === 'bn'
-                      ? 'আনলক'
-                      : 'Unlock'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      required
+                      minLength={4}
+                      maxLength={16}
+                      value={adminPinInput}
+                      onChange={(e) => setAdminPinInput(e.target.value)}
+                      placeholder={lang === 'bn' ? 'অ্যাডমিন PIN লিখুন' : 'Enter Admin PIN'}
+                      aria-label="Admin PIN"
+                      className="flex-1 min-w-0 px-3 py-2 rounded-lg border border-neutral-300 bg-white text-xs text-[#2E3138] tracking-widest focus:outline-none focus:border-[#E21B70]"
+                    />
+                    <button
+                      type="submit"
+                      disabled={authSubmitting || adminPinInput.trim().length < 4}
+                      className="px-4 py-2 rounded-lg bg-[#2E3138] hover:bg-black disabled:opacity-50 text-white text-xs font-bold shrink-0 transition-colors"
+                    >
+                      {authSubmitting
+                        ? '...'
+                        : lang === 'bn'
+                        ? 'আনলক'
+                        : 'Unlock'}
+                    </button>
+                  </div>
                 </div>
               </form>
             )}
@@ -2292,13 +2692,15 @@ function MarketplaceApp() {
               <div className="flex-grow border-t border-neutral-200" />
             </div>
 
-            {/* Email & Password Sign-In / Create Account */}
+            {/* Email & Password Sign-In / Create Account / Forgot Password */}
             <div className="rounded-xl border border-neutral-200 p-4 space-y-3 bg-[#FAFAFB]">
-              <div className="grid grid-cols-2 gap-1.5 p-1 rounded-lg bg-neutral-200/70">
+              <div className="grid grid-cols-3 gap-1.5 p-1 rounded-lg bg-neutral-200/70">
                 <button
                   type="button"
                   onClick={() => {
                     clearError();
+                    setResetInfo(null);
+                    setResetStep('request');
                     setAuthMode('login');
                   }}
                   className={`py-1.5 rounded-md text-xs font-bold transition-colors ${
@@ -2307,12 +2709,14 @@ function MarketplaceApp() {
                       : 'text-neutral-600 hover:text-[#2E3138]'
                   }`}
                 >
-                  {lang === 'bn' ? 'ইমেইল লগইন' : 'Sign In'}
+                  {lang === 'bn' ? 'সাইন ইন' : 'Sign In'}
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     clearError();
+                    setResetInfo(null);
+                    setResetStep('request');
                     setAuthMode('register');
                   }}
                   className={`py-1.5 rounded-md text-xs font-bold transition-colors ${
@@ -2323,8 +2727,229 @@ function MarketplaceApp() {
                 >
                   {lang === 'bn' ? 'নতুন অ্যাকাউন্ট' : 'Create Account'}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearError();
+                    setResetInfo(null);
+                    setResetStep('request');
+                    setResetCode('');
+                    setResetNewPassword('');
+                    setResetConfirmPassword('');
+                    setAuthMode('forgot');
+                  }}
+                  className={`py-1.5 rounded-md text-xs font-bold transition-colors ${
+                    authMode === 'forgot'
+                      ? 'bg-white text-[#2E3138] shadow-xs'
+                      : 'text-neutral-600 hover:text-[#2E3138]'
+                  }`}
+                >
+                  {lang === 'bn' ? 'পাসওয়ার্ড রিসেট' : 'Forgot Password'}
+                </button>
               </div>
 
+              {authMode === 'forgot' ? (
+                resetStep === 'request' ? (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      clearError();
+                      setResetInfo(null);
+                      setAuthSubmitting(true);
+                      try {
+                        const res = await requestPasswordReset(authEmail);
+                        setResetInfo({
+                          message: res.message,
+                          previewCode: res.previewCode,
+                          isAdminAccount: res.isAdminAccount,
+                        });
+                        if (res.previewCode) {
+                          setResetCode(res.previewCode);
+                        }
+                        setResetStep('confirm');
+                      } catch {
+                        // error shown via AuthContext
+                      } finally {
+                        setAuthSubmitting(false);
+                      }
+                    }}
+                    className="space-y-2.5"
+                  >
+                    <p className="text-[11px] text-neutral-600 leading-relaxed">
+                      {lang === 'bn'
+                        ? 'আপনার রেজিস্টার্ড ইমেইল লিখুন। ভেরিফিকেশন কোড ব্যবহার করে নতুন পাসওয়ার্ড সেট করতে পারবেন।'
+                        : 'Enter your registered email address to receive a password reset verification code.'}
+                    </p>
+                    <label className="block">
+                      <span className="text-[11px] font-semibold text-neutral-600">
+                        {lang === 'bn' ? 'ইমেইল' : 'Email Address'}
+                      </span>
+                      <div className="mt-1 relative">
+                        <Mail className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="email"
+                          required
+                          value={authEmail}
+                          onChange={(e) => setAuthEmail(e.target.value)}
+                          placeholder="you@example.com"
+                          className="w-full pl-9 pr-3 py-2 rounded-lg border border-neutral-300 bg-white text-xs text-[#2E3138] focus:outline-none focus:border-[#E21B70]"
+                        />
+                      </div>
+                    </label>
+                    <button
+                      type="submit"
+                      disabled={authSubmitting}
+                      className="w-full py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] disabled:opacity-60 text-white text-xs font-bold transition-colors"
+                    >
+                      {authSubmitting
+                        ? lang === 'bn'
+                          ? 'অপেক্ষা করুন...'
+                          : 'Sending...'
+                        : lang === 'bn'
+                        ? 'রিসেট কোড পাঠান'
+                        : 'Send Reset Code'}
+                    </button>
+                  </form>
+                ) : (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      clearError();
+                      if (resetNewPassword !== resetConfirmPassword) {
+                        setResetInfo({
+                          ...(resetInfo || { message: '' }),
+                          message:
+                            lang === 'bn'
+                              ? 'দুটি পাসওয়ার্ড মিলছে না।'
+                              : 'Passwords do not match. Please re-enter.',
+                        });
+                        return;
+                      }
+                      setAuthSubmitting(true);
+                      try {
+                        const signedUser = await confirmPasswordReset(
+                          authEmail,
+                          resetCode,
+                          resetNewPassword
+                        );
+                        setResetCode('');
+                        setResetNewPassword('');
+                        setResetConfirmPassword('');
+                        setResetInfo(null);
+                        setResetStep('request');
+                        setAuthMode('login');
+                        setAuthModalOpen(false);
+                        if (signedUser.role === 'super_admin' || signedUser.role === 'admin') {
+                          setView({ type: 'admin' });
+                        } else if (signedUser.role === 'restaurant_owner') {
+                          setView({ type: 'vendor' });
+                        } else if (signedUser.role === 'rider') {
+                          setView({ type: 'rider' });
+                        }
+                        showToast(
+                          lang === 'bn'
+                            ? 'পাসওয়ার্ড পরিবর্তন ও লগইন সম্পন্ন হয়েছে'
+                            : 'Password updated & signed in'
+                        );
+                      } catch {
+                        // error shown via AuthContext
+                      } finally {
+                        setAuthSubmitting(false);
+                      }
+                    }}
+                    className="space-y-2.5"
+                  >
+                    {resetInfo && (
+                      <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-900 space-y-1">
+                        <p>{resetInfo.message}</p>
+                        {resetInfo.previewCode && (
+                          <p className="font-bold">
+                            {lang === 'bn' ? 'রিসেট কোড:' : 'Reset Code:'}{' '}
+                            <span className="font-mono tracking-widest text-sm text-[#E21B70]">
+                              {resetInfo.previewCode}
+                            </span>
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    <label className="block">
+                      <span className="text-[11px] font-semibold text-neutral-600">
+                        {resetInfo?.isAdminAccount
+                          ? lang === 'bn'
+                            ? 'অ্যাডমিন PIN লিখুন'
+                            : 'Admin PIN (Verification)'
+                          : lang === 'bn'
+                          ? '৬ সংখ্যার রিসেট কোড'
+                          : '6-Digit Reset Code'}
+                      </span>
+                      <input
+                        type={resetInfo?.isAdminAccount ? 'password' : 'text'}
+                        inputMode="numeric"
+                        required
+                        minLength={4}
+                        maxLength={16}
+                        value={resetCode}
+                        onChange={(e) => setResetCode(e.target.value)}
+                        placeholder={resetInfo?.isAdminAccount ? 'Enter Admin PIN' : '6-digit code'}
+                        className="mt-1 w-full px-3 py-2 rounded-lg border border-neutral-300 bg-white text-xs text-[#2E3138] tracking-widest focus:outline-none focus:border-[#E21B70]"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-[11px] font-semibold text-neutral-600">
+                        {lang === 'bn' ? 'নতুন পাসওয়ার্ড (কমপক্ষে ৬ অক্ষর)' : 'New Password (min 6 chars)'}
+                      </span>
+                      <input
+                        type="password"
+                        required
+                        minLength={6}
+                        value={resetNewPassword}
+                        onChange={(e) => setResetNewPassword(e.target.value)}
+                        placeholder="••••••"
+                        className="mt-1 w-full px-3 py-2 rounded-lg border border-neutral-300 bg-white text-xs text-[#2E3138] focus:outline-none focus:border-[#E21B70]"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-[11px] font-semibold text-neutral-600">
+                        {lang === 'bn' ? 'নতুন পাসওয়ার্ড নিশ্চিত করুন' : 'Confirm New Password'}
+                      </span>
+                      <input
+                        type="password"
+                        required
+                        minLength={6}
+                        value={resetConfirmPassword}
+                        onChange={(e) => setResetConfirmPassword(e.target.value)}
+                        placeholder="••••••"
+                        className="mt-1 w-full px-3 py-2 rounded-lg border border-neutral-300 bg-white text-xs text-[#2E3138] focus:outline-none focus:border-[#E21B70]"
+                      />
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearError();
+                          setResetStep('request');
+                        }}
+                        className="px-3 py-2 rounded-xl border border-neutral-300 text-xs font-semibold text-neutral-700 hover:bg-neutral-100"
+                      >
+                        {lang === 'bn' ? 'পিছনে' : 'Back'}
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={authSubmitting}
+                        className="flex-1 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] disabled:opacity-60 text-white text-xs font-bold transition-colors"
+                      >
+                        {authSubmitting
+                          ? lang === 'bn'
+                            ? 'আপডেট হচ্ছে...'
+                            : 'Updating...'
+                          : lang === 'bn'
+                          ? 'পাসওয়ার্ড আপডেট করুন'
+                          : 'Reset Password & Sign In'}
+                      </button>
+                    </div>
+                  </form>
+                )
+              ) : (
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
@@ -2333,10 +2958,17 @@ function MarketplaceApp() {
                   try {
                     const signedUser =
                       authMode === 'register'
-                        ? await registerWithEmail(authFullName, authEmail, authPassword)
+                        ? await registerWithEmail(authFullName, authEmail, authPassword, authRole)
                         : await signInWithEmail(authEmail, authPassword);
                     setAuthPassword('');
                     setAuthModalOpen(false);
+                    if (signedUser.role === 'super_admin' || signedUser.role === 'admin') {
+                      setView({ type: 'admin' });
+                    } else if (signedUser.role === 'restaurant_owner') {
+                      setView({ type: 'vendor' });
+                    } else if (signedUser.role === 'rider') {
+                      setView({ type: 'rider' });
+                    }
                     showToast(
                       lang === 'bn'
                         ? `স্বাগতম, ${signedUser.fullName}`
@@ -2351,23 +2983,59 @@ function MarketplaceApp() {
                 className="space-y-2.5"
               >
                 {authMode === 'register' && (
-                  <label className="block">
-                    <span className="text-[11px] font-semibold text-neutral-600">
-                      {lang === 'bn' ? 'পুরো নাম' : 'Full Name'}
-                    </span>
-                    <div className="mt-1 relative">
-                      <User className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                      <input
-                        type="text"
-                        required
-                        minLength={2}
-                        value={authFullName}
-                        onChange={(e) => setAuthFullName(e.target.value)}
-                        placeholder={lang === 'bn' ? 'আপনার নাম' : 'e.g. Rakib Hasan'}
-                        className="w-full pl-9 pr-3 py-2 rounded-lg border border-neutral-300 bg-white text-xs text-[#2E3138] focus:outline-none focus:border-[#E21B70]"
-                      />
+                  <>
+                    <div className="space-y-1">
+                      <span className="text-[11px] font-semibold text-neutral-600 block">
+                        {lang === 'bn' ? 'অ্যাকাউন্টের ধরন' : 'Account Type'}
+                      </span>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {[
+                          {
+                            id: 'customer' as const,
+                            label: lang === 'bn' ? 'কাস্টমার' : 'Customer',
+                          },
+                          {
+                            id: 'restaurant_owner' as const,
+                            label: lang === 'bn' ? 'রেস্টুরেন্ট' : 'Restaurant',
+                          },
+                          {
+                            id: 'rider' as const,
+                            label: lang === 'bn' ? 'রাইডার' : 'Rider',
+                          },
+                        ].map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => setAuthRole(opt.id)}
+                            className={`py-1.5 px-2 rounded-lg border text-[11px] font-bold transition-colors ${
+                              authRole === opt.id
+                                ? 'bg-[#FFF0F6] border-[#E21B70] text-[#E21B70]'
+                                : 'bg-white border-neutral-200 text-neutral-600 hover:border-neutral-300'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </label>
+                    <label className="block">
+                      <span className="text-[11px] font-semibold text-neutral-600">
+                        {lang === 'bn' ? 'পুরো নাম' : 'Full Name'}
+                      </span>
+                      <div className="mt-1 relative">
+                        <User className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          required
+                          minLength={2}
+                          value={authFullName}
+                          onChange={(e) => setAuthFullName(e.target.value)}
+                          placeholder={lang === 'bn' ? 'আপনার নাম' : 'e.g. Rakib Hasan'}
+                          className="w-full pl-9 pr-3 py-2 rounded-lg border border-neutral-300 bg-white text-xs text-[#2E3138] focus:outline-none focus:border-[#E21B70]"
+                        />
+                      </div>
+                    </label>
+                  </>
                 )}
 
                 <label className="block">
@@ -2388,9 +3056,25 @@ function MarketplaceApp() {
                 </label>
 
                 <label className="block">
-                  <span className="text-[11px] font-semibold text-neutral-600">
-                    {lang === 'bn' ? 'পাসওয়ার্ড (কমপক্ষে ৬ অক্ষর)' : 'Password (min 6 characters)'}
-                  </span>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold text-neutral-600">
+                      {lang === 'bn' ? 'পাসওয়ার্ড (কমপক্ষে ৬ অক্ষর)' : 'Password (min 6 characters)'}
+                    </span>
+                    {authMode === 'login' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearError();
+                          setResetInfo(null);
+                          setResetStep('request');
+                          setAuthMode('forgot');
+                        }}
+                        className="text-[11px] font-bold text-[#E21B70] hover:underline"
+                      >
+                        {lang === 'bn' ? 'পাসওয়ার্ড ভুলে গেছেন?' : 'Forgot Password?'}
+                      </button>
+                    )}
+                  </div>
                   <div className="mt-1 relative">
                     <Lock className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
@@ -2430,6 +3114,7 @@ function MarketplaceApp() {
                   </span>
                 </button>
               </form>
+              )}
             </div>
 
             <div className="pt-2 border-t border-neutral-100 space-y-2">
@@ -2487,6 +3172,60 @@ function MarketplaceApp() {
               </p>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Supabase Email Recovery Set New Password Modal */}
+      {passwordRecoveryPending && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setSupaRecoverySaving(true);
+              try {
+                await completeSupabasePasswordRecovery(supaRecoveryPassword);
+                setSupaRecoveryPassword('');
+                showToast(
+                  lang === 'bn' ? 'নতুন পাসওয়ার্ড সেট হয়েছে' : 'New password saved'
+                );
+              } finally {
+                setSupaRecoverySaving(false);
+              }
+            }}
+            className="bg-white rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-xl"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-base text-[#2E3138]">
+                {lang === 'bn' ? 'নতুন পাসওয়ার্ড সেট করুন' : 'Set New Password'}
+              </h3>
+              <button
+                type="button"
+                onClick={dismissPasswordRecovery}
+                className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <label className="block text-xs">
+              <span className="font-semibold text-neutral-700">New Password (min 6 characters)</span>
+              <input
+                type="password"
+                required
+                minLength={6}
+                value={supaRecoveryPassword}
+                onChange={(e) => setSupaRecoveryPassword(e.target.value)}
+                placeholder="••••••"
+                className="mt-1 w-full px-3 py-2 rounded-lg border border-neutral-300"
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={supaRecoverySaving}
+              className="w-full py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold disabled:opacity-50"
+            >
+              {supaRecoverySaving ? 'Saving...' : 'Save New Password'}
+            </button>
+          </form>
         </div>
       )}
 

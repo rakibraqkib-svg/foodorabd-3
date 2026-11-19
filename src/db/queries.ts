@@ -1,4 +1,4 @@
-import { and, desc, eq, or } from 'drizzle-orm';
+import { and, desc, eq, like, or } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   auditLogs,
@@ -7,6 +7,7 @@ import {
   customerAddresses,
   favorites,
   foodItems,
+  localCredentials,
   notifications,
   orders,
   orderStatusHistory,
@@ -17,6 +18,7 @@ import {
   riders,
   users,
 } from './schema.ts';
+import { PROTECTED_SUPER_ADMIN_EMAILS } from '../lib/marketplace-logic.ts';
 
 export async function getApprovedRestaurants() {
   try {
@@ -40,6 +42,56 @@ export async function getAllRestaurantsAdmin() {
   }
 }
 
+export async function getStorefrontProducts() {
+  try {
+    const rows = await db
+      .select({
+        id: foodItems.id,
+        restaurantId: foodItems.restaurantId,
+        category: foodItems.category,
+        name: foodItems.name,
+        nameBn: foodItems.nameBn,
+        description: foodItems.description,
+        imageUrl: foodItems.imageUrl,
+        price: foodItems.price,
+        discountPrice: foodItems.discountPrice,
+        variationsJson: foodItems.variationsJson,
+        addonsJson: foodItems.addonsJson,
+        inStock: foodItems.inStock,
+        isAvailable: foodItems.isAvailable,
+        isPopular: foodItems.isPopular,
+        isVisibleOnStorefront: foodItems.isVisibleOnStorefront,
+        restaurantName: restaurants.name,
+        restaurantNameBn: restaurants.nameBn,
+        restaurantSlug: restaurants.slug,
+        restaurantLogoUrl: restaurants.logoUrl,
+        restaurantCoverUrl: restaurants.coverUrl,
+        restaurantArea: restaurants.area,
+        restaurantCuisine: restaurants.cuisine,
+        deliveryTimeMin: restaurants.deliveryTimeMin,
+        deliveryFee: restaurants.deliveryFee,
+        deliveryMode: restaurants.deliveryMode,
+        minOrder: restaurants.minOrder,
+        rating: restaurants.rating,
+        isOpen: restaurants.isOpen,
+      })
+      .from(foodItems)
+      .innerJoin(restaurants, eq(foodItems.restaurantId, restaurants.id))
+      .where(
+        and(
+          eq(restaurants.status, 'approved'),
+          eq(foodItems.isVisibleOnStorefront, true),
+          eq(foodItems.isAvailable, true)
+        )
+      )
+      .orderBy(desc(foodItems.isPopular), desc(foodItems.inStock), desc(foodItems.id));
+    return rows;
+  } catch (error) {
+    console.error('Failed to load storefront products:', error);
+    throw new Error('Failed to load storefront products', { cause: error });
+  }
+}
+
 export async function getRestaurantBySlug(slug: string) {
   try {
     const rows = await db.select().from(restaurants).where(eq(restaurants.slug, slug)).limit(1);
@@ -48,7 +100,12 @@ export async function getRestaurantBySlug(slug: string) {
     const items = await db
       .select()
       .from(foodItems)
-      .where(eq(foodItems.restaurantId, restaurant.id));
+      .where(
+        and(
+          eq(foodItems.restaurantId, restaurant.id),
+          eq(foodItems.isVisibleOnStorefront, true)
+        )
+      );
     const restaurantReviews = await db
       .select()
       .from(reviews)
@@ -261,6 +318,7 @@ export async function getAdminWorkspace() {
       allRiders,
       recentAuditLogs,
       settings,
+      adminPinCreds,
     ] = await Promise.all([
       db.select().from(restaurants).orderBy(desc(restaurants.createdAt)),
       db.select().from(foodItems).orderBy(desc(foodItems.id)),
@@ -272,7 +330,17 @@ export async function getAdminWorkspace() {
       db.select().from(riders).orderBy(desc(riders.createdAt)),
       db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(60),
       getPlatformSettingsRow(),
+      db
+        .select({ email: localCredentials.email })
+        .from(localCredentials)
+        .where(like(localCredentials.email, '__admin_pin__:%')),
     ]);
+
+    const adminPinEmailSet = new Set<string>(PROTECTED_SUPER_ADMIN_EMAILS);
+    for (const row of adminPinCreds) {
+      const stripped = row.email.replace(/^__admin_pin__:/, '').trim().toLowerCase();
+      if (stripped) adminPinEmailSet.add(stripped);
+    }
 
     return {
       restaurants: allRestaurants,
@@ -285,6 +353,7 @@ export async function getAdminWorkspace() {
       riders: allRiders,
       auditLogs: recentAuditLogs,
       settings,
+      adminPinEmails: Array.from(adminPinEmailSet),
     };
   } catch (error) {
     console.error('Failed to load admin workspace:', error);

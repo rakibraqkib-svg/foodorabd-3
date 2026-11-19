@@ -14,9 +14,13 @@ import {
   evaluateCoupon,
   formatBdt,
   haversineDistanceKm,
+  isProtectedSuperAdminEmail,
   mapOpenMeteoWeather,
   advanceRiderAlongRoute,
   validateBroadcastNotification,
+  isProductVisibleToCustomers,
+  filterStorefrontProducts,
+  normalizePartnerProductInput,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 
@@ -288,6 +292,20 @@ test('canActorModifyUserAccount enforces super admin governance and protects pri
   });
   assert.equal(demotePrimary.allowed, false);
 
+  // Secondary super admin raqkibrony@gmail.com is also protected from demotion or suspension
+  assert.equal(isProtectedSuperAdminEmail('RAQKIBRONY@gmail.com '), true);
+  assert.equal(isProtectedSuperAdminEmail('customer@foodora.bd'), false);
+  const demoteAdminPinOwner = canActorModifyUserAccount({
+    actorUid: 'demo-admin-uid',
+    actorRole: 'super_admin',
+    targetUid: 'owner-2-uid',
+    targetEmail: 'raqkibrony@gmail.com',
+    currentRole: 'super_admin',
+    nextRole: 'customer',
+    nextStatus: 'suspended',
+  });
+  assert.equal(demoteAdminPinOwner.allowed, false);
+
   // Super admin can promote/demote other admin accounts
   const superAdminAssign = canActorModifyUserAccount({
     actorUid: 'owner-uid',
@@ -329,6 +347,101 @@ test('validateBroadcastNotification enforces title/message lengths and allowed t
     assert.equal(valid.type, 'promo');
   }
 });
+
+test('filterStorefrontProducts hides admin-hidden items and prioritizes featured in-stock items', () => {
+  const sample = [
+    {
+      id: 1,
+      name: 'Hidden Burger',
+      nameBn: 'হিডেন বার্গার',
+      category: 'Burger',
+      price: 300,
+      discountPrice: null,
+      inStock: true,
+      isAvailable: true,
+      isPopular: true,
+      isVisibleOnStorefront: false,
+      restaurantName: 'Chillox',
+      restaurantCuisine: 'Burger',
+      deliveryMode: 'platform',
+    },
+    {
+      id: 2,
+      name: 'Classic Kacchi',
+      nameBn: 'ক্লাসিক কাচ্চি',
+      category: 'Biriyani',
+      price: 450,
+      discountPrice: 390,
+      inStock: true,
+      isAvailable: true,
+      isPopular: true,
+      isVisibleOnStorefront: true,
+      restaurantName: "Sultan's Dine",
+      restaurantCuisine: 'Biriyani',
+      deliveryMode: 'platform',
+    },
+    {
+      id: 3,
+      name: 'Beef Tehari',
+      nameBn: 'বিফ তেহারি',
+      category: 'Biriyani',
+      price: 250,
+      discountPrice: null,
+      inStock: true,
+      isAvailable: true,
+      isPopular: false,
+      isVisibleOnStorefront: true,
+      restaurantName: 'Tehari Ghar',
+      restaurantCuisine: 'Biriyani',
+      deliveryMode: 'third_party',
+    },
+  ];
+
+  assert.equal(isProductVisibleToCustomers(sample[0]), false);
+  assert.equal(isProductVisibleToCustomers(sample[1]), true);
+
+  const visibleAll = filterStorefrontProducts(sample);
+  assert.equal(visibleAll.length, 2);
+  assert.equal(visibleAll[0].id, 2);
+
+  const onlyDiscounts = filterStorefrontProducts(sample, { onlyDiscount: true });
+  assert.equal(onlyDiscounts.length, 1);
+  assert.equal(onlyDiscounts[0].id, 2);
+
+  const thirdPartyOnly = filterStorefrontProducts(sample, { deliveryFleet: 'third_party' });
+  assert.equal(thirdPartyOnly.length, 1);
+  assert.equal(thirdPartyOnly[0].id, 3);
+});
+
+test('normalizePartnerProductInput validates and applies safe defaults for external partner API', () => {
+  const invalidPrice = normalizePartnerProductInput({ name: 'Burger', price: 0 }, '/fallback.jpg');
+  assert.equal(invalidPrice.valid, false);
+
+  const badDiscount = normalizePartnerProductInput(
+    { name: 'Burger', price: 300, discountPrice: 350 },
+    '/fallback.jpg'
+  );
+  assert.equal(badDiscount.valid, false);
+
+  const ok = normalizePartnerProductInput(
+    {
+      name: 'Smoky Naga Burger',
+      category: 'Burger',
+      price: 340,
+      discountPrice: 290,
+      addons: [{ name: 'Extra Cheese', price: 45 }],
+    },
+    '/fallback.jpg'
+  );
+  assert.equal(ok.valid, true);
+  if (ok.valid) {
+    assert.equal(ok.product.nameBn, 'Smoky Naga Burger');
+    assert.equal(ok.product.imageUrl, '/fallback.jpg');
+    assert.equal(ok.product.variationsJson[0].name, 'Regular');
+    assert.equal(ok.product.addonsJson[0].price, 45);
+  }
+});
+
 
 
 

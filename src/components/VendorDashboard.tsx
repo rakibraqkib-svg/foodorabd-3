@@ -2,11 +2,17 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   BarChart3,
+  Check,
   CheckCircle2,
   ClipboardList,
+  Code2,
+  Copy,
+  KeyRound,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
+  Send,
   Settings,
   Sparkles,
   Store,
@@ -49,6 +55,7 @@ interface VendorDashboardProps {
   mapsApiKey: string;
   initialOnboarding?: boolean;
   onRefreshUser: () => Promise<void>;
+  onMenuMutated?: () => Promise<void>;
   onBack: () => void;
 }
 
@@ -58,6 +65,7 @@ export function VendorDashboard({
   mapsApiKey,
   initialOnboarding = false,
   onRefreshUser,
+  onMenuMutated,
   onBack,
 }: VendorDashboardProps) {
   const [loading, setLoading] = useState(true);
@@ -133,6 +141,37 @@ export function VendorDashboard({
   // Payout request
   const [payoutAmt, setPayoutAmt] = useState('500');
 
+  // Partner Product API integration state
+  const [apiKeyInfo, setApiKeyInfo] = useState<{
+    hasKey: boolean;
+    keyPrefix: string | null;
+    label: string | null;
+    lastUsedAt: string | null;
+  } | null>(null);
+  const [revealedApiKey, setRevealedApiKey] = useState<string>('');
+  const [rotatingKey, setRotatingKey] = useState(false);
+  const [copiedApiSnippet, setCopiedApiSnippet] = useState<string | null>(null);
+  const [partnerJsonInput, setPartnerJsonInput] = useState(() =>
+    JSON.stringify(
+      {
+        name: 'Special Beef Tehari Platter',
+        nameBn: 'স্পেশাল বিফ তেহারি প্ল্যাটার',
+        category: 'Biriyani',
+        price: 340,
+        discountPrice: 299,
+        description: 'Authentic Old Dhaka style beef tehari served hot with salad.',
+        isPopular: true,
+      },
+      null,
+      2
+    )
+  );
+  const [pushingPartnerApi, setPushingPartnerApi] = useState(false);
+  const [partnerApiStatus, setPartnerApiStatus] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
+
   const canAccessVendorApi =
     user.role === 'restaurant_owner' || user.role === 'admin' || user.role === 'super_admin';
 
@@ -163,6 +202,17 @@ export function VendorDashboard({
         setEditMode(res.restaurant.deliveryMode);
         setEditLogoUrl(res.restaurant.logoUrl || '');
         setEditCoverUrl(res.restaurant.coverUrl || '');
+        try {
+          const keyMeta = await apiFetch<{
+            hasKey: boolean;
+            keyPrefix: string | null;
+            label: string | null;
+            lastUsedAt: string | null;
+          }>(`/api/vendor/api-key?restaurantId=${res.restaurant.id}`);
+          setApiKeyInfo(keyMeta);
+        } catch {
+          // ignore if endpoint unavailable
+        }
       } else {
         setShowOnboarding(true);
       }
@@ -295,6 +345,7 @@ export function VendorDashboard({
       setNewImageUrl('');
       setFeedback(lang === 'bn' ? 'নতুন খাবার মেনুতে যুক্ত হয়েছে।' : 'New menu item published.');
       await loadWorkspace();
+      await onMenuMutated?.();
     } finally {
       setAddingItem(false);
     }
@@ -322,6 +373,7 @@ export function VendorDashboard({
       setEditingItem(null);
       setFeedback(lang === 'bn' ? 'মেনু আইটেম আপডেট হয়েছে।' : 'Menu item updated.');
       await loadWorkspace();
+      await onMenuMutated?.();
     } finally {
       setSavingEditItem(false);
     }
@@ -352,11 +404,96 @@ export function VendorDashboard({
       body: JSON.stringify({ inStock: !item.inStock }),
     });
     await loadWorkspace();
+    await onMenuMutated?.();
   };
 
   const handleDeleteItem = async (itemId: number) => {
     await apiFetch(`/api/vendor/menu/${itemId}`, { method: 'DELETE' });
     await loadWorkspace();
+    await onMenuMutated?.();
+  };
+
+  const handleRotatePartnerKey = async () => {
+    if (!restaurant) return;
+    setRotatingKey(true);
+    setPartnerApiStatus(null);
+    try {
+      const res = await apiFetch<{
+        apiKey: string;
+        keyPrefix: string;
+        label: string;
+        updatedAt: string;
+      }>('/api/vendor/api-key/rotate', {
+        method: 'POST',
+        body: JSON.stringify({ restaurantId: restaurant.id }),
+      });
+      setRevealedApiKey(res.apiKey);
+      setApiKeyInfo({
+        hasKey: true,
+        keyPrefix: res.keyPrefix,
+        label: res.label,
+        lastUsedAt: null,
+      });
+      setFeedback(
+        lang === 'bn'
+          ? 'নতুন পার্টনার API কী তৈরি হয়েছে। এখনই কপি করে সংরক্ষণ করুন।'
+          : 'New Partner API key generated. Copy and store it securely.'
+      );
+    } catch (err: unknown) {
+      setPartnerApiStatus({
+        ok: false,
+        message: err instanceof Error ? err.message : 'Failed to generate API key',
+      });
+    } finally {
+      setRotatingKey(false);
+    }
+  };
+
+  const handlePushPartnerApi = async () => {
+    const keyToUse = revealedApiKey.trim();
+    if (!keyToUse) {
+      setPartnerApiStatus({
+        ok: false,
+        message:
+          lang === 'bn'
+            ? 'আগে পার্টনার API কী তৈরি করুন বা আপনার কী দিন।'
+            : 'Generate or paste your X-Partner-API-Key first.',
+      });
+      return;
+    }
+    setPushingPartnerApi(true);
+    setPartnerApiStatus(null);
+    try {
+      const parsedBody = JSON.parse(partnerJsonInput);
+      const res = await fetch('/api/partner/v1/products', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Partner-API-Key': keyToUse,
+        },
+        body: JSON.stringify(parsedBody),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload.error || `HTTP ${res.status}`);
+      }
+      setPartnerApiStatus({
+        ok: true,
+        message:
+          lang === 'bn'
+            ? `API দিয়ে ${payload.count || 1}টি প্রোডাক্ট সফলভাবে যোগ হয়েছে!`
+            : `Success (HTTP ${res.status}): Imported ${payload.count || 1} product(s) via Partner API.`,
+      });
+      await loadWorkspace();
+      await onMenuMutated?.();
+    } catch (err: unknown) {
+      setPartnerApiStatus({
+        ok: false,
+        message: err instanceof Error ? err.message : 'Invalid JSON or Partner API request failed',
+      });
+    } finally {
+      setPushingPartnerApi(false);
+    }
   };
 
   const handleSaveSettings = async (e: React.FormEvent) => {
@@ -1503,7 +1640,179 @@ export function VendorDashboard({
                 </button>
               </form>
 
-              <div className="lg:col-span-8 space-y-3">
+              <div className="lg:col-span-8 space-y-4">
+                {/* Partner Product Sync REST API Integration Card */}
+                <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-1.5">
+                        <Code2 className="w-4 h-4 text-[#E21B70]" />
+                        <span>
+                          {lang === 'bn'
+                            ? 'রেস্টুরেন্ট পার্টনার প্রোডাক্ট API (POS / ERP সিঙ্ক)'
+                            : 'Restaurant Partner Product API (Automated Menu Sync)'}
+                        </span>
+                      </h3>
+                      <p className="text-xs text-neutral-500 mt-0.5">
+                        {lang === 'bn'
+                          ? 'আপনার নিজস্ব POS, অ্যাপ বা স্ক্রিপ্ট থেকে সরাসরি X-Partner-API-Key ব্যবহার করে নতুন খাবার যোগ বা আপডেট করুন।'
+                          : 'Connect your POS, inventory script, or website using your X-Partner-API-Key to add/update products via REST JSON.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleRotatePartnerKey}
+                      disabled={rotatingKey}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${rotatingKey ? 'animate-spin' : ''}`} />
+                      <span>
+                        {apiKeyInfo?.hasKey
+                          ? lang === 'bn'
+                            ? 'নতুন API কী তৈরি (Rotate)'
+                            : 'Regenerate API Key'
+                          : lang === 'bn'
+                          ? 'পার্টনার API কী তৈরি করুন'
+                          : 'Generate Partner API Key'}
+                      </span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                    <div className="p-3 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-neutral-700 inline-flex items-center gap-1">
+                          <KeyRound className="w-3.5 h-3.5 text-[#E21B70]" />
+                          <span>API Key Status</span>
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded font-bold text-[10px] ${
+                            apiKeyInfo?.hasKey
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-neutral-200 text-neutral-600'
+                          }`}
+                        >
+                          {apiKeyInfo?.hasKey ? apiKeyInfo.keyPrefix : 'Not Generated'}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={revealedApiKey}
+                          onChange={(e) => setRevealedApiKey(e.target.value)}
+                          placeholder="fbd_live_... (click Generate or paste existing key)"
+                          aria-label="Partner API Key"
+                          className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg border border-neutral-200 bg-white font-mono-nums text-[11px]"
+                        />
+                        {revealedApiKey && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard?.writeText(revealedApiKey);
+                              setCopiedApiSnippet('key');
+                              setTimeout(() => setCopiedApiSnippet(null), 1500);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg border border-neutral-200 bg-white hover:border-[#E21B70] text-neutral-700 font-semibold inline-flex items-center gap-1"
+                          >
+                            {copiedApiSnippet === 'key' ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                            <span>{copiedApiSnippet === 'key' ? 'Copied' : 'Copy'}</span>
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="text-[11px] text-neutral-500 space-y-0.5 font-mono-nums">
+                        <p>
+                          <strong className="text-neutral-700">POST</strong> /api/partner/v1/products
+                        </p>
+                        <p>
+                          <strong className="text-neutral-700">GET</strong> /api/partner/v1/products
+                        </p>
+                        <p>
+                          <strong className="text-neutral-700">PATCH / DELETE</strong>{' '}
+                          /api/partner/v1/products/:id
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const origin = window.location.origin;
+                          const curlCmd = `curl -X POST "${origin}/api/partner/v1/products" \\\n  -H "Content-Type: application/json" \\\n  -H "X-Partner-API-Key: ${
+                            revealedApiKey || 'YOUR_PARTNER_API_KEY'
+                          }" \\\n  -d '${partnerJsonInput.replace(/\s+/g, ' ')}'`;
+                          navigator.clipboard?.writeText(curlCmd);
+                          setCopiedApiSnippet('curl');
+                          setTimeout(() => setCopiedApiSnippet(null), 1800);
+                        }}
+                        className="w-full py-1.5 rounded-lg border border-neutral-200 bg-white hover:border-[#E21B70] text-xs font-semibold text-neutral-700 inline-flex items-center justify-center gap-1.5"
+                      >
+                        {copiedApiSnippet === 'curl' ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5 text-[#E21B70]" />
+                        )}
+                        <span>
+                          {copiedApiSnippet === 'curl'
+                            ? 'Copied cURL Command!'
+                            : 'Copy Ready-to-Run cURL Request'}
+                        </span>
+                      </button>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2">
+                      <label className="block font-bold text-neutral-700">
+                        {lang === 'bn'
+                          ? 'লাইভ JSON প্রোডাক্ট পুশ করুন (Single / Batch)'
+                          : 'Test / Import JSON via Partner API'}
+                      </label>
+                      <textarea
+                        rows={5}
+                        value={partnerJsonInput}
+                        onChange={(e) => setPartnerJsonInput(e.target.value)}
+                        aria-label="Partner API Product JSON Payload"
+                        className="w-full p-2 text-[11px] font-mono-nums bg-white border border-neutral-200 rounded-lg focus:outline-none focus:border-[#E21B70]"
+                      />
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] text-neutral-500">
+                          Accepts object or {'{"products":[...]}'} (up to 50)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handlePushPartnerApi}
+                          disabled={pushingPartnerApi}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2E3138] hover:bg-black text-white text-xs font-semibold disabled:opacity-50"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>
+                            {pushingPartnerApi
+                              ? 'Sending...'
+                              : lang === 'bn'
+                              ? 'API দিয়ে যোগ করুন'
+                              : 'Send API Request'}
+                          </span>
+                        </button>
+                      </div>
+                      {partnerApiStatus && (
+                        <p
+                          role="status"
+                          className={`text-[11px] font-semibold px-2.5 py-1.5 rounded-lg ${
+                            partnerApiStatus.ok
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : 'bg-red-50 text-red-700 border border-red-200'
+                          }`}
+                        >
+                          {partnerApiStatus.message}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
                 {menuItems.map((item) => (
                   <div
                     key={item.id}
@@ -1516,7 +1825,14 @@ export function VendorDashboard({
                         className="w-16 h-16 rounded-xl object-cover shrink-0 bg-neutral-100"
                       />
                       <div className="min-w-0">
-                        <p className="text-[11px] text-neutral-500 uppercase">{item.category}</p>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <p className="text-[11px] text-neutral-500 uppercase">{item.category}</p>
+                          {item.isVisibleOnStorefront === false && (
+                            <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-red-50 text-red-700">
+                              {lang === 'bn' ? 'অ্যাডমিন দ্বারা লুকানো' : 'Hidden by Admin'}
+                            </span>
+                          )}
+                        </div>
                         <h3 className="font-bold text-sm text-[#2E3138] truncate">
                           {lang === 'bn' ? item.nameBn : item.name}
                         </h3>

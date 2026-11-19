@@ -12,8 +12,24 @@ interface AuthContextValue {
   clearGoogleRedirectUrl: () => void;
   signInWithGoogle: () => Promise<boolean>;
   signInWithEmail: (email: string, password: string) => Promise<AppUser>;
-  registerWithEmail: (fullName: string, email: string, password: string) => Promise<AppUser>;
-  unlockAdminWithPin: (pin: string) => Promise<AppUser>;
+  registerWithEmail: (
+    fullName: string,
+    email: string,
+    password: string,
+    role?: 'customer' | 'restaurant_owner' | 'rider'
+  ) => Promise<AppUser>;
+  unlockAdminWithPin: (pin: string, email?: string) => Promise<AppUser>;
+  requestPasswordReset: (email: string) => Promise<{
+    ok: boolean;
+    mode: string;
+    isAdminAccount?: boolean;
+    previewCode?: string;
+    message: string;
+  }>;
+  confirmPasswordReset: (email: string, code: string, newPassword: string) => Promise<AppUser>;
+  passwordRecoveryPending: boolean;
+  completeSupabasePasswordRecovery: (newPassword: string) => Promise<void>;
+  dismissPasswordRecovery: () => void;
   signInSandboxPersona: (role: 'customer' | 'restaurant_owner' | 'rider') => Promise<AppUser>;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -40,6 +56,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [googleRedirectUrl, setGoogleRedirectUrl] = useState<string | null>(null);
+  const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(false);
 
   const clearError = useCallback(() => setError(null), []);
   const clearGoogleRedirectUrl = useCallback(() => setGoogleRedirectUrl(null), []);
@@ -139,7 +156,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (!mounted) return;
-      if (session?.access_token && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED')) {
+      if (event === 'PASSWORD_RECOVERY') {
+        setPasswordRecoveryPending(true);
+      }
+      if (
+        session?.access_token &&
+        (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'PASSWORD_RECOVERY')
+      ) {
         try {
           await syncTokenWithBackend(session.access_token);
           setGoogleRedirectUrl(null);
@@ -218,12 +241,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const registerWithEmail = useCallback(
-    async (fullName: string, email: string, password: string): Promise<AppUser> => {
+    async (
+      fullName: string,
+      email: string,
+      password: string,
+      role: 'customer' | 'restaurant_owner' | 'rider' = 'customer'
+    ): Promise<AppUser> => {
       setError(null);
       try {
         const res = await apiFetch<{ token: string; user: AppUser }>('/api/auth/register', {
           method: 'POST',
-          body: JSON.stringify({ fullName, email, password }),
+          body: JSON.stringify({ fullName, email, password, role }),
         });
         try {
           sessionStorage.removeItem(SIGNED_OUT_FLAG);
@@ -242,12 +270,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
-  const unlockAdminWithPin = useCallback(async (pin: string): Promise<AppUser> => {
+  const unlockAdminWithPin = useCallback(async (pin: string, email?: string): Promise<AppUser> => {
     setError(null);
     try {
       const res = await apiFetch<{ token: string; user: AppUser }>('/api/auth/admin-pin', {
         method: 'POST',
-        body: JSON.stringify({ pin }),
+        body: JSON.stringify({ pin, email: email?.trim() || undefined }),
       });
       try {
         sessionStorage.removeItem(SIGNED_OUT_FLAG);
@@ -262,6 +290,77 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setError(msg);
       throw err;
     }
+  }, []);
+
+  const requestPasswordReset = useCallback(async (email: string) => {
+    setError(null);
+    try {
+      const redirectTo = typeof window !== 'undefined' ? window.location.origin : undefined;
+      return await apiFetch<{
+        ok: boolean;
+        mode: string;
+        isAdminAccount?: boolean;
+        previewCode?: string;
+        message: string;
+      }>('/api/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email, redirectTo }),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to request password reset';
+      setError(msg);
+      throw err;
+    }
+  }, []);
+
+  const confirmPasswordReset = useCallback(
+    async (email: string, code: string, newPassword: string): Promise<AppUser> => {
+      setError(null);
+      try {
+        const res = await apiFetch<{ ok: boolean; token: string; user: AppUser }>(
+          '/api/auth/reset-password',
+          {
+            method: 'POST',
+            body: JSON.stringify({ email, code, newPassword }),
+          }
+        );
+        try {
+          sessionStorage.removeItem(SIGNED_OUT_FLAG);
+        } catch {
+          // ignore
+        }
+        setAuthToken(res.token);
+        setUser(res.user);
+        return res.user;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Password reset failed';
+        setError(msg);
+        throw err;
+      }
+    },
+    []
+  );
+
+  const completeSupabasePasswordRecovery = useCallback(async (newPassword: string) => {
+    setError(null);
+    const { error: updErr } = await supabase.auth.updateUser({ password: newPassword });
+    if (updErr) {
+      setError(updErr.message);
+      throw updErr;
+    }
+    try {
+      await apiFetch('/api/auth/sync-password', {
+        method: 'POST',
+        body: JSON.stringify({ newPassword }),
+      });
+    } catch {
+      // non-fatal
+    }
+    setPasswordRecoveryPending(false);
+  }, []);
+
+  const dismissPasswordRecovery = useCallback(() => {
+    setPasswordRecoveryPending(false);
   }, []);
 
   const signInSandboxPersona = useCallback(
@@ -318,6 +417,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signInWithEmail,
         registerWithEmail,
         unlockAdminWithPin,
+        requestPasswordReset,
+        confirmPasswordReset,
+        passwordRecoveryPending,
+        completeSupabasePasswordRecovery,
+        dismissPasswordRecovery,
         signInSandboxPersona,
         signOut,
         refreshUser,

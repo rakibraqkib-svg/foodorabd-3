@@ -65,6 +65,23 @@ export interface FoodItem {
   inStock: boolean;
   isAvailable: boolean;
   isPopular: boolean;
+  isVisibleOnStorefront: boolean;
+}
+
+export interface StorefrontProduct extends FoodItem {
+  restaurantName: string;
+  restaurantNameBn: string;
+  restaurantSlug: string;
+  restaurantLogoUrl: string | null;
+  restaurantCoverUrl: string;
+  restaurantArea: string;
+  restaurantCuisine: string;
+  deliveryTimeMin: number;
+  deliveryFee: number;
+  deliveryMode: DeliveryMode;
+  minOrder: number;
+  rating: string;
+  isOpen: boolean;
 }
 
 export interface ReviewItem {

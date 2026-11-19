@@ -18,6 +18,7 @@ import {
   notifications,
   orders,
   orderStatusHistory,
+  partnerApiKeys,
   platformSettings,
   restaurantPayouts,
   restaurants,
@@ -39,6 +40,7 @@ import {
   getPlatformSettingsRow,
   getRestaurantBySlug,
   getRiderWorkspace,
+  getStorefrontProducts,
   getVendorWorkspace,
   toggleCustomerFavorite,
 } from './src/db/queries.ts';
@@ -53,6 +55,7 @@ import {
 } from './src/middleware/auth.ts';
 import { supabaseServer } from './src/lib/supabase-admin.ts';
 import {
+  ADMIN_PIN_DEFAULT_EMAIL,
   calculateCartItemUnitPrice,
   calculateOrderFinancials,
   canActorModifyUserAccount,
@@ -60,6 +63,8 @@ import {
   DeliveryMode,
   estimateDeliveryFeeAndEta,
   evaluateCoupon,
+  isProtectedSuperAdminEmail,
+  normalizePartnerProductInput,
   OrderStatus,
   PaymentMethod,
   validateBroadcastNotification,
@@ -241,6 +246,11 @@ function verifyPasswordScrypt(password: string, stored: string): boolean {
 
 const ADMIN_PIN_VAULT_KEY = '__admin_panel_pin__';
 const ADMIN_PIN_VAULT_UID = 'admin-pin-vault';
+const ADMIN_PIN_EMAIL_PREFIX = '__admin_pin__:';
+
+function adminPinKeyForEmail(email: string): string {
+  return `${ADMIN_PIN_EMAIL_PREFIX}${email.trim().toLowerCase()}`;
+}
 
 function getFallbackAdminPin(): string {
   return process.env.ADMIN_ACCESS_PIN || '2026';
@@ -264,44 +274,83 @@ async function verifyAdminPinValue(pin: string): Promise<boolean> {
   return crypto.timingSafeEqual(a, b);
 }
 
+async function verifyAdminPinForEmail(email: string, pin: string): Promise<boolean> {
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const specificRows = await db
+    .select({ passwordHash: localCredentials.passwordHash })
+    .from(localCredentials)
+    .where(eq(localCredentials.email, adminPinKeyForEmail(normalized)))
+    .limit(1);
+
+  if (specificRows.length > 0) {
+    return verifyPasswordScrypt(pin, specificRows[0].passwordHash);
+  }
+
+  if (isProtectedSuperAdminEmail(normalized)) {
+    return verifyAdminPinValue(pin);
+  }
+
+  return false;
+}
+
 app.post('/api/auth/admin-pin', async (req, res) => {
   const schema = z.object({
-    pin: z.string().min(4).max(16),
+    pin: z.string().trim().min(4).max(16),
+    email: z.string().trim().email().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: 'Please enter a valid 4–16 character Admin PIN.' });
+    return res.status(400).json({ error: 'Please enter a valid Admin email and 4–16 character PIN.' });
   }
 
+  const targetEmail = (parsed.data.email || ADMIN_PIN_DEFAULT_EMAIL).trim().toLowerCase();
+
   try {
-    const valid = await verifyAdminPinValue(parsed.data.pin.trim());
+    const valid = await verifyAdminPinForEmail(targetEmail, parsed.data.pin);
     if (!valid) {
-      return res.status(401).json({ error: 'Incorrect Admin PIN. Please try again.' });
+      return res.status(401).json({ error: 'Incorrect Admin email or PIN. Please try again.' });
     }
 
-    const adminRows = await db
+    const existingRows = await db
       .select()
       .from(users)
-      .where(
-        or(
-          sql`lower(${users.email}) = 'rakibraqkib@gmail.com'`,
-          eq(users.role, 'super_admin')
-        )
-      )
+      .where(sql`lower(${users.email}) = ${targetEmail}`)
       .limit(1);
 
-    const adminRecord = adminRows[0];
-    const uid = adminRecord?.uid || 'demo-admin-uid';
-    const email = adminRecord?.email || 'rakibraqkib@gmail.com';
-    const fullName = adminRecord?.fullName || 'Super Admin';
-    const role: UserRole = 'super_admin';
+    if (existingRows[0]?.status === 'suspended') {
+      return res.status(403).json({ error: 'This Admin account has been suspended.' });
+    }
 
-    const dbUser = await getOrCreateUser(uid, email, fullName, 'super_admin');
+    const assignedRole: UserRole = isProtectedSuperAdminEmail(targetEmail)
+      ? 'super_admin'
+      : existingRows[0]?.role === 'super_admin'
+      ? 'super_admin'
+      : 'admin';
+
+    let dbUser = existingRows[0];
+    if (dbUser) {
+      if (dbUser.role !== assignedRole) {
+        const updated = await db
+          .update(users)
+          .set({ role: assignedRole, updatedAt: new Date() })
+          .where(eq(users.id, dbUser.id))
+          .returning();
+        dbUser = updated[0];
+      }
+    } else {
+      const uid = `adm-${crypto.randomBytes(8).toString('hex')}`;
+      const defaultName =
+        targetEmail === ADMIN_PIN_DEFAULT_EMAIL ? 'Raqib Rony (Admin)' : targetEmail.split('@')[0];
+      dbUser = await getOrCreateUser(uid, targetEmail, defaultName, assignedRole);
+    }
+
     const token = signSandboxToken({
       uid: dbUser.uid,
       email: dbUser.email,
       fullName: dbUser.fullName,
-      role,
+      role: assignedRole,
       isSandbox: false,
     });
 
@@ -310,8 +359,8 @@ app.post('/api/auth/admin-pin', async (req, res) => {
         actorUid: dbUser.uid,
         action: 'admin_pin_unlock',
         targetType: 'auth',
-        targetId: dbUser.uid,
-        details: 'Super Admin workspace unlocked via Admin PIN',
+        targetId: dbUser.email,
+        details: `Admin workspace (${assignedRole}) unlocked via Admin PIN for ${dbUser.email}`,
       });
     } catch {
       // non-fatal audit log skip
@@ -323,7 +372,7 @@ app.post('/api/auth/admin-pin', async (req, res) => {
         uid: dbUser.uid,
         email: dbUser.email,
         fullName: dbUser.fullName,
-        role,
+        role: assignedRole,
         isSandbox: false,
       },
     });
@@ -339,26 +388,37 @@ app.post(
   requireRole(['super_admin']),
   async (req: AuthRequest, res) => {
     const schema = z.object({
-      currentPin: z.string().min(4).max(16),
-      newPin: z.string().min(4).max(16),
+      currentPin: z.string().trim().min(4).max(16),
+      newPin: z.string().trim().min(4).max(16),
+      adminEmail: z.string().trim().email().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ error: 'Current PIN and new PIN (4–16 characters) are required.' });
+      return res
+        .status(400)
+        .json({ error: 'Valid Admin email, current PIN, and new PIN (4–16 chars) are required.' });
     }
 
+    const targetEmail = (parsed.data.adminEmail || ADMIN_PIN_DEFAULT_EMAIL).trim().toLowerCase();
+
     try {
-      const valid = await verifyAdminPinValue(parsed.data.currentPin.trim());
+      const valid =
+        (await verifyAdminPinForEmail(req.user!.email, parsed.data.currentPin)) ||
+        (await verifyAdminPinForEmail(targetEmail, parsed.data.currentPin)) ||
+        (await verifyAdminPinValue(parsed.data.currentPin));
       if (!valid) {
         return res.status(401).json({ error: 'Current Admin PIN is incorrect.' });
       }
 
-      const nextHash = hashPasswordScrypt(parsed.data.newPin.trim());
+      const nextHash = hashPasswordScrypt(parsed.data.newPin);
+      const pinKey = adminPinKeyForEmail(targetEmail);
+      const pinUid = `admin-pin-${crypto.createHash('sha256').update(targetEmail).digest('hex').slice(0, 16)}`;
+
       await db
         .insert(localCredentials)
         .values({
-          email: ADMIN_PIN_VAULT_KEY,
-          uid: ADMIN_PIN_VAULT_UID,
+          email: pinKey,
+          uid: pinUid,
           passwordHash: nextHash,
         })
         .onConflictDoUpdate({
@@ -366,15 +426,47 @@ app.post(
           set: { passwordHash: nextHash },
         });
 
+      const existingTarget = await db
+        .select()
+        .from(users)
+        .where(sql`lower(${users.email}) = ${targetEmail}`)
+        .limit(1);
+
+      const targetRole: UserRole = isProtectedSuperAdminEmail(targetEmail)
+        ? 'super_admin'
+        : existingTarget[0]?.role === 'super_admin'
+        ? 'super_admin'
+        : 'admin';
+
+      if (existingTarget.length > 0) {
+        if (existingTarget[0].role !== targetRole) {
+          await db
+            .update(users)
+            .set({ role: targetRole, updatedAt: new Date() })
+            .where(eq(users.id, existingTarget[0].id));
+        }
+      } else {
+        await getOrCreateUser(
+          `adm-${crypto.randomBytes(8).toString('hex')}`,
+          targetEmail,
+          targetEmail === ADMIN_PIN_DEFAULT_EMAIL ? 'Raqib Rony (Admin)' : targetEmail.split('@')[0],
+          targetRole
+        );
+      }
+
       await db.insert(auditLogs).values({
         actorUid: req.user!.uid,
         action: 'admin_pin_updated',
         targetType: 'security',
-        targetId: ADMIN_PIN_VAULT_UID,
-        details: 'Admin Panel PIN updated by Super Admin',
+        targetId: targetEmail,
+        details: `Admin Panel PIN created/updated for ${targetEmail} (${targetRole})`,
       });
 
-      return res.json({ ok: true, message: 'Admin Panel PIN updated successfully.' });
+      return res.json({
+        ok: true,
+        adminEmail: targetEmail,
+        message: `Admin Panel PIN saved for ${targetEmail}.`,
+      });
     } catch (error: any) {
       console.error('Admin PIN update failed:', error);
       return res.status(500).json({ error: error.message || 'Failed to update Admin PIN' });
@@ -394,9 +486,10 @@ function isUniqueViolationError(err: any): boolean {
 
 app.post('/api/auth/register', async (req, res) => {
   const schema = z.object({
-    fullName: z.string().min(2).max(100),
-    email: z.string().email(),
+    fullName: z.string().trim().min(2).max(100),
+    email: z.string().trim().email(),
     password: z.string().min(6).max(128),
+    role: z.enum(['customer', 'restaurant_owner', 'rider']).optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -405,6 +498,7 @@ app.post('/api/auth/register', async (req, res) => {
 
   const emailLower = parsed.data.email.trim().toLowerCase();
   const fullName = parsed.data.fullName.trim();
+  const requestedRole = parsed.data.role || 'customer';
 
   const attemptRegister = async () => {
     const existingCred = await db
@@ -431,7 +525,7 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     const uid = `usr-${crypto.randomBytes(8).toString('hex')}`;
-    const role: UserRole = emailLower === 'rakibraqkib@gmail.com' ? 'super_admin' : 'customer';
+    const role: UserRole = isProtectedSuperAdminEmail(emailLower) ? 'super_admin' : requestedRole;
     const passwordHash = hashPasswordScrypt(parsed.data.password);
 
     await db.transaction(async (tx) => {
@@ -447,6 +541,22 @@ app.post('/api/auth/register', async (req, res) => {
         fullName,
         role,
       });
+
+      if (role === 'rider') {
+        await tx
+          .insert(riders)
+          .values({
+            uid,
+            fullName,
+            phone: '+8801700000000',
+            email: emailLower,
+            vehicleType: 'Motorbike',
+            zone: 'Gulshan 2',
+            isAvailable: true,
+            status: 'approved',
+          })
+          .onConflictDoNothing();
+      }
     });
 
     const token = signSandboxToken({ uid, email: emailLower, fullName, role, isSandbox: false });
@@ -483,7 +593,7 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   const schema = z.object({
-    email: z.string().email(),
+    email: z.string().trim().email(),
     password: z.string().min(1),
   });
   const parsed = schema.safeParse(req.body);
@@ -554,7 +664,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const role: UserRole =
-      (dbUser?.role as UserRole) || (emailLower === 'rakibraqkib@gmail.com' ? 'super_admin' : 'customer');
+      (dbUser?.role as UserRole) || (isProtectedSuperAdminEmail(emailLower) ? 'super_admin' : 'customer');
     const fullName = dbUser?.fullName || emailLower.split('@')[0];
 
     const token = signSandboxToken({ uid, email: emailLower, fullName, role, isSandbox: false });
@@ -586,6 +696,282 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+const PW_RESET_EMAIL_PREFIX = '__pw_reset__:';
+function pwResetKeyForEmail(email: string): string {
+  return `${PW_RESET_EMAIL_PREFIX}${email.trim().toLowerCase()}`;
+}
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const schema = z.object({
+    email: z.string().trim().email(),
+    redirectTo: z.string().url().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Please enter a valid email address.' });
+  }
+
+  const emailLower = parsed.data.email.trim().toLowerCase();
+
+  try {
+    const [existingUsers, existingCreds] = await Promise.all([
+      db.select().from(users).where(sql`lower(${users.email}) = ${emailLower}`).limit(1),
+      db.select().from(localCredentials).where(eq(localCredentials.email, emailLower)).limit(1),
+    ]);
+
+    const userRow = existingUsers[0];
+    if (!userRow && existingCreds.length === 0) {
+      return res.status(404).json({
+        error: 'No account found with this email address. Please create an account first.',
+      });
+    }
+
+    if (userRow?.status === 'suspended') {
+      return res.status(403).json({ error: 'This account has been suspended by an administrator.' });
+    }
+
+    const isAdminAccount =
+      isProtectedSuperAdminEmail(emailLower) ||
+      userRow?.role === 'admin' ||
+      userRow?.role === 'super_admin';
+
+    // Best-effort Supabase email recovery trigger (works for Supabase-registered emails)
+    try {
+      await supabaseServer.auth.resetPasswordForEmail(
+        emailLower,
+        parsed.data.redirectTo ? { redirectTo: parsed.data.redirectTo } : undefined
+      );
+    } catch {
+      // non-fatal if Supabase email quota or non-Supabase user
+    }
+
+    if (isAdminAccount) {
+      return res.json({
+        ok: true,
+        mode: 'admin_pin_or_email',
+        isAdminAccount: true,
+        message:
+          'Admin account verified. Enter your Admin PIN below (or open the password reset link in your email) to set a new password.',
+      });
+    }
+
+    const otp = String(crypto.randomInt(100000, 1000000));
+    const expiresAt = Date.now() + 15 * 60 * 1000;
+    const otpHash = hashPasswordScrypt(otp);
+    const resetKey = pwResetKeyForEmail(emailLower);
+    const resetUid = `pw-reset-${crypto.createHash('sha256').update(emailLower).digest('hex').slice(0, 16)}`;
+
+    await db
+      .insert(localCredentials)
+      .values({
+        email: resetKey,
+        uid: resetUid,
+        passwordHash: `${expiresAt}|${otpHash}`,
+      })
+      .onConflictDoUpdate({
+        target: localCredentials.email,
+        set: { passwordHash: `${expiresAt}|${otpHash}` },
+      });
+
+    // If Resend email transport is configured, send real email and do not expose code in JSON
+    if (process.env.RESEND_API_KEY) {
+      try {
+        const mailRes = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: process.env.RESEND_FROM_EMAIL || 'Foodora BD <no-reply@foodora.bd>',
+            to: [emailLower],
+            subject: 'Foodora BD Password Reset Code',
+            html: `<p>Your Foodora BD password reset code is <strong>${otp}</strong>. It expires in 15 minutes.</p>`,
+          }),
+        });
+        if (mailRes.ok) {
+          return res.json({
+            ok: true,
+            mode: 'email',
+            isAdminAccount: false,
+            message: 'A 6-digit password reset code has been sent to your email address.',
+          });
+        }
+      } catch {
+        // fallback cleanly to preview verification flow below
+      }
+    }
+
+    return res.json({
+      ok: true,
+      mode: 'preview',
+      isAdminAccount: false,
+      previewCode: otp,
+      message:
+        'Verification code ready. Enter the 6-digit code and your new password below (valid for 15 minutes).',
+    });
+  } catch (error: any) {
+    console.error('Forgot password error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to initiate password reset' });
+  }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  const schema = z.object({
+    email: z.string().trim().email(),
+    code: z.string().trim().min(4).max(16),
+    newPassword: z.string().min(6).max(128),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: 'Please enter a valid email, verification code, and new password (min 6 characters).',
+    });
+  }
+
+  const emailLower = parsed.data.email.trim().toLowerCase();
+
+  try {
+    const [existingUsers, existingCreds] = await Promise.all([
+      db.select().from(users).where(sql`lower(${users.email}) = ${emailLower}`).limit(1),
+      db.select().from(localCredentials).where(eq(localCredentials.email, emailLower)).limit(1),
+    ]);
+
+    const userRow = existingUsers[0];
+    if (!userRow && existingCreds.length === 0) {
+      return res.status(404).json({ error: 'Account not found for this email.' });
+    }
+    if (userRow?.status === 'suspended') {
+      return res.status(403).json({ error: 'This account has been suspended by an administrator.' });
+    }
+
+    const isAdminAccount =
+      isProtectedSuperAdminEmail(emailLower) ||
+      userRow?.role === 'admin' ||
+      userRow?.role === 'super_admin';
+
+    if (isAdminAccount) {
+      const validAdminPin = await verifyAdminPinForEmail(emailLower, parsed.data.code);
+      if (!validAdminPin) {
+        return res.status(401).json({
+          error: 'Incorrect Admin PIN. Enter your Admin PIN to reset an Admin password.',
+        });
+      }
+    } else {
+      const resetKey = pwResetKeyForEmail(emailLower);
+      const tokenRows = await db
+        .select()
+        .from(localCredentials)
+        .where(eq(localCredentials.email, resetKey))
+        .limit(1);
+
+      if (tokenRows.length === 0) {
+        return res.status(401).json({
+          error: 'Reset code not found or already used. Please request a new code.',
+        });
+      }
+
+      const sepIdx = tokenRows[0].passwordHash.indexOf('|');
+      const expMs = Number(sepIdx > 0 ? tokenRows[0].passwordHash.slice(0, sepIdx) : '0');
+      const storedOtpHash = sepIdx > 0 ? tokenRows[0].passwordHash.slice(sepIdx + 1) : '';
+      if (!expMs || expMs < Date.now()) {
+        await db.delete(localCredentials).where(eq(localCredentials.email, resetKey));
+        return res.status(401).json({ error: 'Reset code has expired. Please request a new one.' });
+      }
+      if (!verifyPasswordScrypt(parsed.data.code, storedOtpHash)) {
+        return res.status(401).json({ error: 'Invalid verification code. Please check and try again.' });
+      }
+    }
+
+    const uid =
+      userRow?.uid || existingCreds[0]?.uid || `usr-${crypto.randomBytes(8).toString('hex')}`;
+    const role: UserRole = isProtectedSuperAdminEmail(emailLower)
+      ? 'super_admin'
+      : ((userRow?.role as UserRole) || 'customer');
+    const fullName = userRow?.fullName || emailLower.split('@')[0];
+    const nextPasswordHash = hashPasswordScrypt(parsed.data.newPassword);
+
+    await db.transaction(async (tx) => {
+      await tx
+        .insert(localCredentials)
+        .values({
+          email: emailLower,
+          uid,
+          passwordHash: nextPasswordHash,
+        })
+        .onConflictDoUpdate({
+          target: localCredentials.email,
+          set: { passwordHash: nextPasswordHash },
+        });
+
+      if (!userRow) {
+        await tx
+          .insert(users)
+          .values({
+            uid,
+            email: emailLower,
+            fullName,
+            role,
+          })
+          .onConflictDoNothing();
+      }
+
+      await tx.delete(localCredentials).where(eq(localCredentials.email, pwResetKeyForEmail(emailLower)));
+    });
+
+    try {
+      await db.insert(auditLogs).values({
+        actorUid: uid,
+        action: 'password_reset',
+        targetType: 'auth',
+        targetId: emailLower,
+        details: `Password updated via recovery flow for ${emailLower}`,
+      });
+    } catch {
+      // non-fatal
+    }
+
+    const token = signSandboxToken({ uid, email: emailLower, fullName, role, isSandbox: false });
+    return res.json({
+      ok: true,
+      token,
+      user: { uid, email: emailLower, fullName, role, isSandbox: false },
+    });
+  } catch (error: any) {
+    console.error('Reset password error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to reset password' });
+  }
+});
+
+app.post('/api/auth/sync-password', requireAuth, async (req: AuthRequest, res) => {
+  const schema = z.object({
+    newPassword: z.string().min(6).max(128),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  }
+
+  try {
+    const emailLower = req.user!.email.trim().toLowerCase();
+    const nextHash = hashPasswordScrypt(parsed.data.newPassword);
+    await db
+      .insert(localCredentials)
+      .values({
+        email: emailLower,
+        uid: req.user!.uid,
+        passwordHash: nextHash,
+      })
+      .onConflictDoUpdate({
+        target: localCredentials.email,
+        set: { passwordHash: nextHash },
+      });
+    return res.json({ ok: true });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message || 'Failed to sync password' });
+  }
+});
+
 // ---------- Storefront & Discovery ----------
 
 app.get('/api/restaurants', async (_req, res) => {
@@ -594,6 +980,15 @@ app.get('/api/restaurants', async (_req, res) => {
     res.json({ restaurants: list });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to fetch restaurants' });
+  }
+});
+
+app.get('/api/products', async (_req, res) => {
+  try {
+    const products = await getStorefrontProducts();
+    res.json({ products });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to fetch storefront products' });
   }
 });
 
@@ -1491,6 +1886,379 @@ app.delete(
   }
 );
 
+function hashPartnerApiKey(rawKey: string): string {
+  return crypto.createHash('sha256').update(rawKey.trim()).digest('hex');
+}
+
+function extractPartnerApiKey(req: express.Request): string | null {
+  const headerKey = req.header('x-partner-api-key')?.trim();
+  if (headerKey) return headerKey;
+  const authHeader = req.header('authorization')?.trim();
+  if (authHeader && authHeader.toLowerCase().startsWith('bearer fbd_')) {
+    return authHeader.slice(7).trim();
+  }
+  return null;
+}
+
+async function resolvePartnerRestaurant(
+  req: express.Request
+): Promise<
+  | { ok: false; error: string; status: 401 | 403 | 404 }
+  | {
+      ok: true;
+      restaurant: typeof restaurants.$inferSelect;
+      apiKeyRow: typeof partnerApiKeys.$inferSelect;
+    }
+> {
+  const rawKey = extractPartnerApiKey(req);
+  if (!rawKey) return { ok: false, error: 'Missing X-Partner-API-Key header', status: 401 };
+  const keyHash = hashPartnerApiKey(rawKey);
+  const keyRows = await db
+    .select()
+    .from(partnerApiKeys)
+    .where(eq(partnerApiKeys.keyHash, keyHash))
+    .limit(1);
+  if (keyRows.length === 0) {
+    return { ok: false, error: 'Invalid or revoked Partner API key', status: 401 };
+  }
+  const restRows = await db
+    .select()
+    .from(restaurants)
+    .where(eq(restaurants.id, keyRows[0].restaurantId))
+    .limit(1);
+  if (restRows.length === 0) {
+    return { ok: false, error: 'Linked restaurant no longer exists', status: 404 };
+  }
+  if (restRows[0].status === 'suspended' || restRows[0].status === 'rejected') {
+    return { ok: false, error: 'Restaurant account is not active for Partner API access', status: 403 };
+  }
+  await db
+    .update(partnerApiKeys)
+    .set({ lastUsedAt: new Date() })
+    .where(eq(partnerApiKeys.id, keyRows[0].id));
+  return { ok: true, restaurant: restRows[0], apiKeyRow: keyRows[0] };
+}
+
+app.get(
+  '/api/vendor/api-key',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    try {
+      const requestedId = Number(req.query.restaurantId);
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      const restRows = Number.isInteger(requestedId) && requestedId > 0
+        ? await db.select().from(restaurants).where(eq(restaurants.id, requestedId)).limit(1)
+        : isAdmin
+        ? await db.select().from(restaurants).limit(1)
+        : await db.select().from(restaurants).where(eq(restaurants.ownerUid, req.user!.uid)).limit(1);
+
+      if (restRows.length === 0) {
+        return res.json({ hasKey: false, restaurantId: null, keyPrefix: null, label: null, lastUsedAt: null });
+      }
+      if (!isAdmin && restRows[0].ownerUid !== req.user!.uid) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const keyRows = await db
+        .select()
+        .from(partnerApiKeys)
+        .where(eq(partnerApiKeys.restaurantId, restRows[0].id))
+        .limit(1);
+
+      if (keyRows.length === 0) {
+        return res.json({
+          hasKey: false,
+          restaurantId: restRows[0].id,
+          keyPrefix: null,
+          label: null,
+          lastUsedAt: null,
+          updatedAt: null,
+        });
+      }
+
+      return res.json({
+        hasKey: true,
+        restaurantId: restRows[0].id,
+        keyPrefix: keyRows[0].keyPrefix,
+        label: keyRows[0].label,
+        lastUsedAt: keyRows[0].lastUsedAt,
+        updatedAt: keyRows[0].updatedAt,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+app.post(
+  '/api/vendor/api-key/rotate',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      restaurantId: z.number().int().positive(),
+      label: z.string().min(2).max(60).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid API key rotation request' });
+    }
+
+    try {
+      const restRows = await db
+        .select()
+        .from(restaurants)
+        .where(eq(restaurants.id, parsed.data.restaurantId))
+        .limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      if (!isAdmin && restRows[0].ownerUid !== req.user!.uid) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const rawKey = `fbd_live_${crypto.randomBytes(16).toString('hex')}`;
+      const keyHash = hashPartnerApiKey(rawKey);
+      const keyPrefix = `${rawKey.slice(0, 14)}...${rawKey.slice(-4)}`;
+      const label = parsed.data.label?.trim() || 'Partner Menu API Key';
+
+      const upserted = await db
+        .insert(partnerApiKeys)
+        .values({
+          restaurantId: restRows[0].id,
+          keyHash,
+          keyPrefix,
+          label,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: partnerApiKeys.restaurantId,
+          set: {
+            keyHash,
+            keyPrefix,
+            label,
+            lastUsedAt: null,
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+
+      await db.insert(auditLogs).values({
+        actorUid: req.user!.uid,
+        action: 'partner_api_key_rotated',
+        targetType: 'restaurant',
+        targetId: String(restRows[0].id),
+        details: JSON.stringify({ keyPrefix, label }),
+      });
+
+      res.status(201).json({
+        apiKey: rawKey,
+        restaurantId: restRows[0].id,
+        keyPrefix: upserted[0].keyPrefix,
+        label: upserted[0].label,
+        updatedAt: upserted[0].updatedAt,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+app.get('/api/partner/v1/products', async (req, res) => {
+  try {
+    const auth = await resolvePartnerRestaurant(req);
+    if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
+
+    const products = await db
+      .select()
+      .from(foodItems)
+      .where(eq(foodItems.restaurantId, auth.restaurant.id))
+      .orderBy(desc(foodItems.id));
+
+    res.json({
+      restaurant: {
+        id: auth.restaurant.id,
+        name: auth.restaurant.name,
+        nameBn: auth.restaurant.nameBn,
+        slug: auth.restaurant.slug,
+        area: auth.restaurant.area,
+        status: auth.restaurant.status,
+      },
+      count: products.length,
+      products,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to fetch partner products' });
+  }
+});
+
+app.post('/api/partner/v1/products', async (req, res) => {
+  try {
+    const auth = await resolvePartnerRestaurant(req);
+    if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
+
+    const body = req.body;
+    const rawItems = Array.isArray(body?.products)
+      ? body.products
+      : Array.isArray(body)
+      ? body
+      : [body];
+
+    if (rawItems.length === 0 || rawItems.length > 50) {
+      return res.status(400).json({ error: 'Provide between 1 and 50 products per request.' });
+    }
+
+    const normalizedList: Array<ReturnType<typeof normalizePartnerProductInput> & { valid: true }> = [];
+    for (let i = 0; i < rawItems.length; i++) {
+      const check = normalizePartnerProductInput(
+        rawItems[i] && typeof rawItems[i] === 'object' ? rawItems[i] : {},
+        auth.restaurant.coverUrl || IMG_BANGLA
+      );
+      if (!check.valid) {
+        return res.status(400).json({ error: check.reason, index: i });
+      }
+      normalizedList.push(check);
+    }
+
+    const inserted = await db
+      .insert(foodItems)
+      .values(
+        normalizedList.map((entry) => ({
+          restaurantId: auth.restaurant.id,
+          category: entry.product.category,
+          name: entry.product.name,
+          nameBn: entry.product.nameBn,
+          description: entry.product.description,
+          imageUrl: entry.product.imageUrl,
+          price: entry.product.price,
+          discountPrice: entry.product.discountPrice,
+          inStock: entry.product.inStock,
+          isAvailable: entry.product.isAvailable,
+          isVisibleOnStorefront: true,
+          isPopular: entry.product.isPopular,
+          variationsJson: entry.product.variationsJson,
+          addonsJson: entry.product.addonsJson,
+        }))
+      )
+      .returning();
+
+    await db.insert(auditLogs).values({
+      actorUid: auth.restaurant.ownerUid,
+      action: 'partner_api_product_created',
+      targetType: 'food_item',
+      targetId: String(inserted[0].id),
+      details: JSON.stringify({
+        restaurantId: auth.restaurant.id,
+        count: inserted.length,
+        names: inserted.map((p) => p.name),
+      }),
+    });
+
+    res.status(201).json({
+      count: inserted.length,
+      product: inserted.length === 1 ? inserted[0] : undefined,
+      products: inserted,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Partner API failed to add product' });
+  }
+});
+
+app.patch('/api/partner/v1/products/:id', async (req, res) => {
+  const itemId = Number(req.params.id);
+  if (!Number.isInteger(itemId) || itemId <= 0) {
+    return res.status(400).json({ error: 'Invalid product ID' });
+  }
+
+  try {
+    const auth = await resolvePartnerRestaurant(req);
+    if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
+
+    const existing = await db
+      .select()
+      .from(foodItems)
+      .where(and(eq(foodItems.id, itemId), eq(foodItems.restaurantId, auth.restaurant.id)))
+      .limit(1);
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Product not found for this partner restaurant' });
+    }
+    const cur = existing[0];
+
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const merged = normalizePartnerProductInput(
+      {
+        name: body.name ?? cur.name,
+        nameBn: body.nameBn ?? cur.nameBn,
+        category: body.category ?? cur.category,
+        description: body.description ?? cur.description,
+        imageUrl: body.imageUrl ?? cur.imageUrl,
+        price: body.price ?? cur.price,
+        discountPrice:
+          body.discountPrice === undefined ? cur.discountPrice : body.discountPrice,
+        inStock: body.inStock ?? cur.inStock,
+        isAvailable: body.isAvailable ?? cur.isAvailable,
+        isPopular: body.isPopular ?? cur.isPopular,
+        variations: body.variations ?? cur.variationsJson,
+        addons: body.addons ?? cur.addonsJson,
+      },
+      cur.imageUrl || auth.restaurant.coverUrl || IMG_BANGLA
+    );
+
+    if (!merged.valid) {
+      return res.status(400).json({ error: merged.reason });
+    }
+
+    const updated = await db
+      .update(foodItems)
+      .set({
+        name: merged.product.name,
+        nameBn: merged.product.nameBn,
+        category: merged.product.category,
+        description: merged.product.description,
+        imageUrl: merged.product.imageUrl,
+        price: merged.product.price,
+        discountPrice: merged.product.discountPrice,
+        inStock: merged.product.inStock,
+        isAvailable: merged.product.isAvailable,
+        isPopular: merged.product.isPopular,
+        variationsJson: merged.product.variationsJson,
+        addonsJson: merged.product.addonsJson,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(foodItems.id, itemId), eq(foodItems.restaurantId, auth.restaurant.id)))
+      .returning();
+
+    res.json({ product: updated[0] });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to update partner product' });
+  }
+});
+
+app.delete('/api/partner/v1/products/:id', async (req, res) => {
+  const itemId = Number(req.params.id);
+  if (!Number.isInteger(itemId) || itemId <= 0) {
+    return res.status(400).json({ error: 'Invalid product ID' });
+  }
+
+  try {
+    const auth = await resolvePartnerRestaurant(req);
+    if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
+
+    const deleted = await db
+      .delete(foodItems)
+      .where(and(eq(foodItems.id, itemId), eq(foodItems.restaurantId, auth.restaurant.id)))
+      .returning();
+
+    if (deleted.length === 0) {
+      return res.status(404).json({ error: 'Product not found for this partner restaurant' });
+    }
+
+    res.json({ deleted: true, id: itemId });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to delete partner product' });
+  }
+});
+
 app.patch(
   '/api/vendor/restaurant',
   requireAuth,
@@ -2165,6 +2933,7 @@ app.post(
       discountPrice: z.number().int().positive().nullable().optional(),
       inStock: z.boolean().default(true),
       isAvailable: z.boolean().default(true),
+      isVisibleOnStorefront: z.boolean().default(true),
       isPopular: z.boolean().default(false),
       variationsJson: z
         .array(z.object({ name: z.string(), priceDelta: z.number() }))
@@ -2197,6 +2966,7 @@ app.post(
           discountPrice: parsed.data.discountPrice ?? null,
           inStock: parsed.data.inStock,
           isAvailable: parsed.data.isAvailable,
+          isVisibleOnStorefront: parsed.data.isVisibleOnStorefront,
           isPopular: parsed.data.isPopular,
           variationsJson:
             parsed.data.variationsJson && parsed.data.variationsJson.length > 0
@@ -2211,7 +2981,11 @@ app.post(
         action: 'product_created',
         targetType: 'food_item',
         targetId: String(inserted[0].id),
-        details: JSON.stringify({ name: inserted[0].name, restaurantId: inserted[0].restaurantId }),
+        details: JSON.stringify({
+          name: inserted[0].name,
+          restaurantId: inserted[0].restaurantId,
+          isVisibleOnStorefront: inserted[0].isVisibleOnStorefront,
+        }),
       });
 
       res.status(201).json({ product: inserted[0] });
@@ -2240,6 +3014,7 @@ app.patch(
       discountPrice: z.number().int().positive().nullable().optional(),
       inStock: z.boolean().optional(),
       isAvailable: z.boolean().optional(),
+      isVisibleOnStorefront: z.boolean().optional(),
       isPopular: z.boolean().optional(),
       variationsJson: z
         .array(z.object({ name: z.string(), priceDelta: z.number() }))
@@ -2270,6 +3045,8 @@ app.patch(
             parsed.data.discountPrice === undefined ? cur.discountPrice : parsed.data.discountPrice,
           inStock: parsed.data.inStock ?? cur.inStock,
           isAvailable: parsed.data.isAvailable ?? cur.isAvailable,
+          isVisibleOnStorefront:
+            parsed.data.isVisibleOnStorefront ?? cur.isVisibleOnStorefront,
           isPopular: parsed.data.isPopular ?? cur.isPopular,
           variationsJson: parsed.data.variationsJson ?? cur.variationsJson,
           addonsJson: parsed.data.addonsJson ?? cur.addonsJson,
@@ -2278,12 +3055,20 @@ app.patch(
         .where(eq(foodItems.id, id))
         .returning();
 
+      const visibilityChanged =
+        parsed.data.isVisibleOnStorefront !== undefined &&
+        parsed.data.isVisibleOnStorefront !== cur.isVisibleOnStorefront;
+
       await db.insert(auditLogs).values({
         actorUid: req.user!.uid,
-        action: 'product_updated',
+        action: visibilityChanged ? 'product_visibility_toggled' : 'product_updated',
         targetType: 'food_item',
         targetId: String(id),
-        details: JSON.stringify({ name: updated[0].name, price: updated[0].price }),
+        details: JSON.stringify({
+          name: updated[0].name,
+          price: updated[0].price,
+          isVisibleOnStorefront: updated[0].isVisibleOnStorefront,
+        }),
       });
 
       res.json({ product: updated[0] });

@@ -7,6 +7,8 @@ import {
   CreditCard,
   Database,
   Download,
+  Eye,
+  EyeOff,
   KeyRound,
   LayoutTemplate,
   Package,
@@ -30,8 +32,10 @@ import {
 import { apiFetch, getAuthToken } from '../lib/api';
 import { DHAKA_AREAS } from '../lib/i18n';
 import {
+  ADMIN_PIN_DEFAULT_EMAIL,
   canActorModifyUserAccount,
   formatBdt,
+  isProtectedSuperAdminEmail,
   OrderStatus,
   PRIMARY_SUPER_ADMIN_EMAIL,
 } from '../lib/marketplace-logic';
@@ -80,6 +84,7 @@ interface ProductFormState {
   discountPrice: string;
   inStock: boolean;
   isAvailable: boolean;
+  isVisibleOnStorefront: boolean;
   isPopular: boolean;
 }
 
@@ -151,6 +156,11 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
   const [savingSettings, setSavingSettings] = useState(false);
 
   // Admin Panel Security PIN Change Form
+  const [pinAdminEmail, setPinAdminEmail] = useState(ADMIN_PIN_DEFAULT_EMAIL);
+  const [adminPinEmails, setAdminPinEmails] = useState<string[]>([
+    PRIMARY_SUPER_ADMIN_EMAIL,
+    ADMIN_PIN_DEFAULT_EMAIL,
+  ]);
   const [currentPin, setCurrentPin] = useState('');
   const [newPin, setNewPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
@@ -177,6 +187,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
   // Product Catalog Filter & Modal
   const [productSearch, setProductSearch] = useState('');
   const [productRestFilter, setProductRestFilter] = useState<string>('all');
+  const [productVisibilityFilter, setProductVisibilityFilter] = useState<'all' | 'visible' | 'hidden'>('all');
   const [productModal, setProductModal] = useState<ProductFormState | null>(null);
   const [savingProduct, setSavingProduct] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
@@ -219,6 +230,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
         riders: RiderRecord[];
         auditLogs: AuditLogItem[];
         settings: PlatformSettings | null;
+        adminPinEmails?: string[];
       }>('/api/admin/workspace');
       setRestaurants(res.restaurants);
       setProducts(res.products || []);
@@ -230,6 +242,9 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       setRiders(res.riders);
       setAuditLogs(res.auditLogs || []);
       setSettings(res.settings);
+      if (Array.isArray(res.adminPinEmails) && res.adminPinEmails.length > 0) {
+        setAdminPinEmails(res.adminPinEmails);
+      }
       if (res.settings) {
         setPlatformName(res.settings.platformName);
         setDefaultCommissionPct(String(res.settings.defaultCommissionPct));
@@ -268,6 +283,9 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       if (productRestFilter !== 'all' && item.restaurantId !== Number(productRestFilter)) {
         return false;
       }
+      const isShown = item.isVisibleOnStorefront !== false && item.isAvailable !== false;
+      if (productVisibilityFilter === 'visible' && !isShown) return false;
+      if (productVisibilityFilter === 'hidden' && isShown) return false;
       if (productSearch.trim()) {
         const q = productSearch.trim().toLowerCase();
         return (
@@ -278,7 +296,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       }
       return true;
     });
-  }, [products, productRestFilter, productSearch]);
+  }, [products, productRestFilter, productVisibilityFilter, productSearch]);
 
   const handleUploadImage = async (file: File, onUploaded: (url: string) => void) => {
     if (file.size > 4.5 * 1024 * 1024) {
@@ -344,6 +362,11 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
   const handleUpdateAdminPin = async (e: React.FormEvent) => {
     e.preventDefault();
     setPinMsg(null);
+    const trimmedEmail = pinAdminEmail.trim().toLowerCase();
+    if (!trimmedEmail || !trimmedEmail.includes('@')) {
+      setPinMsg(lang === 'bn' ? 'সঠিক অ্যাডমিন ইমেইল দিন।' : 'Please enter a valid Admin email.');
+      return;
+    }
     if (newPin.trim().length < 4) {
       setPinMsg(lang === 'bn' ? 'নতুন PIN কমপক্ষে ৪ অক্ষরের হতে হবে।' : 'New PIN must be at least 4 characters.');
       return;
@@ -357,6 +380,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       await apiFetch('/api/admin/pin', {
         method: 'POST',
         body: JSON.stringify({
+          adminEmail: trimmedEmail,
           currentPin: currentPin.trim(),
           newPin: newPin.trim(),
         }),
@@ -366,8 +390,8 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       setConfirmPin('');
       setFeedback(
         lang === 'bn'
-          ? 'অ্যাডমিন প্যানেল PIN সফলভাবে পরিবর্তন হয়েছে।'
-          : 'Admin Panel security PIN updated successfully.'
+          ? `${trimmedEmail} এর জন্য অ্যাডমিন PIN সংরক্ষণ হয়েছে।`
+          : `Admin Panel PIN saved for ${trimmedEmail}.`
       );
       await loadAdmin();
     } catch (err: unknown) {
@@ -532,6 +556,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       discountPrice: '',
       inStock: true,
       isAvailable: true,
+      isVisibleOnStorefront: true,
       isPopular: true,
     });
   };
@@ -549,6 +574,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       discountPrice: item.discountPrice ? String(item.discountPrice) : '',
       inStock: item.inStock,
       isAvailable: item.isAvailable,
+      isVisibleOnStorefront: item.isVisibleOnStorefront !== false,
       isPopular: item.isPopular,
     });
   };
@@ -569,6 +595,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
         discountPrice: productModal.discountPrice ? Number(productModal.discountPrice) : null,
         inStock: productModal.inStock,
         isAvailable: productModal.isAvailable,
+        isVisibleOnStorefront: productModal.isVisibleOnStorefront,
         isPopular: productModal.isPopular,
       };
 
@@ -587,23 +614,41 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       }
       setProductModal(null);
       await loadAdmin();
+      await onRestaurantsMutated();
     } finally {
       setSavingProduct(false);
     }
   };
 
-  const handleQuickProductToggle = async (item: FoodItem, field: 'inStock' | 'isPopular') => {
+  const handleQuickProductToggle = async (
+    item: FoodItem,
+    field: 'inStock' | 'isPopular' | 'isVisibleOnStorefront'
+  ) => {
+    const currentVal = field === 'isVisibleOnStorefront' ? item.isVisibleOnStorefront !== false : item[field];
     await apiFetch(`/api/admin/products/${item.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ [field]: !item[field] }),
+      body: JSON.stringify({ [field]: !currentVal }),
     });
+    if (field === 'isVisibleOnStorefront') {
+      setFeedback(
+        !currentVal
+          ? lang === 'bn'
+            ? `"${item.nameBn}" ওয়েবসাইটে দেখানো হচ্ছে।`
+            : `"${item.name}" is now visible on the storefront.`
+          : lang === 'bn'
+          ? `"${item.nameBn}" ওয়েবসাইট থেকে লুকানো হয়েছে।`
+          : `"${item.name}" is now hidden from the storefront.`
+      );
+    }
     await loadAdmin();
+    await onRestaurantsMutated();
   };
 
   const handleDeleteProduct = async (item: FoodItem) => {
     await apiFetch(`/api/admin/products/${item.id}`, { method: 'DELETE' });
     setFeedback(lang === 'bn' ? 'পণ্য মুছে ফেলা হয়েছে।' : `Deleted "${item.name}".`);
     await loadAdmin();
+    await onRestaurantsMutated();
   };
 
   const openCreateRestaurantModal = () => {
@@ -1050,19 +1095,50 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                 onSubmit={handleUpdateAdminPin}
                 className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3"
               >
-                <h2 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
-                  <KeyRound className="w-4 h-4 text-[#E21B70]" />
-                  <span>
-                    {lang === 'bn'
-                      ? 'অ্যাডমিন প্যানেল সিকিউরিটি PIN পরিবর্তন'
-                      : 'Admin Panel Security PIN'}
-                  </span>
-                </h2>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                    <KeyRound className="w-4 h-4 text-[#E21B70]" />
+                    <span>
+                      {lang === 'bn'
+                        ? 'অ্যাডমিন প্যানেল সিকিউরিটি PIN তৈরি / পরিবর্তন'
+                        : 'Admin Panel PIN Create & Security'}
+                    </span>
+                  </h2>
+                  <div className="flex flex-wrap gap-1.5">
+                    {adminPinEmails.map((em) => (
+                      <button
+                        key={em}
+                        type="button"
+                        onClick={() => setPinAdminEmail(em)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                          pinAdminEmail.trim().toLowerCase() === em
+                            ? 'bg-[#FFF0F6] border-[#E21B70] text-[#E21B70]'
+                            : 'bg-neutral-50 border-neutral-200 text-neutral-600 hover:border-neutral-300'
+                        }`}
+                      >
+                        {em}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 {pinMsg && (
                   <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
                     {pinMsg}
                   </p>
                 )}
+                <div className="text-xs">
+                  <label className="block font-semibold text-neutral-700 mb-1">
+                    {lang === 'bn' ? 'অ্যাডমিন ইমেইল (PIN Mail)' : 'Admin Email (Create / Update PIN for)'}
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    value={pinAdminEmail}
+                    onChange={(e) => setPinAdminEmail(e.target.value)}
+                    placeholder="raqkibrony@gmail.com"
+                    className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                  />
+                </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
                   <div>
                     <label className="block font-semibold text-neutral-700 mb-1">Current PIN</label>
@@ -1113,10 +1189,10 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                   className="px-4 py-2 rounded-xl bg-[#2E3138] hover:bg-black text-white text-xs font-semibold disabled:opacity-50"
                 >
                   {savingPin
-                    ? 'Updating...'
+                    ? 'Saving...'
                     : lang === 'bn'
-                    ? 'নতুন PIN সংরক্ষণ করুন'
-                    : 'Update Admin PIN'}
+                    ? 'PIN সেভ / তৈরি করুন'
+                    : 'Create / Update Admin PIN'}
                 </button>
               </form>
             )}
@@ -1963,6 +2039,28 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                   </option>
                 ))}
               </select>
+              <select
+                value={productVisibilityFilter}
+                onChange={(e) =>
+                  setProductVisibilityFilter(e.target.value as 'all' | 'visible' | 'hidden')
+                }
+                aria-label="Filter products by storefront visibility"
+                className="px-3 py-2 text-xs border border-neutral-200 rounded-xl bg-white font-semibold"
+              >
+                <option value="all">
+                  {lang === 'bn' ? 'সব দৃশ্যমানতা' : `All Visibility (${products.length})`}
+                </option>
+                <option value="visible">
+                  {lang === 'bn'
+                    ? 'ওয়েবসাইটে দৃশ্যমান'
+                    : `Shown on Website (${products.filter((p) => p.isVisibleOnStorefront !== false && p.isAvailable !== false).length})`}
+                </option>
+                <option value="hidden">
+                  {lang === 'bn'
+                    ? 'ওয়েবসাইট থেকে লুকানো'
+                    : `Hidden from Website (${products.filter((p) => p.isVisibleOnStorefront === false || p.isAvailable === false).length})`}
+                </option>
+              </select>
             </div>
 
             <button
@@ -1976,72 +2074,134 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {filteredProducts.map((item) => (
-              <div
-                key={item.id}
-                className="bg-white rounded-2xl border border-neutral-200 p-4 flex items-center justify-between gap-4"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <img
-                    src={item.imageUrl}
-                    alt={item.name}
-                    className="w-16 h-16 rounded-xl object-cover shrink-0 bg-neutral-100"
-                  />
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600">
-                        {item.category}
-                      </span>
-                      <span className="text-[10px] text-neutral-400 truncate">
-                        {restaurantNameMap.get(item.restaurantId) || `Rest #${item.restaurantId}`}
-                      </span>
-                    </div>
-                    <h3 className="font-bold text-sm text-[#2E3138] truncate mt-0.5">
-                      {lang === 'bn' ? item.nameBn : item.name}
-                    </h3>
-                    <p className="text-xs font-bold text-[#E21B70] tabular-nums">
-                      {formatBdt(item.discountPrice ?? item.price, lang)}
-                      {item.discountPrice && (
-                        <span className="ml-1.5 text-neutral-400 line-through font-normal">
-                          {formatBdt(item.price, lang)}
+            {filteredProducts.map((item) => {
+              const shownOnSite = item.isVisibleOnStorefront !== false && item.isAvailable !== false;
+              return (
+                <div
+                  key={item.id}
+                  className={`bg-white rounded-2xl border p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+                    shownOnSite ? 'border-neutral-200' : 'border-red-200 bg-red-50/30'
+                  }`}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <img
+                      src={item.imageUrl}
+                      alt={item.name}
+                      className={`w-16 h-16 rounded-xl object-cover shrink-0 bg-neutral-100 ${
+                        shownOnSite ? '' : 'opacity-60 grayscale'
+                      }`}
+                    />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600">
+                          {item.category}
                         </span>
+                        <span
+                          className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                            shownOnSite
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-red-100 text-red-700'
+                          }`}
+                        >
+                          {shownOnSite
+                            ? lang === 'bn'
+                              ? 'সাইটে দৃশ্যমান'
+                              : 'Shown on Site'
+                            : lang === 'bn'
+                            ? 'লুকানো'
+                            : 'Hidden from Site'}
+                        </span>
+                        {item.isPopular && (
+                          <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-[#FFF0F6] text-[#E21B70]">
+                            Featured
+                          </span>
+                        )}
+                      </div>
+                      <h3 className="font-bold text-sm text-[#2E3138] truncate mt-0.5">
+                        {lang === 'bn' ? item.nameBn : item.name}
+                      </h3>
+                      <p className="text-[11px] text-neutral-500 truncate">
+                        {restaurantNameMap.get(item.restaurantId) || `Rest #${item.restaurantId}`}
+                      </p>
+                      <p className="text-xs font-bold text-[#E21B70] tabular-nums">
+                        {formatBdt(item.discountPrice ?? item.price, lang)}
+                        {item.discountPrice && (
+                          <span className="ml-1.5 text-neutral-400 line-through font-normal">
+                            {formatBdt(item.price, lang)}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleQuickProductToggle(item, 'isVisibleOnStorefront')}
+                      aria-label={
+                        shownOnSite ? `Hide ${item.name} from website` : `Show ${item.name} on website`
+                      }
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border inline-flex items-center gap-1 ${
+                        shownOnSite
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-red-50 hover:text-red-700 hover:border-red-200'
+                          : 'border-red-200 bg-red-50 text-red-700 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-200'
+                      }`}
+                    >
+                      {shownOnSite ? (
+                        <>
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>{lang === 'bn' ? 'দৃশ্যমান' : 'Shown'}</span>
+                        </>
+                      ) : (
+                        <>
+                          <EyeOff className="w-3.5 h-3.5" />
+                          <span>{lang === 'bn' ? 'লুকানো' : 'Hidden'}</span>
+                        </>
                       )}
-                    </p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleQuickProductToggle(item, 'isPopular')}
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border ${
+                        item.isPopular
+                          ? 'border-[#E21B70]/30 bg-[#FFF0F6] text-[#E21B70]'
+                          : 'border-neutral-200 text-neutral-600'
+                      }`}
+                    >
+                      {item.isPopular ? 'Featured' : 'Feature'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openEditProductModal(item)}
+                      aria-label={`Edit product ${item.name}`}
+                      className="px-2.5 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-neutral-700 inline-flex items-center gap-1"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      <span>Edit</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleQuickProductToggle(item, 'inStock')}
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border ${
+                        item.inStock
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                          : 'border-amber-200 bg-amber-50 text-amber-700'
+                      }`}
+                    >
+                      {item.inStock ? 'In Stock' : 'Out'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteProduct(item)}
+                      aria-label={`Delete product ${item.name}`}
+                      className="p-2 rounded-lg text-neutral-400 hover:text-red-600 hover:bg-red-50"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
-
-                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => openEditProductModal(item)}
-                    aria-label={`Edit product ${item.name}`}
-                    className="px-2.5 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-neutral-700 inline-flex items-center gap-1"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                    <span>Edit</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleQuickProductToggle(item, 'inStock')}
-                    className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border ${
-                      item.inStock
-                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                        : 'border-amber-200 bg-amber-50 text-amber-700'
-                    }`}
-                  >
-                    {item.inStock ? 'In Stock' : 'Out'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteProduct(item)}
-                    aria-label={`Delete product ${item.name}`}
-                    className="p-2 rounded-lg text-neutral-400 hover:text-red-600 hover:bg-red-50"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       ) : tab === 'restaurants' ? (
@@ -2443,8 +2603,8 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                 </p>
                 <p className="text-neutral-600 mt-0.5">
                   {lang === 'bn'
-                    ? `পাবলিক সাইট থেকে কেউ সুপার অ্যাডমিন হতে পারবে না। শুধুমাত্র যাচাইকৃত সুপার অ্যাডমিন (${PRIMARY_SUPER_ADMIN_EMAIL}) অ্যাডমিন/সুপার অ্যাডমিন রোল নিয়ন্ত্রণ করবেন।`
-                    : `Public role-switching to Super Admin is locked. Only verified Super Admins can assign or modify Admin & Super Admin roles, and ${PRIMARY_SUPER_ADMIN_EMAIL} is protected.`}
+                    ? `পাবলিক সাইট থেকে কেউ সুপার অ্যাডমিন হতে পারবে না। শুধুমাত্র যাচাইকৃত সুপার অ্যাডমিন (${PRIMARY_SUPER_ADMIN_EMAIL}, ${ADMIN_PIN_DEFAULT_EMAIL}) অ্যাডমিন/সুপার অ্যাডমিন রোল নিয়ন্ত্রণ করবেন।`
+                    : `Public role-switching to Super Admin is locked. Only verified Super Admins can assign or modify Admin & Super Admin roles, and ${PRIMARY_SUPER_ADMIN_EMAIL} & ${ADMIN_PIN_DEFAULT_EMAIL} are protected.`}
                 </p>
               </div>
             </div>
@@ -2457,7 +2617,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
             <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
               <h2 className="font-bold text-sm text-[#2E3138]">Platform Users & Roles ({users.length})</h2>
               {users.map((u) => {
-                const isPrimaryOwner = u.email.trim().toLowerCase() === PRIMARY_SUPER_ADMIN_EMAIL;
+                const isPrimaryOwner = isProtectedSuperAdminEmail(u.email);
                 const canManagePrivileged = currentUser.role === 'super_admin';
                 const rowLocked =
                   isPrimaryOwner ||
@@ -2720,6 +2880,20 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
             </div>
 
             <div className="flex flex-wrap items-center gap-4 text-xs font-semibold text-neutral-700">
+              <label className="inline-flex items-center gap-1.5 cursor-pointer text-[#E21B70]">
+                <input
+                  type="checkbox"
+                  checked={productModal.isVisibleOnStorefront}
+                  onChange={(e) =>
+                    setProductModal({ ...productModal, isVisibleOnStorefront: e.target.checked })
+                  }
+                />
+                <span>
+                  {lang === 'bn'
+                    ? 'ওয়েবসাইটে দেখান (Storefront Visible)'
+                    : 'Show on Website (Customer Storefront)'}
+                </span>
+              </label>
               <label className="inline-flex items-center gap-1.5 cursor-pointer">
                 <input
                   type="checkbox"
@@ -2736,7 +2910,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                     setProductModal({ ...productModal, isAvailable: e.target.checked })
                   }
                 />
-                <span>Visible on Menu</span>
+                <span>Available on Menu</span>
               </label>
               <label className="inline-flex items-center gap-1.5 cursor-pointer">
                 <input
@@ -2746,7 +2920,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                     setProductModal({ ...productModal, isPopular: e.target.checked })
                   }
                 />
-                <span>Popular Item</span>
+                <span>Featured on Homepage</span>
               </label>
             </div>
 

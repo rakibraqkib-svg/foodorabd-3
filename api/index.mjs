@@ -355,9 +355,6 @@ var createPool = () => {
 var pool = createPool();
 var db = drizzle(pool, { schema: schema_exports });
 
-// src/db/seed.ts
-import { count } from "drizzle-orm";
-
 // src/db/ensure-schema.ts
 import { sql } from "drizzle-orm";
 var schemaPromise = null;
@@ -403,6 +400,20 @@ async function runCreateTablesIfMissing() {
   if (missingTables.length === 0) {
     return;
   }
+  try {
+    await createMissingTables(existingSet);
+  } catch (err) {
+    const code = err?.code || err?.cause?.code;
+    if (code === "42501") {
+      console.warn(
+        `Skipping runtime DDL creation (role lacks CREATE on schema public). Missing tables: ${missingTables.join(", ")}`
+      );
+      return;
+    }
+    throw err;
+  }
+}
+async function createMissingTables(existingSet) {
   if (!existingSet.has("users")) {
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS users (
@@ -714,6 +725,7 @@ async function runCreateTablesIfMissing() {
 }
 
 // src/db/seed.ts
+import { count } from "drizzle-orm";
 var seedPromise = null;
 var IMG_HERO = "/src/assets/images/hero_dhaka_feast_1794831374659.jpg";
 var IMG_BIRIYANI = "/src/assets/images/food_kacchi_biriyani_1794831373742.jpg";
@@ -1780,7 +1792,198 @@ async function runSeedIfEmpty() {
 }
 
 // src/db/queries.ts
-import { and, desc, eq, or } from "drizzle-orm";
+import { and, desc, eq, like, or } from "drizzle-orm";
+
+// src/lib/marketplace-logic.ts
+function calculateCartItemUnitPrice(item) {
+  const effectiveBase = item.discountPrice !== null && item.discountPrice !== void 0 && item.discountPrice > 0 ? item.discountPrice : item.basePrice;
+  const variationCost = item.variationDelta ?? 0;
+  const addonsCost = item.addons.reduce((sum, addon) => sum + Math.max(0, addon.price), 0);
+  return Math.max(0, effectiveBase + variationCost + addonsCost);
+}
+function evaluateCoupon(coupon, subtotal, deliveryFee, restaurantId) {
+  if (!coupon.isActive) {
+    return { valid: false, discountAmount: 0, deliveryFeeAfterCoupon: deliveryFee, reason: "Coupon is inactive" };
+  }
+  if (coupon.usedCount >= coupon.usageLimit) {
+    return { valid: false, discountAmount: 0, deliveryFeeAfterCoupon: deliveryFee, reason: "Coupon usage limit reached" };
+  }
+  if (coupon.restaurantId && coupon.restaurantId !== restaurantId) {
+    return { valid: false, discountAmount: 0, deliveryFeeAfterCoupon: deliveryFee, reason: "Coupon not valid for this restaurant" };
+  }
+  if (subtotal < coupon.minOrder) {
+    return {
+      valid: false,
+      discountAmount: 0,
+      deliveryFeeAfterCoupon: deliveryFee,
+      reason: `Minimum order of \u09F3${coupon.minOrder} required`
+    };
+  }
+  if (coupon.type === "free_delivery") {
+    return {
+      valid: true,
+      discountAmount: 0,
+      deliveryFeeAfterCoupon: 0
+    };
+  }
+  if (coupon.type === "fixed") {
+    const discount2 = Math.min(subtotal, Math.max(0, coupon.value));
+    return {
+      valid: true,
+      discountAmount: discount2,
+      deliveryFeeAfterCoupon: deliveryFee
+    };
+  }
+  const rawPct = Math.round(subtotal * coupon.value / 100);
+  const capped = coupon.maxDiscount > 0 ? Math.min(rawPct, coupon.maxDiscount) : rawPct;
+  const discount = Math.min(subtotal, Math.max(0, capped));
+  return {
+    valid: true,
+    discountAmount: discount,
+    deliveryFeeAfterCoupon: deliveryFee
+  };
+}
+function calculateOrderFinancials(params) {
+  const subtotal = Math.max(0, Math.round(params.subtotal));
+  const discountAmount = Math.min(subtotal, Math.max(0, Math.round(params.discountAmount)));
+  const netFoodRevenue = Math.max(0, subtotal - discountAmount);
+  const deliveryFee = Math.max(0, Math.round(params.deliveryFee));
+  const serviceFee = Math.max(0, Math.round(params.serviceFee));
+  const taxAmount = Math.max(0, Math.round(params.taxAmount ?? 0));
+  let platformCommission = 0;
+  if (netFoodRevenue > 0) {
+    if (params.commissionType === "fixed") {
+      platformCommission = Math.min(netFoodRevenue, Math.max(0, Math.round(params.fixedCommission)));
+    } else {
+      platformCommission = Math.round(netFoodRevenue * Math.max(0, params.commissionRate) / 100);
+    }
+  }
+  const restaurantEarnings = Math.max(0, netFoodRevenue - platformCommission);
+  const totalPayable = netFoodRevenue + deliveryFee + serviceFee + taxAmount;
+  return {
+    subtotal,
+    discountAmount,
+    netFoodRevenue,
+    deliveryFee,
+    serviceFee,
+    taxAmount,
+    totalPayable,
+    platformCommission,
+    restaurantEarnings
+  };
+}
+var VALID_TRANSITIONS = {
+  confirmed: ["accepted", "preparing", "cancelled"],
+  accepted: ["preparing", "ready", "cancelled"],
+  preparing: ["ready", "cancelled"],
+  ready: ["rider_assigned", "picked_up", "on_the_way", "delivered", "cancelled"],
+  rider_assigned: ["picked_up", "on_the_way", "cancelled"],
+  picked_up: ["on_the_way", "delivered"],
+  on_the_way: ["delivered"],
+  delivered: [],
+  cancelled: []
+};
+function canTransitionOrderStatus(from, to) {
+  if (from === to) return true;
+  return VALID_TRANSITIONS[from]?.includes(to) ?? false;
+}
+function haversineDistanceKm(lat1, lng1, lat2, lng2) {
+  const toRad = (deg) => deg * Math.PI / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c * 100) / 100;
+}
+function estimateDeliveryFeeAndEta(distanceKm, baseFee, deliveryMode) {
+  const extraKm = Math.max(0, distanceKm - 2);
+  const modeSurcharge = deliveryMode === "third_party" ? 10 : 0;
+  const fee = Math.round(baseFee + extraKm * 12 + modeSurcharge);
+  const etaMinutes = Math.max(12, Math.round(14 + distanceKm * 5.5));
+  return { fee, etaMinutes };
+}
+function mapOpenMeteoWeather(weatherCode, precipitationMm) {
+  const hasPrecip = precipitationMm > 0.2;
+  if (weatherCode >= 95) {
+    return { labelEn: "Thunderstorm", labelBn: "\u09AC\u099C\u09CD\u09B0\u09AC\u09C3\u09B7\u09CD\u099F\u09BF", isRaining: true, rainBufferMin: 12 };
+  }
+  if (weatherCode >= 51 && weatherCode <= 82 || hasPrecip) {
+    return { labelEn: "Rainy", labelBn: "\u09AC\u09C3\u09B7\u09CD\u099F\u09BF \u09B9\u099A\u09CD\u099B\u09C7", isRaining: true, rainBufferMin: 7 };
+  }
+  if (weatherCode === 45 || weatherCode === 48) {
+    return { labelEn: "Hazy / Fog", labelBn: "\u0995\u09C1\u09DF\u09BE\u09B6\u09BE\u099A\u09CD\u099B\u09A8\u09CD\u09A8", isRaining: false, rainBufferMin: 2 };
+  }
+  if (weatherCode >= 1 && weatherCode <= 3) {
+    return { labelEn: "Partly Cloudy", labelBn: "\u0986\u0982\u09B6\u09BF\u0995 \u09AE\u09C7\u0998\u09B2\u09BE", isRaining: false, rainBufferMin: 0 };
+  }
+  return { labelEn: "Clear Sky", labelBn: "\u09AA\u09B0\u09BF\u09B7\u09CD\u0995\u09BE\u09B0 \u0986\u0995\u09BE\u09B6", isRaining: false, rainBufferMin: 0 };
+}
+var PRIMARY_SUPER_ADMIN_EMAIL = "rakibraqkib@gmail.com";
+var ADMIN_PIN_DEFAULT_EMAIL = "raqkibrony@gmail.com";
+var PROTECTED_SUPER_ADMIN_EMAILS = [
+  PRIMARY_SUPER_ADMIN_EMAIL,
+  ADMIN_PIN_DEFAULT_EMAIL
+];
+function isProtectedSuperAdminEmail(email) {
+  const normalized = email.trim().toLowerCase();
+  return PROTECTED_SUPER_ADMIN_EMAILS.includes(normalized);
+}
+function canActorModifyUserAccount(params) {
+  const { actorUid, actorRole, targetUid, targetEmail, currentRole, nextRole, nextStatus } = params;
+  if (actorRole !== "admin" && actorRole !== "super_admin") {
+    return { allowed: false, reason: "Only authorized Admin accounts can modify user roles." };
+  }
+  if (isProtectedSuperAdminEmail(targetEmail)) {
+    if (nextRole !== "super_admin" || nextStatus === "suspended") {
+      return {
+        allowed: false,
+        reason: "Primary Super Admin account is protected and cannot be demoted or suspended."
+      };
+    }
+  }
+  if (actorUid === targetUid && nextStatus === "suspended") {
+    return { allowed: false, reason: "You cannot suspend your own active admin account." };
+  }
+  const touchesPrivilegedRole = currentRole === "super_admin" || currentRole === "admin" || nextRole === "super_admin" || nextRole === "admin";
+  if (touchesPrivilegedRole && actorRole !== "super_admin") {
+    return {
+      allowed: false,
+      reason: "Only Super Admin can grant or modify Admin and Super Admin privileges."
+    };
+  }
+  return { allowed: true };
+}
+function validateBroadcastNotification(input) {
+  const allowedTargets = [
+    "all",
+    "customer",
+    "restaurant_owner",
+    "rider",
+    "admin"
+  ];
+  if (!allowedTargets.includes(input.targetRole)) {
+    return { valid: false, reason: "Invalid broadcast target role." };
+  }
+  const title = input.title.trim();
+  const message = input.message.trim();
+  if (title.length < 3 || title.length > 120) {
+    return { valid: false, reason: "Broadcast title must be between 3 and 120 characters." };
+  }
+  if (message.length < 5 || message.length > 500) {
+    return { valid: false, reason: "Broadcast message must be between 5 and 500 characters." };
+  }
+  const type = input.type === "promo" || input.type === "order" ? input.type : "system";
+  return {
+    valid: true,
+    targetRole: input.targetRole,
+    title,
+    message,
+    type
+  };
+}
+
+// src/db/queries.ts
 async function getApprovedRestaurants() {
   try {
     return await db.select().from(restaurants).where(eq(restaurants.status, "approved")).orderBy(desc(restaurants.isSponsored), desc(restaurants.rating));
@@ -1937,7 +2140,8 @@ async function getAdminWorkspace() {
       allCoupons,
       allRiders,
       recentAuditLogs,
-      settings
+      settings,
+      adminPinCreds
     ] = await Promise.all([
       db.select().from(restaurants).orderBy(desc(restaurants.createdAt)),
       db.select().from(foodItems).orderBy(desc(foodItems.id)),
@@ -1948,8 +2152,14 @@ async function getAdminWorkspace() {
       db.select().from(coupons).orderBy(desc(coupons.createdAt)),
       db.select().from(riders).orderBy(desc(riders.createdAt)),
       db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(60),
-      getPlatformSettingsRow()
+      getPlatformSettingsRow(),
+      db.select({ email: localCredentials.email }).from(localCredentials).where(like(localCredentials.email, "__admin_pin__:%"))
     ]);
+    const adminPinEmailSet = new Set(PROTECTED_SUPER_ADMIN_EMAILS);
+    for (const row of adminPinCreds) {
+      const stripped = row.email.replace(/^__admin_pin__:/, "").trim().toLowerCase();
+      if (stripped) adminPinEmailSet.add(stripped);
+    }
     return {
       restaurants: allRestaurants,
       products: allProducts,
@@ -1960,7 +2170,8 @@ async function getAdminWorkspace() {
       coupons: allCoupons,
       riders: allRiders,
       auditLogs: recentAuditLogs,
-      settings
+      settings,
+      adminPinEmails: Array.from(adminPinEmailSet)
     };
   } catch (error) {
     console.error("Failed to load admin workspace:", error);
@@ -2076,7 +2287,7 @@ function verifySandboxToken(token) {
 }
 async function getOrCreateUser(uid, email, fullName, defaultRole = "customer") {
   const emailLower = email.trim().toLowerCase();
-  const isPrimaryAdmin = emailLower === "rakibraqkib@gmail.com";
+  const isPrimaryAdmin = isProtectedSuperAdminEmail(emailLower);
   try {
     const existing = await db.select().from(users).where(eq2(users.uid, uid)).limit(1);
     if (existing.length > 0) {
@@ -2187,186 +2398,6 @@ var requireRole = (allowedRoles) => {
     next();
   };
 };
-
-// src/lib/marketplace-logic.ts
-function calculateCartItemUnitPrice(item) {
-  const effectiveBase = item.discountPrice !== null && item.discountPrice !== void 0 && item.discountPrice > 0 ? item.discountPrice : item.basePrice;
-  const variationCost = item.variationDelta ?? 0;
-  const addonsCost = item.addons.reduce((sum, addon) => sum + Math.max(0, addon.price), 0);
-  return Math.max(0, effectiveBase + variationCost + addonsCost);
-}
-function evaluateCoupon(coupon, subtotal, deliveryFee, restaurantId) {
-  if (!coupon.isActive) {
-    return { valid: false, discountAmount: 0, deliveryFeeAfterCoupon: deliveryFee, reason: "Coupon is inactive" };
-  }
-  if (coupon.usedCount >= coupon.usageLimit) {
-    return { valid: false, discountAmount: 0, deliveryFeeAfterCoupon: deliveryFee, reason: "Coupon usage limit reached" };
-  }
-  if (coupon.restaurantId && coupon.restaurantId !== restaurantId) {
-    return { valid: false, discountAmount: 0, deliveryFeeAfterCoupon: deliveryFee, reason: "Coupon not valid for this restaurant" };
-  }
-  if (subtotal < coupon.minOrder) {
-    return {
-      valid: false,
-      discountAmount: 0,
-      deliveryFeeAfterCoupon: deliveryFee,
-      reason: `Minimum order of \u09F3${coupon.minOrder} required`
-    };
-  }
-  if (coupon.type === "free_delivery") {
-    return {
-      valid: true,
-      discountAmount: 0,
-      deliveryFeeAfterCoupon: 0
-    };
-  }
-  if (coupon.type === "fixed") {
-    const discount2 = Math.min(subtotal, Math.max(0, coupon.value));
-    return {
-      valid: true,
-      discountAmount: discount2,
-      deliveryFeeAfterCoupon: deliveryFee
-    };
-  }
-  const rawPct = Math.round(subtotal * coupon.value / 100);
-  const capped = coupon.maxDiscount > 0 ? Math.min(rawPct, coupon.maxDiscount) : rawPct;
-  const discount = Math.min(subtotal, Math.max(0, capped));
-  return {
-    valid: true,
-    discountAmount: discount,
-    deliveryFeeAfterCoupon: deliveryFee
-  };
-}
-function calculateOrderFinancials(params) {
-  const subtotal = Math.max(0, Math.round(params.subtotal));
-  const discountAmount = Math.min(subtotal, Math.max(0, Math.round(params.discountAmount)));
-  const netFoodRevenue = Math.max(0, subtotal - discountAmount);
-  const deliveryFee = Math.max(0, Math.round(params.deliveryFee));
-  const serviceFee = Math.max(0, Math.round(params.serviceFee));
-  const taxAmount = Math.max(0, Math.round(params.taxAmount ?? 0));
-  let platformCommission = 0;
-  if (netFoodRevenue > 0) {
-    if (params.commissionType === "fixed") {
-      platformCommission = Math.min(netFoodRevenue, Math.max(0, Math.round(params.fixedCommission)));
-    } else {
-      platformCommission = Math.round(netFoodRevenue * Math.max(0, params.commissionRate) / 100);
-    }
-  }
-  const restaurantEarnings = Math.max(0, netFoodRevenue - platformCommission);
-  const totalPayable = netFoodRevenue + deliveryFee + serviceFee + taxAmount;
-  return {
-    subtotal,
-    discountAmount,
-    netFoodRevenue,
-    deliveryFee,
-    serviceFee,
-    taxAmount,
-    totalPayable,
-    platformCommission,
-    restaurantEarnings
-  };
-}
-var VALID_TRANSITIONS = {
-  confirmed: ["accepted", "preparing", "cancelled"],
-  accepted: ["preparing", "ready", "cancelled"],
-  preparing: ["ready", "cancelled"],
-  ready: ["rider_assigned", "picked_up", "on_the_way", "delivered", "cancelled"],
-  rider_assigned: ["picked_up", "on_the_way", "cancelled"],
-  picked_up: ["on_the_way", "delivered"],
-  on_the_way: ["delivered"],
-  delivered: [],
-  cancelled: []
-};
-function canTransitionOrderStatus(from, to) {
-  if (from === to) return true;
-  return VALID_TRANSITIONS[from]?.includes(to) ?? false;
-}
-function haversineDistanceKm(lat1, lng1, lat2, lng2) {
-  const toRad = (deg) => deg * Math.PI / 180;
-  const R = 6371;
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return Math.round(R * c * 100) / 100;
-}
-function estimateDeliveryFeeAndEta(distanceKm, baseFee, deliveryMode) {
-  const extraKm = Math.max(0, distanceKm - 2);
-  const modeSurcharge = deliveryMode === "third_party" ? 10 : 0;
-  const fee = Math.round(baseFee + extraKm * 12 + modeSurcharge);
-  const etaMinutes = Math.max(12, Math.round(14 + distanceKm * 5.5));
-  return { fee, etaMinutes };
-}
-function mapOpenMeteoWeather(weatherCode, precipitationMm) {
-  const hasPrecip = precipitationMm > 0.2;
-  if (weatherCode >= 95) {
-    return { labelEn: "Thunderstorm", labelBn: "\u09AC\u099C\u09CD\u09B0\u09AC\u09C3\u09B7\u09CD\u099F\u09BF", isRaining: true, rainBufferMin: 12 };
-  }
-  if (weatherCode >= 51 && weatherCode <= 82 || hasPrecip) {
-    return { labelEn: "Rainy", labelBn: "\u09AC\u09C3\u09B7\u09CD\u099F\u09BF \u09B9\u099A\u09CD\u099B\u09C7", isRaining: true, rainBufferMin: 7 };
-  }
-  if (weatherCode === 45 || weatherCode === 48) {
-    return { labelEn: "Hazy / Fog", labelBn: "\u0995\u09C1\u09DF\u09BE\u09B6\u09BE\u099A\u09CD\u099B\u09A8\u09CD\u09A8", isRaining: false, rainBufferMin: 2 };
-  }
-  if (weatherCode >= 1 && weatherCode <= 3) {
-    return { labelEn: "Partly Cloudy", labelBn: "\u0986\u0982\u09B6\u09BF\u0995 \u09AE\u09C7\u0998\u09B2\u09BE", isRaining: false, rainBufferMin: 0 };
-  }
-  return { labelEn: "Clear Sky", labelBn: "\u09AA\u09B0\u09BF\u09B7\u09CD\u0995\u09BE\u09B0 \u0986\u0995\u09BE\u09B6", isRaining: false, rainBufferMin: 0 };
-}
-var PRIMARY_SUPER_ADMIN_EMAIL = "rakibraqkib@gmail.com";
-function canActorModifyUserAccount(params) {
-  const { actorUid, actorRole, targetUid, targetEmail, currentRole, nextRole, nextStatus } = params;
-  if (actorRole !== "admin" && actorRole !== "super_admin") {
-    return { allowed: false, reason: "Only authorized Admin accounts can modify user roles." };
-  }
-  if (targetEmail.trim().toLowerCase() === PRIMARY_SUPER_ADMIN_EMAIL) {
-    if (nextRole !== "super_admin" || nextStatus === "suspended") {
-      return {
-        allowed: false,
-        reason: "Primary Super Admin account is protected and cannot be demoted or suspended."
-      };
-    }
-  }
-  if (actorUid === targetUid && nextStatus === "suspended") {
-    return { allowed: false, reason: "You cannot suspend your own active admin account." };
-  }
-  const touchesPrivilegedRole = currentRole === "super_admin" || currentRole === "admin" || nextRole === "super_admin" || nextRole === "admin";
-  if (touchesPrivilegedRole && actorRole !== "super_admin") {
-    return {
-      allowed: false,
-      reason: "Only Super Admin can grant or modify Admin and Super Admin privileges."
-    };
-  }
-  return { allowed: true };
-}
-function validateBroadcastNotification(input) {
-  const allowedTargets = [
-    "all",
-    "customer",
-    "restaurant_owner",
-    "rider",
-    "admin"
-  ];
-  if (!allowedTargets.includes(input.targetRole)) {
-    return { valid: false, reason: "Invalid broadcast target role." };
-  }
-  const title = input.title.trim();
-  const message = input.message.trim();
-  if (title.length < 3 || title.length > 120) {
-    return { valid: false, reason: "Broadcast title must be between 3 and 120 characters." };
-  }
-  if (message.length < 5 || message.length > 500) {
-    return { valid: false, reason: "Broadcast message must be between 5 and 500 characters." };
-  }
-  const type = input.type === "promo" || input.type === "order" ? input.type : "system";
-  return {
-    valid: true,
-    targetRole: input.targetRole,
-    title,
-    message,
-    type
-  };
-}
 
 // src/services/delivery.ts
 var FoodoraOwnRiderProvider = class {
@@ -2896,11 +2927,177 @@ function verifyPasswordScrypt(password, stored) {
   if (derived.length !== storedBuf.length) return false;
   return crypto3.timingSafeEqual(derived, storedBuf);
 }
+var ADMIN_PIN_VAULT_KEY = "__admin_panel_pin__";
+var ADMIN_PIN_EMAIL_PREFIX = "__admin_pin__:";
+function adminPinKeyForEmail(email) {
+  return `${ADMIN_PIN_EMAIL_PREFIX}${email.trim().toLowerCase()}`;
+}
+function getFallbackAdminPin() {
+  return process.env.ADMIN_ACCESS_PIN || "2026";
+}
+async function verifyAdminPinValue(pin) {
+  const rows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq3(localCredentials.email, ADMIN_PIN_VAULT_KEY)).limit(1);
+  if (rows.length > 0) {
+    return verifyPasswordScrypt(pin, rows[0].passwordHash);
+  }
+  const fallback = getFallbackAdminPin();
+  const a = Buffer.from(pin, "utf8");
+  const b = Buffer.from(fallback, "utf8");
+  if (a.length !== b.length) return false;
+  return crypto3.timingSafeEqual(a, b);
+}
+async function verifyAdminPinForEmail(email, pin) {
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return false;
+  const specificRows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq3(localCredentials.email, adminPinKeyForEmail(normalized))).limit(1);
+  if (specificRows.length > 0) {
+    return verifyPasswordScrypt(pin, specificRows[0].passwordHash);
+  }
+  if (isProtectedSuperAdminEmail(normalized)) {
+    return verifyAdminPinValue(pin);
+  }
+  return false;
+}
+app.post("/api/auth/admin-pin", async (req, res) => {
+  const schema = z.object({
+    pin: z.string().trim().min(4).max(16),
+    email: z.string().trim().email().optional()
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Please enter a valid Admin email and 4\u201316 character PIN." });
+  }
+  const targetEmail = (parsed.data.email || ADMIN_PIN_DEFAULT_EMAIL).trim().toLowerCase();
+  try {
+    const valid = await verifyAdminPinForEmail(targetEmail, parsed.data.pin);
+    if (!valid) {
+      return res.status(401).json({ error: "Incorrect Admin email or PIN. Please try again." });
+    }
+    const existingRows = await db.select().from(users).where(sql3`lower(${users.email}) = ${targetEmail}`).limit(1);
+    if (existingRows[0]?.status === "suspended") {
+      return res.status(403).json({ error: "This Admin account has been suspended." });
+    }
+    const assignedRole = isProtectedSuperAdminEmail(targetEmail) ? "super_admin" : existingRows[0]?.role === "super_admin" ? "super_admin" : "admin";
+    let dbUser = existingRows[0];
+    if (dbUser) {
+      if (dbUser.role !== assignedRole) {
+        const updated = await db.update(users).set({ role: assignedRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq3(users.id, dbUser.id)).returning();
+        dbUser = updated[0];
+      }
+    } else {
+      const uid = `adm-${crypto3.randomBytes(8).toString("hex")}`;
+      const defaultName = targetEmail === ADMIN_PIN_DEFAULT_EMAIL ? "Raqib Rony (Admin)" : targetEmail.split("@")[0];
+      dbUser = await getOrCreateUser(uid, targetEmail, defaultName, assignedRole);
+    }
+    const token = signSandboxToken({
+      uid: dbUser.uid,
+      email: dbUser.email,
+      fullName: dbUser.fullName,
+      role: assignedRole,
+      isSandbox: false
+    });
+    try {
+      await db.insert(auditLogs).values({
+        actorUid: dbUser.uid,
+        action: "admin_pin_unlock",
+        targetType: "auth",
+        targetId: dbUser.email,
+        details: `Admin workspace (${assignedRole}) unlocked via Admin PIN for ${dbUser.email}`
+      });
+    } catch {
+    }
+    return res.json({
+      token,
+      user: {
+        uid: dbUser.uid,
+        email: dbUser.email,
+        fullName: dbUser.fullName,
+        role: assignedRole,
+        isSandbox: false
+      }
+    });
+  } catch (error) {
+    console.error("Admin PIN unlock failed:", error);
+    return res.status(500).json({ error: error.message || "Failed to verify Admin PIN" });
+  }
+});
+app.post(
+  "/api/admin/pin",
+  requireAuth,
+  requireRole(["super_admin"]),
+  async (req, res) => {
+    const schema = z.object({
+      currentPin: z.string().trim().min(4).max(16),
+      newPin: z.string().trim().min(4).max(16),
+      adminEmail: z.string().trim().email().optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Valid Admin email, current PIN, and new PIN (4\u201316 chars) are required." });
+    }
+    const targetEmail = (parsed.data.adminEmail || ADMIN_PIN_DEFAULT_EMAIL).trim().toLowerCase();
+    try {
+      const valid = await verifyAdminPinForEmail(req.user.email, parsed.data.currentPin) || await verifyAdminPinForEmail(targetEmail, parsed.data.currentPin) || await verifyAdminPinValue(parsed.data.currentPin);
+      if (!valid) {
+        return res.status(401).json({ error: "Current Admin PIN is incorrect." });
+      }
+      const nextHash = hashPasswordScrypt(parsed.data.newPin);
+      const pinKey = adminPinKeyForEmail(targetEmail);
+      const pinUid = `admin-pin-${crypto3.createHash("sha256").update(targetEmail).digest("hex").slice(0, 16)}`;
+      await db.insert(localCredentials).values({
+        email: pinKey,
+        uid: pinUid,
+        passwordHash: nextHash
+      }).onConflictDoUpdate({
+        target: localCredentials.email,
+        set: { passwordHash: nextHash }
+      });
+      const existingTarget = await db.select().from(users).where(sql3`lower(${users.email}) = ${targetEmail}`).limit(1);
+      const targetRole = isProtectedSuperAdminEmail(targetEmail) ? "super_admin" : existingTarget[0]?.role === "super_admin" ? "super_admin" : "admin";
+      if (existingTarget.length > 0) {
+        if (existingTarget[0].role !== targetRole) {
+          await db.update(users).set({ role: targetRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq3(users.id, existingTarget[0].id));
+        }
+      } else {
+        await getOrCreateUser(
+          `adm-${crypto3.randomBytes(8).toString("hex")}`,
+          targetEmail,
+          targetEmail === ADMIN_PIN_DEFAULT_EMAIL ? "Raqib Rony (Admin)" : targetEmail.split("@")[0],
+          targetRole
+        );
+      }
+      await db.insert(auditLogs).values({
+        actorUid: req.user.uid,
+        action: "admin_pin_updated",
+        targetType: "security",
+        targetId: targetEmail,
+        details: `Admin Panel PIN created/updated for ${targetEmail} (${targetRole})`
+      });
+      return res.json({
+        ok: true,
+        adminEmail: targetEmail,
+        message: `Admin Panel PIN saved for ${targetEmail}.`
+      });
+    } catch (error) {
+      console.error("Admin PIN update failed:", error);
+      return res.status(500).json({ error: error.message || "Failed to update Admin PIN" });
+    }
+  }
+);
+function isMissingTableError(err) {
+  const code = err?.code || err?.cause?.code;
+  return code === "42P01";
+}
+function isUniqueViolationError(err) {
+  const code = err?.code || err?.cause?.code;
+  return code === "23505";
+}
 app.post("/api/auth/register", async (req, res) => {
   const schema = z.object({
-    fullName: z.string().min(2).max(100),
-    email: z.string().email(),
-    password: z.string().min(6).max(128)
+    fullName: z.string().trim().min(2).max(100),
+    email: z.string().trim().email(),
+    password: z.string().min(6).max(128),
+    role: z.enum(["customer", "restaurant_owner", "rider"]).optional()
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -2908,44 +3105,82 @@ app.post("/api/auth/register", async (req, res) => {
   }
   const emailLower = parsed.data.email.trim().toLowerCase();
   const fullName = parsed.data.fullName.trim();
-  try {
+  const requestedRole = parsed.data.role || "customer";
+  const attemptRegister = async () => {
     const existingCred = await db.select({ uid: localCredentials.uid }).from(localCredentials).where(eq3(localCredentials.email, emailLower)).limit(1);
     if (existingCred.length > 0) {
-      return res.status(409).json({ error: "An account with this email already exists. Please sign in." });
+      return { status: 409, body: { error: "An account with this email already exists. Please sign in." } };
     }
-    const existingUser = await db.select().from(users).where(eq3(users.email, emailLower)).limit(1);
+    const existingUser = await db.select().from(users).where(sql3`lower(${users.email}) = ${emailLower}`).limit(1);
     if (existingUser.length > 0) {
-      return res.status(409).json({
-        error: "An account with this email already exists. Please sign in with Google or your existing credentials."
-      });
+      return {
+        status: 409,
+        body: {
+          error: "An account with this email already exists. Please sign in with Google or your existing credentials."
+        }
+      };
     }
     const uid = `usr-${crypto3.randomBytes(8).toString("hex")}`;
-    const role = emailLower === "rakibraqkib@gmail.com" ? "super_admin" : "customer";
+    const role = isProtectedSuperAdminEmail(emailLower) ? "super_admin" : requestedRole;
     const passwordHash = hashPasswordScrypt(parsed.data.password);
-    await db.insert(localCredentials).values({
-      email: emailLower,
-      uid,
-      passwordHash
-    });
-    await db.insert(users).values({
-      uid,
-      email: emailLower,
-      fullName,
-      role
+    await db.transaction(async (tx) => {
+      await tx.insert(localCredentials).values({
+        email: emailLower,
+        uid,
+        passwordHash
+      });
+      await tx.insert(users).values({
+        uid,
+        email: emailLower,
+        fullName,
+        role
+      });
+      if (role === "rider") {
+        await tx.insert(riders).values({
+          uid,
+          fullName,
+          phone: "+8801700000000",
+          email: emailLower,
+          vehicleType: "Motorbike",
+          zone: "Gulshan 2",
+          isAvailable: true,
+          status: "approved"
+        }).onConflictDoNothing();
+      }
     });
     const token = signSandboxToken({ uid, email: emailLower, fullName, role, isSandbox: false });
-    res.status(201).json({
-      token,
-      user: { uid, email: emailLower, fullName, role, isSandbox: false }
-    });
+    return {
+      status: 201,
+      body: {
+        token,
+        user: { uid, email: emailLower, fullName, role, isSandbox: false }
+      }
+    };
+  };
+  try {
+    let result;
+    try {
+      result = await attemptRegister();
+    } catch (err) {
+      if (isMissingTableError(err)) {
+        await ensureSchemaTables();
+        result = await attemptRegister();
+      } else {
+        throw err;
+      }
+    }
+    return res.status(result.status).json(result.body);
   } catch (error) {
+    if (isUniqueViolationError(error)) {
+      return res.status(409).json({ error: "An account with this email already exists. Please sign in." });
+    }
     console.error("Register failed:", error);
-    res.status(500).json({ error: error.message || "Registration failed" });
+    return res.status(500).json({ error: error.message || "Registration failed" });
   }
 });
 app.post("/api/auth/login", async (req, res) => {
   const schema = z.object({
-    email: z.string().email(),
+    email: z.string().trim().email(),
     password: z.string().min(1)
   });
   const parsed = schema.safeParse(req.body);
@@ -2953,30 +3188,295 @@ app.post("/api/auth/login", async (req, res) => {
     return res.status(400).json({ error: "Please enter a valid email and password." });
   }
   const emailLower = parsed.data.email.trim().toLowerCase();
-  try {
+  const attemptLogin = async () => {
     const credRows = await db.select().from(localCredentials).where(eq3(localCredentials.email, emailLower)).limit(1);
     if (credRows.length === 0) {
-      return res.status(401).json({ error: "No account found with this email. Please create an account first." });
+      try {
+        const { data: supaAuth, error: supaErr } = await supabaseServer.auth.signInWithPassword({
+          email: emailLower,
+          password: parsed.data.password
+        });
+        if (!supaErr && supaAuth?.user) {
+          const meta = supaAuth.user.user_metadata || {};
+          const metaName = typeof meta.full_name === "string" && meta.full_name.trim() || typeof meta.name === "string" && meta.name.trim() || emailLower.split("@")[0];
+          const dbUser2 = await getOrCreateUser(supaAuth.user.id, emailLower, metaName, "customer");
+          if (dbUser2.status === "suspended") {
+            return { status: 403, body: { error: "This account has been suspended by an administrator." } };
+          }
+          const role2 = dbUser2.role || "customer";
+          const token2 = signSandboxToken({
+            uid: dbUser2.uid,
+            email: dbUser2.email,
+            fullName: dbUser2.fullName,
+            role: role2,
+            isSandbox: false
+          });
+          return {
+            status: 200,
+            body: {
+              token: token2,
+              user: { uid: dbUser2.uid, email: dbUser2.email, fullName: dbUser2.fullName, role: role2, isSandbox: false }
+            }
+          };
+        }
+      } catch {
+      }
+      return {
+        status: 401,
+        body: { error: "No password account found for this email. Try Google Sign-In or Create Account." }
+      };
     }
     const { uid, passwordHash: storedHash } = credRows[0];
     if (!verifyPasswordScrypt(parsed.data.password, storedHash)) {
-      return res.status(401).json({ error: "Incorrect password. Please try again." });
+      return { status: 401, body: { error: "Incorrect password. Please try again." } };
     }
     const userRows = await db.select().from(users).where(eq3(users.uid, uid)).limit(1);
     const dbUser = userRows[0];
     if (dbUser?.status === "suspended") {
-      return res.status(403).json({ error: "This account has been suspended by an administrator." });
+      return { status: 403, body: { error: "This account has been suspended by an administrator." } };
     }
-    const role = dbUser?.role || (emailLower === "rakibraqkib@gmail.com" ? "super_admin" : "customer");
+    const role = dbUser?.role || (isProtectedSuperAdminEmail(emailLower) ? "super_admin" : "customer");
     const fullName = dbUser?.fullName || emailLower.split("@")[0];
     const token = signSandboxToken({ uid, email: emailLower, fullName, role, isSandbox: false });
-    res.json({
+    return {
+      status: 200,
+      body: {
+        token,
+        user: { uid, email: emailLower, fullName, role, isSandbox: false }
+      }
+    };
+  };
+  try {
+    let result;
+    try {
+      result = await attemptLogin();
+    } catch (err) {
+      if (isMissingTableError(err)) {
+        await ensureSchemaTables();
+        result = await attemptLogin();
+      } else {
+        throw err;
+      }
+    }
+    return res.status(result.status).json(result.body);
+  } catch (error) {
+    console.error("Login failed:", error);
+    return res.status(500).json({ error: error.message || "Sign in failed" });
+  }
+});
+var PW_RESET_EMAIL_PREFIX = "__pw_reset__:";
+function pwResetKeyForEmail(email) {
+  return `${PW_RESET_EMAIL_PREFIX}${email.trim().toLowerCase()}`;
+}
+app.post("/api/auth/forgot-password", async (req, res) => {
+  const schema = z.object({
+    email: z.string().trim().email(),
+    redirectTo: z.string().url().optional()
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Please enter a valid email address." });
+  }
+  const emailLower = parsed.data.email.trim().toLowerCase();
+  try {
+    const [existingUsers, existingCreds] = await Promise.all([
+      db.select().from(users).where(sql3`lower(${users.email}) = ${emailLower}`).limit(1),
+      db.select().from(localCredentials).where(eq3(localCredentials.email, emailLower)).limit(1)
+    ]);
+    const userRow = existingUsers[0];
+    if (!userRow && existingCreds.length === 0) {
+      return res.status(404).json({
+        error: "No account found with this email address. Please create an account first."
+      });
+    }
+    if (userRow?.status === "suspended") {
+      return res.status(403).json({ error: "This account has been suspended by an administrator." });
+    }
+    const isAdminAccount = isProtectedSuperAdminEmail(emailLower) || userRow?.role === "admin" || userRow?.role === "super_admin";
+    try {
+      await supabaseServer.auth.resetPasswordForEmail(
+        emailLower,
+        parsed.data.redirectTo ? { redirectTo: parsed.data.redirectTo } : void 0
+      );
+    } catch {
+    }
+    if (isAdminAccount) {
+      return res.json({
+        ok: true,
+        mode: "admin_pin_or_email",
+        isAdminAccount: true,
+        message: "Admin account verified. Enter your Admin PIN below (or open the password reset link in your email) to set a new password."
+      });
+    }
+    const otp = String(crypto3.randomInt(1e5, 1e6));
+    const expiresAt = Date.now() + 15 * 60 * 1e3;
+    const otpHash = hashPasswordScrypt(otp);
+    const resetKey = pwResetKeyForEmail(emailLower);
+    const resetUid = `pw-reset-${crypto3.createHash("sha256").update(emailLower).digest("hex").slice(0, 16)}`;
+    await db.insert(localCredentials).values({
+      email: resetKey,
+      uid: resetUid,
+      passwordHash: `${expiresAt}|${otpHash}`
+    }).onConflictDoUpdate({
+      target: localCredentials.email,
+      set: { passwordHash: `${expiresAt}|${otpHash}` }
+    });
+    if (process.env.RESEND_API_KEY) {
+      try {
+        const mailRes = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            from: process.env.RESEND_FROM_EMAIL || "Foodora BD <no-reply@foodora.bd>",
+            to: [emailLower],
+            subject: "Foodora BD Password Reset Code",
+            html: `<p>Your Foodora BD password reset code is <strong>${otp}</strong>. It expires in 15 minutes.</p>`
+          })
+        });
+        if (mailRes.ok) {
+          return res.json({
+            ok: true,
+            mode: "email",
+            isAdminAccount: false,
+            message: "A 6-digit password reset code has been sent to your email address."
+          });
+        }
+      } catch {
+      }
+    }
+    return res.json({
+      ok: true,
+      mode: "preview",
+      isAdminAccount: false,
+      previewCode: otp,
+      message: "Verification code ready. Enter the 6-digit code and your new password below (valid for 15 minutes)."
+    });
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    return res.status(500).json({ error: error.message || "Failed to initiate password reset" });
+  }
+});
+app.post("/api/auth/reset-password", async (req, res) => {
+  const schema = z.object({
+    email: z.string().trim().email(),
+    code: z.string().trim().min(4).max(16),
+    newPassword: z.string().min(6).max(128)
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Please enter a valid email, verification code, and new password (min 6 characters)."
+    });
+  }
+  const emailLower = parsed.data.email.trim().toLowerCase();
+  try {
+    const [existingUsers, existingCreds] = await Promise.all([
+      db.select().from(users).where(sql3`lower(${users.email}) = ${emailLower}`).limit(1),
+      db.select().from(localCredentials).where(eq3(localCredentials.email, emailLower)).limit(1)
+    ]);
+    const userRow = existingUsers[0];
+    if (!userRow && existingCreds.length === 0) {
+      return res.status(404).json({ error: "Account not found for this email." });
+    }
+    if (userRow?.status === "suspended") {
+      return res.status(403).json({ error: "This account has been suspended by an administrator." });
+    }
+    const isAdminAccount = isProtectedSuperAdminEmail(emailLower) || userRow?.role === "admin" || userRow?.role === "super_admin";
+    if (isAdminAccount) {
+      const validAdminPin = await verifyAdminPinForEmail(emailLower, parsed.data.code);
+      if (!validAdminPin) {
+        return res.status(401).json({
+          error: "Incorrect Admin PIN. Enter your Admin PIN to reset an Admin password."
+        });
+      }
+    } else {
+      const resetKey = pwResetKeyForEmail(emailLower);
+      const tokenRows = await db.select().from(localCredentials).where(eq3(localCredentials.email, resetKey)).limit(1);
+      if (tokenRows.length === 0) {
+        return res.status(401).json({
+          error: "Reset code not found or already used. Please request a new code."
+        });
+      }
+      const sepIdx = tokenRows[0].passwordHash.indexOf("|");
+      const expMs = Number(sepIdx > 0 ? tokenRows[0].passwordHash.slice(0, sepIdx) : "0");
+      const storedOtpHash = sepIdx > 0 ? tokenRows[0].passwordHash.slice(sepIdx + 1) : "";
+      if (!expMs || expMs < Date.now()) {
+        await db.delete(localCredentials).where(eq3(localCredentials.email, resetKey));
+        return res.status(401).json({ error: "Reset code has expired. Please request a new one." });
+      }
+      if (!verifyPasswordScrypt(parsed.data.code, storedOtpHash)) {
+        return res.status(401).json({ error: "Invalid verification code. Please check and try again." });
+      }
+    }
+    const uid = userRow?.uid || existingCreds[0]?.uid || `usr-${crypto3.randomBytes(8).toString("hex")}`;
+    const role = isProtectedSuperAdminEmail(emailLower) ? "super_admin" : userRow?.role || "customer";
+    const fullName = userRow?.fullName || emailLower.split("@")[0];
+    const nextPasswordHash = hashPasswordScrypt(parsed.data.newPassword);
+    await db.transaction(async (tx) => {
+      await tx.insert(localCredentials).values({
+        email: emailLower,
+        uid,
+        passwordHash: nextPasswordHash
+      }).onConflictDoUpdate({
+        target: localCredentials.email,
+        set: { passwordHash: nextPasswordHash }
+      });
+      if (!userRow) {
+        await tx.insert(users).values({
+          uid,
+          email: emailLower,
+          fullName,
+          role
+        }).onConflictDoNothing();
+      }
+      await tx.delete(localCredentials).where(eq3(localCredentials.email, pwResetKeyForEmail(emailLower)));
+    });
+    try {
+      await db.insert(auditLogs).values({
+        actorUid: uid,
+        action: "password_reset",
+        targetType: "auth",
+        targetId: emailLower,
+        details: `Password updated via recovery flow for ${emailLower}`
+      });
+    } catch {
+    }
+    const token = signSandboxToken({ uid, email: emailLower, fullName, role, isSandbox: false });
+    return res.json({
+      ok: true,
       token,
       user: { uid, email: emailLower, fullName, role, isSandbox: false }
     });
   } catch (error) {
-    console.error("Login failed:", error);
-    res.status(500).json({ error: error.message || "Sign in failed" });
+    console.error("Reset password error:", error);
+    return res.status(500).json({ error: error.message || "Failed to reset password" });
+  }
+});
+app.post("/api/auth/sync-password", requireAuth, async (req, res) => {
+  const schema = z.object({
+    newPassword: z.string().min(6).max(128)
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Password must be at least 6 characters." });
+  }
+  try {
+    const emailLower = req.user.email.trim().toLowerCase();
+    const nextHash = hashPasswordScrypt(parsed.data.newPassword);
+    await db.insert(localCredentials).values({
+      email: emailLower,
+      uid: req.user.uid,
+      passwordHash: nextHash
+    }).onConflictDoUpdate({
+      target: localCredentials.email,
+      set: { passwordHash: nextHash }
+    });
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || "Failed to sync password" });
   }
 });
 app.get("/api/restaurants", async (_req, res) => {
@@ -3517,6 +4017,8 @@ app.post("/api/restaurants/register", requireAuth, async (req, res) => {
     nidNumber: z.string().min(5),
     payoutMethod: z.enum(["bkash", "nagad", "bank"]),
     payoutAccount: z.string().min(5),
+    logoUrl: z.string().optional().default(""),
+    coverUrl: z.string().optional().default(""),
     deliveryFee: z.number().int().min(0).max(300).default(49),
     minOrder: z.number().int().min(50).max(5e3).default(150),
     deliveryMode: z.enum(["platform", "restaurant", "third_party"]).default("platform")
@@ -3541,7 +4043,8 @@ app.post("/api/restaurants/register", requireAuth, async (req, res) => {
       lng: parsed.data.lng,
       phone: parsed.data.phone,
       email: parsed.data.email,
-      coverUrl: IMG_BANGLA,
+      logoUrl: parsed.data.logoUrl?.trim() || "",
+      coverUrl: parsed.data.coverUrl?.trim() || IMG_BANGLA,
       tradeLicense: parsed.data.tradeLicense,
       nidNumber: parsed.data.nidNumber,
       payoutMethod: parsed.data.payoutMethod,
@@ -3693,7 +4196,10 @@ app.patch(
       openingHours: z.string().optional(),
       deliveryFee: z.number().int().min(0).max(500).optional(),
       minOrder: z.number().int().min(0).max(5e3).optional(),
-      deliveryMode: z.enum(["platform", "restaurant", "third_party"]).optional()
+      deliveryMode: z.enum(["platform", "restaurant", "third_party"]).optional(),
+      logoUrl: z.string().optional(),
+      coverUrl: z.string().optional(),
+      description: z.string().optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid restaurant settings" });
@@ -3710,6 +4216,9 @@ app.patch(
         deliveryFee: parsed.data.deliveryFee ?? rows[0].deliveryFee,
         minOrder: parsed.data.minOrder ?? rows[0].minOrder,
         deliveryMode: parsed.data.deliveryMode ?? rows[0].deliveryMode,
+        logoUrl: parsed.data.logoUrl !== void 0 ? parsed.data.logoUrl.trim() : rows[0].logoUrl,
+        coverUrl: parsed.data.coverUrl !== void 0 && parsed.data.coverUrl.trim() ? parsed.data.coverUrl.trim() : rows[0].coverUrl,
+        description: parsed.data.description !== void 0 ? parsed.data.description.trim() : rows[0].description,
         updatedAt: /* @__PURE__ */ new Date()
       }).where(eq3(restaurants.id, rows[0].id)).returning();
       res.json({ restaurant: updated[0] });
@@ -4006,7 +4515,6 @@ app.patch(
 app.post(
   "/api/upload-image",
   requireAuth,
-  requireRole(["restaurant_owner", "admin", "super_admin"]),
   async (req, res) => {
     const schema = z.object({
       dataUrl: z.string().min(20),
@@ -4068,6 +4576,7 @@ app.post(
       phone: z.string().default("+8801710000000"),
       email: z.string().email().default("partner@foodora.bd"),
       description: z.string().default(""),
+      logoUrl: z.string().default(""),
       coverUrl: z.string().default(IMG_BANGLA),
       deliveryFee: z.number().int().min(0).max(500).default(49),
       minOrder: z.number().int().min(0).max(1e4).default(150),
@@ -4098,6 +4607,7 @@ app.post(
         lng: 90.4066,
         phone: parsed.data.phone,
         email: parsed.data.email,
+        logoUrl: parsed.data.logoUrl?.trim() || "",
         coverUrl: parsed.data.coverUrl || IMG_BANGLA,
         deliveryFee: parsed.data.deliveryFee,
         minOrder: parsed.data.minOrder,
@@ -4138,6 +4648,7 @@ app.patch(
       area: z.string().min(2).optional(),
       address: z.string().min(3).optional(),
       description: z.string().optional(),
+      logoUrl: z.string().optional(),
       coverUrl: z.string().optional(),
       deliveryFee: z.number().int().min(0).max(500).optional(),
       minOrder: z.number().int().min(0).max(1e4).optional(),
@@ -4165,6 +4676,7 @@ app.patch(
         area: parsed.data.area ?? current.area,
         address: parsed.data.address ?? current.address,
         description: parsed.data.description ?? current.description,
+        logoUrl: parsed.data.logoUrl !== void 0 ? parsed.data.logoUrl.trim() : current.logoUrl,
         coverUrl: parsed.data.coverUrl || current.coverUrl,
         deliveryFee: parsed.data.deliveryFee ?? current.deliveryFee,
         minOrder: parsed.data.minOrder ?? current.minOrder,
