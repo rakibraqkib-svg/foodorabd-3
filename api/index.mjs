@@ -12,7 +12,7 @@ import fs from "node:fs";
 import crypto3 from "node:crypto";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
-import { and as and2, eq as eq3, or as or2, sql as sql3 } from "drizzle-orm";
+import { and as and2, desc as desc2, eq as eq3, or as or2, sql as sql3 } from "drizzle-orm";
 import { z } from "zod";
 
 // src/db/index.ts
@@ -32,6 +32,8 @@ __export(schema_exports, {
   notifications: () => notifications,
   orderStatusHistory: () => orderStatusHistory,
   orders: () => orders,
+  partnerApiKeys: () => partnerApiKeys,
+  paymentGateways: () => paymentGateways,
   platformSettings: () => platformSettings,
   restaurantPayouts: () => restaurantPayouts,
   restaurants: () => restaurants,
@@ -142,6 +144,38 @@ var foodItems = pgTable("food_items", {
   inStock: boolean("in_stock").notNull().default(true),
   isAvailable: boolean("is_available").notNull().default(true),
   isPopular: boolean("is_popular").notNull().default(false),
+  isVisibleOnStorefront: boolean("is_visible_on_storefront").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull()
+});
+var partnerApiKeys = pgTable("partner_api_keys", {
+  id: serial("id").primaryKey(),
+  restaurantId: integer("restaurant_id").references(() => restaurants.id, { onDelete: "cascade" }).notNull().unique(),
+  keyHash: text("key_hash").notNull().unique(),
+  keyPrefix: text("key_prefix").notNull(),
+  label: text("label").notNull().default("POS / Inventory Sync"),
+  lastUsedAt: timestamp("last_used_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull()
+});
+var paymentGateways = pgTable("payment_gateways", {
+  id: serial("id").primaryKey(),
+  code: text("code").notNull().unique(),
+  // bkash | nagad | sslcommerz | cod | rocket | upay | custom
+  name: text("name").notNull(),
+  nameBn: text("name_bn").notNull(),
+  providerType: text("provider_type").notNull().default("mfs"),
+  // mfs | card | wallet | cod | custom
+  mode: text("mode").notNull().default("sandbox"),
+  // sandbox | live
+  isActive: boolean("is_active").notNull().default(true),
+  apiBaseUrl: text("api_base_url").default(""),
+  merchantId: text("merchant_id").default(""),
+  apiKey: text("api_key").default(""),
+  apiSecret: text("api_secret").default(""),
+  webhookSecret: text("webhook_secret").default(""),
+  instructions: text("instructions").default(""),
+  sortOrder: integer("sort_order").notNull().default(10),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull()
 });
@@ -373,6 +407,8 @@ var EXPECTED_TABLES = [
   "customer_addresses",
   "restaurants",
   "food_items",
+  "partner_api_keys",
+  "payment_gateways",
   "coupons",
   "orders",
   "order_status_history",
@@ -397,16 +433,21 @@ async function runCreateTablesIfMissing() {
     )
   );
   const missingTables = EXPECTED_TABLES.filter((t) => !existingSet.has(t));
-  if (missingTables.length === 0) {
-    return;
-  }
   try {
-    await createMissingTables(existingSet);
+    if (missingTables.length > 0) {
+      await createMissingTables(existingSet);
+    }
+    if (existingSet.has("food_items")) {
+      await db.execute(sql`
+        ALTER TABLE food_items
+        ADD COLUMN IF NOT EXISTS is_visible_on_storefront BOOLEAN NOT NULL DEFAULT TRUE;
+      `);
+    }
   } catch (err) {
     const code = err?.code || err?.cause?.code;
     if (code === "42501") {
       console.warn(
-        `Skipping runtime DDL creation (role lacks CREATE on schema public). Missing tables: ${missingTables.join(", ")}`
+        `Skipping runtime DDL creation (role lacks CREATE/ALTER on schema public). Missing tables: ${missingTables.join(", ")}`
       );
       return;
     }
@@ -517,6 +558,43 @@ async function createMissingTables(existingSet) {
         in_stock BOOLEAN NOT NULL DEFAULT TRUE,
         is_available BOOLEAN NOT NULL DEFAULT TRUE,
         is_popular BOOLEAN NOT NULL DEFAULT FALSE,
+        is_visible_on_storefront BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+  if (!existingSet.has("partner_api_keys")) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS partner_api_keys (
+        id SERIAL PRIMARY KEY,
+        restaurant_id INTEGER NOT NULL UNIQUE REFERENCES restaurants(id) ON DELETE CASCADE,
+        key_hash TEXT NOT NULL UNIQUE,
+        key_prefix TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT 'POS / Inventory Sync',
+        last_used_at TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+  if (!existingSet.has("payment_gateways")) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS payment_gateways (
+        id SERIAL PRIMARY KEY,
+        code TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        name_bn TEXT NOT NULL,
+        provider_type TEXT NOT NULL DEFAULT 'mfs',
+        mode TEXT NOT NULL DEFAULT 'sandbox',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        api_base_url TEXT DEFAULT '',
+        merchant_id TEXT DEFAULT '',
+        api_key TEXT DEFAULT '',
+        api_secret TEXT DEFAULT '',
+        webhook_secret TEXT DEFAULT '',
+        instructions TEXT DEFAULT '',
+        sort_order INTEGER NOT NULL DEFAULT 10,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
@@ -1792,7 +1870,7 @@ async function runSeedIfEmpty() {
 }
 
 // src/db/queries.ts
-import { and, desc, eq, like, or } from "drizzle-orm";
+import { and, asc, desc, eq, like, or } from "drizzle-orm";
 
 // src/lib/marketplace-logic.ts
 function calculateCartItemUnitPrice(item) {
@@ -1982,6 +2060,235 @@ function validateBroadcastNotification(input) {
     type
   };
 }
+function normalizePartnerProductInput(raw, fallbackImageUrl) {
+  const name = typeof raw.name === "string" ? raw.name.trim() : "";
+  if (name.length < 2 || name.length > 140) {
+    return { valid: false, reason: "Product name must be between 2 and 140 characters." };
+  }
+  const nameBn = typeof raw.nameBn === "string" && raw.nameBn.trim().length > 0 ? raw.nameBn.trim() : name;
+  const category = typeof raw.category === "string" && raw.category.trim().length >= 2 ? raw.category.trim() : "Popular";
+  const description = typeof raw.description === "string" ? raw.description.trim() : "";
+  const imageUrl = typeof raw.imageUrl === "string" && raw.imageUrl.trim().length > 0 ? raw.imageUrl.trim() : fallbackImageUrl;
+  const price = Math.round(Number(raw.price));
+  if (!Number.isFinite(price) || price <= 0) {
+    return { valid: false, reason: "Product price must be a positive number in BDT." };
+  }
+  let discountPrice = null;
+  if (raw.discountPrice !== void 0 && raw.discountPrice !== null && raw.discountPrice !== "") {
+    const parsedDiscount = Math.round(Number(raw.discountPrice));
+    if (!Number.isFinite(parsedDiscount) || parsedDiscount <= 0 || parsedDiscount >= price) {
+      return {
+        valid: false,
+        reason: "discountPrice must be a positive number lower than regular price."
+      };
+    }
+    discountPrice = parsedDiscount;
+  }
+  const variationsJson = Array.isArray(raw.variations) ? raw.variations.filter((v) => Boolean(v && typeof v === "object" && typeof v.name === "string")).map((v) => ({
+    name: v.name.trim() || "Regular",
+    priceDelta: Math.round(Number(v.priceDelta) || 0)
+  })) : [];
+  const addonsJson = Array.isArray(raw.addons) ? raw.addons.filter((a) => Boolean(a && typeof a === "object" && typeof a.name === "string")).map((a) => ({
+    name: a.name.trim(),
+    price: Math.max(0, Math.round(Number(a.price) || 0))
+  })).filter((a) => a.name.length > 0) : [];
+  return {
+    valid: true,
+    product: {
+      name,
+      nameBn,
+      category,
+      description,
+      imageUrl,
+      price,
+      discountPrice,
+      inStock: raw.inStock === void 0 ? true : Boolean(raw.inStock),
+      isAvailable: raw.isAvailable === void 0 ? true : Boolean(raw.isAvailable),
+      isPopular: raw.isPopular === void 0 ? false : Boolean(raw.isPopular),
+      variationsJson: variationsJson.length > 0 ? variationsJson : [{ name: "Regular", priceDelta: 0 }],
+      addonsJson
+    }
+  };
+}
+var DEFAULT_PAYMENT_GATEWAYS = [
+  {
+    code: "bkash",
+    name: "bKash",
+    nameBn: "\u09AC\u09BF\u0995\u09BE\u09B6",
+    providerType: "mfs",
+    mode: "sandbox",
+    isActive: true,
+    apiBaseUrl: "https://tokenized.sandbox.bka.sh/v1.2.0-beta",
+    instructions: "Pay securely via bKash tokenized checkout.",
+    sortOrder: 1
+  },
+  {
+    code: "nagad",
+    name: "Nagad",
+    nameBn: "\u09A8\u0997\u09A6",
+    providerType: "mfs",
+    mode: "sandbox",
+    isActive: true,
+    apiBaseUrl: "https://api.mynagad.com/api/dfs",
+    instructions: "Fast MFS checkout with Nagad merchant wallet.",
+    sortOrder: 2
+  },
+  {
+    code: "sslcommerz",
+    name: "SSLCommerz / Card",
+    nameBn: "\u098F\u09B8\u098F\u09B8\u098F\u09B2\u0995\u09AE\u09BE\u09B0\u09CD\u099C / \u0995\u09BE\u09B0\u09CD\u09A1",
+    providerType: "card",
+    mode: "sandbox",
+    isActive: true,
+    apiBaseUrl: "https://sandbox.sslcommerz.com",
+    instructions: "Visa, Mastercard, AMEX & Net Banking.",
+    sortOrder: 3
+  },
+  {
+    code: "cod",
+    name: "Cash on Delivery",
+    nameBn: "\u0995\u09CD\u09AF\u09BE\u09B6 \u0985\u09A8 \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF",
+    providerType: "cod",
+    mode: "live",
+    isActive: true,
+    apiBaseUrl: "",
+    instructions: "Pay in cash to the rider at delivery.",
+    sortOrder: 4
+  }
+];
+function normalizeGatewayCode(input) {
+  return String(input || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 32);
+}
+function maskSecretValue(secret) {
+  const clean = typeof secret === "string" ? secret.trim() : "";
+  if (!clean) return "";
+  if (clean.length <= 4) return "\u2022\u2022\u2022\u2022";
+  return `\u2022\u2022\u2022\u2022${clean.slice(-4)}`;
+}
+function isGatewayCredentialsConfigured(row, envConfigured = false) {
+  if (normalizeGatewayCode(row.code) === "cod") return true;
+  const hasDbCreds = Boolean(
+    row.apiKey && row.apiKey.trim() || row.apiSecret && row.apiSecret.trim() || row.merchantId && row.merchantId.trim()
+  );
+  return hasDbCreds || envConfigured;
+}
+function buildGatewayWebhookUrl(origin, code) {
+  const cleanOrigin = origin.replace(/\/+$/, "");
+  const cleanCode = normalizeGatewayCode(code) || "custom";
+  return `${cleanOrigin}/api/payments/webhook/${cleanCode}`;
+}
+function toPublicPaymentGatewayView(row, envConfigured = false) {
+  const providerType = ["mfs", "card", "wallet", "cod", "custom"].includes(row.providerType) ? row.providerType : "custom";
+  const mode = row.mode === "live" ? "live" : "sandbox";
+  return {
+    code: normalizeGatewayCode(row.code),
+    name: row.name,
+    nameBn: row.nameBn || row.name,
+    providerType,
+    mode,
+    isActive: Boolean(row.isActive),
+    instructions: row.instructions || "",
+    sortOrder: Number(row.sortOrder ?? 10),
+    isConfigured: isGatewayCredentialsConfigured(row, envConfigured)
+  };
+}
+function toAdminPaymentGatewayView(row, origin, envConfigured = false) {
+  const pub = toPublicPaymentGatewayView(row, envConfigured);
+  const apiKey = typeof row.apiKey === "string" ? row.apiKey.trim() : "";
+  const apiSecret = typeof row.apiSecret === "string" ? row.apiSecret.trim() : "";
+  const webhookSecret = typeof row.webhookSecret === "string" ? row.webhookSecret.trim() : "";
+  return {
+    ...pub,
+    apiBaseUrl: row.apiBaseUrl || "",
+    merchantId: row.merchantId || "",
+    hasApiKey: apiKey.length > 0,
+    hasApiSecret: apiSecret.length > 0,
+    hasWebhookSecret: webhookSecret.length > 0,
+    apiKeyPreview: maskSecretValue(apiKey),
+    apiSecretPreview: maskSecretValue(apiSecret),
+    webhookSecretPreview: maskSecretValue(webhookSecret),
+    webhookUrl: buildGatewayWebhookUrl(origin, pub.code)
+  };
+}
+function isOwnerRestaurant(restaurantOwnerUid, actorUid) {
+  if (!restaurantOwnerUid || !actorUid) return false;
+  return restaurantOwnerUid.trim() === actorUid.trim();
+}
+function partitionOwnedVsPartnerRestaurants(restaurants2, actorUid) {
+  const own = [];
+  const partners = [];
+  for (const r of restaurants2) {
+    if (isOwnerRestaurant(r.ownerUid, actorUid)) {
+      own.push(r);
+    } else {
+      partners.push(r);
+    }
+  }
+  return {
+    own,
+    partners,
+    ordered: [...own, ...partners]
+  };
+}
+function escapeXml(input) {
+  return String(input || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+function buildRobotsTxt(origin) {
+  const cleanOrigin = origin.replace(/\/+$/, "");
+  return [
+    "User-agent: *",
+    "Allow: /",
+    "Disallow: /api/admin/",
+    "Disallow: /api/vendor/",
+    "Disallow: /api/auth/",
+    `Sitemap: ${cleanOrigin}/sitemap.xml`,
+    ""
+  ].join("\n");
+}
+function buildSitemapXml(origin, restaurants2) {
+  const cleanOrigin = origin.replace(/\/+$/, "");
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const urls = [
+    {
+      loc: `${cleanOrigin}/`,
+      lastmod: today,
+      changefreq: "daily",
+      priority: "1.0"
+    }
+  ];
+  const seenSlugs = /* @__PURE__ */ new Set();
+  for (const r of restaurants2) {
+    const slug = String(r.slug || "").trim();
+    if (!slug || seenSlugs.has(slug)) continue;
+    seenSlugs.add(slug);
+    let lastmod = today;
+    if (r.updatedAt) {
+      const d = new Date(r.updatedAt);
+      if (!Number.isNaN(d.getTime())) {
+        lastmod = d.toISOString().slice(0, 10);
+      }
+    }
+    urls.push({
+      loc: `${cleanOrigin}/?restaurant=${encodeURIComponent(slug)}`,
+      lastmod,
+      changefreq: "daily",
+      priority: "0.8"
+    });
+  }
+  const urlNodes = urls.map(
+    (u) => `  <url>
+    <loc>${escapeXml(u.loc)}</loc>
+    <lastmod>${escapeXml(u.lastmod)}</lastmod>
+    <changefreq>${u.changefreq}</changefreq>
+    <priority>${u.priority}</priority>
+  </url>`
+  ).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urlNodes}
+</urlset>
+`;
+}
 
 // src/db/queries.ts
 async function getApprovedRestaurants() {
@@ -1992,12 +2299,61 @@ async function getApprovedRestaurants() {
     throw new Error("Failed to load restaurants", { cause: error });
   }
 }
+async function getStorefrontProducts() {
+  try {
+    const rows = await db.select({
+      id: foodItems.id,
+      restaurantId: foodItems.restaurantId,
+      category: foodItems.category,
+      name: foodItems.name,
+      nameBn: foodItems.nameBn,
+      description: foodItems.description,
+      imageUrl: foodItems.imageUrl,
+      price: foodItems.price,
+      discountPrice: foodItems.discountPrice,
+      variationsJson: foodItems.variationsJson,
+      addonsJson: foodItems.addonsJson,
+      inStock: foodItems.inStock,
+      isAvailable: foodItems.isAvailable,
+      isPopular: foodItems.isPopular,
+      isVisibleOnStorefront: foodItems.isVisibleOnStorefront,
+      restaurantName: restaurants.name,
+      restaurantNameBn: restaurants.nameBn,
+      restaurantSlug: restaurants.slug,
+      restaurantLogoUrl: restaurants.logoUrl,
+      restaurantCoverUrl: restaurants.coverUrl,
+      restaurantArea: restaurants.area,
+      restaurantCuisine: restaurants.cuisine,
+      deliveryTimeMin: restaurants.deliveryTimeMin,
+      deliveryFee: restaurants.deliveryFee,
+      deliveryMode: restaurants.deliveryMode,
+      minOrder: restaurants.minOrder,
+      rating: restaurants.rating,
+      isOpen: restaurants.isOpen
+    }).from(foodItems).innerJoin(restaurants, eq(foodItems.restaurantId, restaurants.id)).where(
+      and(
+        eq(restaurants.status, "approved"),
+        eq(foodItems.isVisibleOnStorefront, true),
+        eq(foodItems.isAvailable, true)
+      )
+    ).orderBy(desc(foodItems.isPopular), desc(foodItems.inStock), desc(foodItems.id));
+    return rows;
+  } catch (error) {
+    console.error("Failed to load storefront products:", error);
+    throw new Error("Failed to load storefront products", { cause: error });
+  }
+}
 async function getRestaurantBySlug(slug) {
   try {
     const rows = await db.select().from(restaurants).where(eq(restaurants.slug, slug)).limit(1);
     if (rows.length === 0) return null;
     const restaurant = rows[0];
-    const items = await db.select().from(foodItems).where(eq(foodItems.restaurantId, restaurant.id));
+    const items = await db.select().from(foodItems).where(
+      and(
+        eq(foodItems.restaurantId, restaurant.id),
+        eq(foodItems.isVisibleOnStorefront, true)
+      )
+    );
     const restaurantReviews = await db.select().from(reviews).where(eq(reviews.restaurantId, restaurant.id)).orderBy(desc(reviews.createdAt));
     return { restaurant, items, reviews: restaurantReviews };
   } catch (error) {
@@ -2074,12 +2430,63 @@ async function getPlatformSettingsRow() {
     throw new Error("Failed to load platform settings", { cause: error });
   }
 }
-async function getVendorWorkspace(ownerUid, isSuperAdmin) {
+async function ensureDefaultPaymentGateways() {
   try {
-    const owned = isSuperAdmin ? await db.select().from(restaurants).orderBy(restaurants.id) : await db.select().from(restaurants).where(eq(restaurants.ownerUid, ownerUid));
-    const target = owned[0] ?? null;
+    const existing = await db.select().from(paymentGateways).orderBy(asc(paymentGateways.sortOrder), asc(paymentGateways.id));
+    if (existing.length === 0) {
+      const settings = await getPlatformSettingsRow();
+      const seedRows = DEFAULT_PAYMENT_GATEWAYS.map((gw) => {
+        if (gw.code === "bkash" && settings) {
+          return {
+            ...gw,
+            isActive: settings.bkashEnabled,
+            mode: settings.bkashSandbox ? "sandbox" : "live"
+          };
+        }
+        if (gw.code === "sslcommerz" && settings) {
+          return {
+            ...gw,
+            isActive: settings.sslcommerzEnabled,
+            mode: settings.sslcommerzSandbox ? "sandbox" : "live"
+          };
+        }
+        return gw;
+      });
+      await db.insert(paymentGateways).values(seedRows).onConflictDoNothing();
+      return await db.select().from(paymentGateways).orderBy(asc(paymentGateways.sortOrder), asc(paymentGateways.id));
+    }
+    return existing;
+  } catch (error) {
+    console.error("Failed to load payment gateways:", error);
+    return DEFAULT_PAYMENT_GATEWAYS.map((gw, idx) => ({
+      id: idx + 1,
+      ...gw,
+      merchantId: "",
+      apiKey: "",
+      apiSecret: "",
+      webhookSecret: "",
+      createdAt: /* @__PURE__ */ new Date(),
+      updatedAt: /* @__PURE__ */ new Date()
+    }));
+  }
+}
+async function getVendorWorkspace(ownerUid, isSuperAdmin, requestedRestaurantId) {
+  try {
+    const rawList = isSuperAdmin ? await db.select().from(restaurants).orderBy(restaurants.id) : await db.select().from(restaurants).where(eq(restaurants.ownerUid, ownerUid)).orderBy(restaurants.id);
+    const partitioned = partitionOwnedVsPartnerRestaurants(rawList, ownerUid);
+    const owned = partitioned.ordered;
+    const requestedMatch = requestedRestaurantId && Number.isInteger(requestedRestaurantId) ? owned.find((r) => r.id === requestedRestaurantId) ?? null : null;
+    const target = requestedMatch ?? owned[0] ?? null;
     if (!target) {
-      return { restaurant: null, restaurants: [], menuItems: [], orders: [], ledger: [], payouts: [] };
+      return {
+        restaurant: null,
+        restaurants: [],
+        ownRestaurantIds: [],
+        menuItems: [],
+        orders: [],
+        ledger: [],
+        payouts: []
+      };
     }
     const menuItems = await db.select().from(foodItems).where(eq(foodItems.restaurantId, target.id)).orderBy(desc(foodItems.id));
     const restOrders = await db.select().from(orders).where(eq(orders.restaurantId, target.id)).orderBy(desc(orders.createdAt));
@@ -2088,6 +2495,7 @@ async function getVendorWorkspace(ownerUid, isSuperAdmin) {
     return {
       restaurant: target,
       restaurants: owned,
+      ownRestaurantIds: partitioned.own.map((r) => r.id),
       menuItems,
       orders: restOrders,
       ledger,
@@ -2749,9 +3157,15 @@ function getGatewayAvailability() {
     }
   };
 }
-function initiatePaymentSession(method, orderNumber, amountBdt) {
+function isEnvConfiguredForGateway(code) {
+  const clean = normalizeGatewayCode(code);
+  const avail = getGatewayAvailability();
+  return Boolean(avail[clean]?.configured);
+}
+function initiatePaymentSession(method, orderNumber, amountBdt, gatewayRow) {
+  const cleanCode = normalizeGatewayCode(method) || "cod";
   const rand = crypto2.randomBytes(4).toString("hex").toUpperCase();
-  if (method === "cod") {
+  if (cleanCode === "cod") {
     return {
       gateway: "cod",
       transactionId: `COD-${orderNumber}`,
@@ -2760,27 +3174,31 @@ function initiatePaymentSession(method, orderNumber, amountBdt) {
       gatewayMessage: `Cash on Delivery confirmed for \u09F3${amountBdt}`
     };
   }
-  const avail = getGatewayAvailability()[method];
-  const prefix = method === "bkash" ? "BKS" : method === "nagad" ? "NGD" : "SSL";
+  const envConfigured = isEnvConfiguredForGateway(cleanCode);
+  const dbConfigured = gatewayRow ? isGatewayCredentialsConfigured(gatewayRow, envConfigured) : envConfigured;
+  const isLiveMode = gatewayRow ? gatewayRow.mode === "live" && dbConfigured : false;
+  const displayName = gatewayRow?.name || cleanCode.toUpperCase();
+  const prefix = cleanCode === "bkash" ? "BKS" : cleanCode === "nagad" ? "NGD" : cleanCode === "sslcommerz" ? "SSL" : cleanCode.slice(0, 3).toUpperCase().padEnd(3, "X");
   return {
-    gateway: method,
+    gateway: cleanCode,
     transactionId: `${prefix}-${rand}-${orderNumber.slice(-4)}`,
     status: "pending",
-    isSandbox: !avail.configured || avail.sandbox,
-    gatewayMessage: avail.configured ? `${method.toUpperCase()} payment session initialized` : `${method.toUpperCase()} Sandbox session initialized (configure live keys in server env for production)`
+    isSandbox: !isLiveMode,
+    gatewayMessage: isLiveMode ? `${displayName} live payment session initialized` : `${displayName} sandbox session initialized${dbConfigured ? "" : " (add API keys in Admin \u2192 Payment Integrations for live production)"}`
   };
 }
-function verifyPaymentServerSide(method, transactionId, expectedAmountBdt) {
+function verifyPaymentServerSide(method, transactionId, expectedAmountBdt, gatewayRow) {
+  const cleanCode = normalizeGatewayCode(method) || "cod";
   if (!transactionId || expectedAmountBdt <= 0) {
     return {
       verified: false,
       transactionId,
-      gateway: method,
+      gateway: cleanCode,
       isSandbox: true,
       message: "Invalid transaction ID or order amount"
     };
   }
-  if (method === "cod") {
+  if (cleanCode === "cod") {
     return {
       verified: true,
       transactionId,
@@ -2789,13 +3207,52 @@ function verifyPaymentServerSide(method, transactionId, expectedAmountBdt) {
       message: "Cash on Delivery verified"
     };
   }
-  const avail = getGatewayAvailability()[method];
+  const envConfigured = isEnvConfiguredForGateway(cleanCode);
+  const dbConfigured = gatewayRow ? isGatewayCredentialsConfigured(gatewayRow, envConfigured) : envConfigured;
+  const isLiveMode = gatewayRow ? gatewayRow.mode === "live" && dbConfigured : false;
+  const displayName = gatewayRow?.name || cleanCode.toUpperCase();
   return {
     verified: true,
     transactionId,
-    gateway: method,
-    isSandbox: !avail.configured || avail.sandbox,
-    message: avail.configured ? `Server-verified ${method.toUpperCase()} transaction ${transactionId}` : `Sandbox-verified ${method.toUpperCase()} transaction ${transactionId}`
+    gateway: cleanCode,
+    isSandbox: !isLiveMode,
+    message: isLiveMode ? `Server-verified ${displayName} transaction ${transactionId}` : `Sandbox-verified ${displayName} transaction ${transactionId}`
+  };
+}
+function validatePaymentGatewayConfiguration(row, envConfigured = false) {
+  const code = normalizeGatewayCode(row.code);
+  const mode = row.mode === "live" ? "live" : "sandbox";
+  if (code === "cod") {
+    return {
+      ok: true,
+      configured: true,
+      mode: "live",
+      message: "Cash on Delivery requires no external API keys and is ready for checkout."
+    };
+  }
+  const configured = isGatewayCredentialsConfigured(row, envConfigured);
+  const hasValidBaseUrl = !row.apiBaseUrl || row.apiBaseUrl.trim() === "" || /^https?:\/\/.+/i.test(row.apiBaseUrl.trim());
+  if (!hasValidBaseUrl) {
+    return {
+      ok: false,
+      configured,
+      mode,
+      message: "API Base URL must start with http:// or https://"
+    };
+  }
+  if (mode === "live" && !configured) {
+    return {
+      ok: false,
+      configured: false,
+      mode,
+      message: `${row.name} is set to LIVE mode but Merchant ID / API Key / Secret is missing.`
+    };
+  }
+  return {
+    ok: true,
+    configured,
+    mode,
+    message: configured ? `${row.name} (${mode.toUpperCase()}) credentials and endpoint validated cleanly.` : `${row.name} is active in SANDBOX mode (ready for test checkout; add API keys anytime for live payments).`
   };
 }
 
@@ -2853,6 +3310,34 @@ async function settleOrderCommissionIdempotent(orderId) {
     });
   });
 }
+function getRequestOrigin(req) {
+  const protoHeader = String(req.headers["x-forwarded-proto"] || req.protocol || "http").split(",")[0].trim();
+  const hostHeader = String(req.headers["x-forwarded-host"] || req.get("host") || "localhost:3000").split(",")[0].trim();
+  return `${protoHeader || "http"}://${hostHeader || "localhost:3000"}`;
+}
+app.get("/robots.txt", (req, res) => {
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.send(buildRobotsTxt(getRequestOrigin(req)));
+});
+app.get("/sitemap.xml", async (req, res) => {
+  try {
+    if (hasDatabaseConfig()) {
+      await ensureDatabaseSeeded();
+    }
+    const approved = hasDatabaseConfig() ? await getApprovedRestaurants() : [];
+    const xml = buildSitemapXml(
+      getRequestOrigin(req),
+      approved.map((r) => ({ slug: r.slug, updatedAt: r.updatedAt }))
+    );
+    res.setHeader("Content-Type", "application/xml; charset=utf-8");
+    res.setHeader("Cache-Control", "public, max-age=900");
+    res.send(xml);
+  } catch {
+    res.setHeader("Content-Type", "application/xml; charset=utf-8");
+    res.send(buildSitemapXml(getRequestOrigin(req), []));
+  }
+});
 app.get("/api/health", async (_req, res) => {
   res.json({
     ok: true,
@@ -2863,10 +3348,17 @@ app.get("/api/health", async (_req, res) => {
 });
 app.get("/api/public-config", async (_req, res) => {
   try {
-    const settings = await getPlatformSettingsRow();
+    const [settings, gatewayRows] = await Promise.all([
+      getPlatformSettingsRow(),
+      ensureDefaultPaymentGateways()
+    ]);
+    const paymentGatewaysList = gatewayRows.map(
+      (row) => toPublicPaymentGatewayView(row, isEnvConfiguredForGateway(row.code))
+    );
     res.json({
       mapsApiKey: process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || "",
       gateways: getGatewayAvailability(),
+      paymentGateways: paymentGatewaysList,
       settings
     });
   } catch (error) {
@@ -3487,6 +3979,14 @@ app.get("/api/restaurants", async (_req, res) => {
     res.status(500).json({ error: error.message || "Failed to fetch restaurants" });
   }
 });
+app.get("/api/products", async (_req, res) => {
+  try {
+    const products = await getStorefrontProducts();
+    res.json({ products });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Failed to fetch storefront products" });
+  }
+});
 app.get("/api/restaurants/:slug", async (req, res) => {
   try {
     const data = await getRestaurantBySlug(req.params.slug);
@@ -3722,7 +4222,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
     deliveryLng: z.number(),
     deliveryInstructions: z.string().optional(),
     deliveryMode: z.enum(["platform", "restaurant", "third_party"]),
-    paymentMethod: z.enum(["bkash", "nagad", "sslcommerz", "cod"]),
+    paymentMethod: z.string().min(2).max(32),
     couponCode: z.string().optional(),
     items: z.array(
       z.object({
@@ -3739,7 +4239,17 @@ app.post("/api/orders", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Invalid order payload", details: parsed.error.flatten() });
   }
   const input = parsed.data;
+  const normalizedMethod = normalizeGatewayCode(input.paymentMethod);
   try {
+    const gatewayRows = await ensureDefaultPaymentGateways();
+    const matchedGateway = gatewayRows.find(
+      (g) => normalizeGatewayCode(g.code) === normalizedMethod && g.isActive
+    );
+    if (!matchedGateway) {
+      return res.status(400).json({
+        error: `Selected payment method "${input.paymentMethod}" is currently inactive or unsupported.`
+      });
+    }
     const created = await db.transaction(async (tx) => {
       const restRows = await tx.select().from(restaurants).where(eq3(restaurants.id, input.restaurantId)).limit(1);
       if (restRows.length === 0) throw new Error("Restaurant not found");
@@ -3847,9 +4357,10 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       });
       const orderNumber = `FD-BD-${Math.floor(1e4 + Math.random() * 89999)}`;
       const paymentInit = initiatePaymentSession(
-        input.paymentMethod,
+        normalizedMethod,
         orderNumber,
-        financials.totalPayable
+        financials.totalPayable,
+        matchedGateway
       );
       const deliveryDispatch = await provider.createDelivery({
         orderNumber,
@@ -3881,8 +4392,8 @@ app.post("/api/orders", requireAuth, async (req, res) => {
         deliveryMode: input.deliveryMode,
         deliveryProvider: deliveryDispatch.provider,
         consignmentId: deliveryDispatch.consignmentId,
-        paymentMethod: input.paymentMethod,
-        paymentStatus: input.paymentMethod === "cod" ? "pending" : "pending",
+        paymentMethod: normalizedMethod,
+        paymentStatus: "pending",
         paymentTxId: paymentInit.transactionId,
         subtotal: financials.subtotal,
         discountAmount: financials.discountAmount,
@@ -3945,10 +4456,15 @@ app.post("/api/payments/verify", requireAuth, async (req, res) => {
     if (order.paymentStatus === "paid") {
       return res.json({ verified: true, order, message: "Payment already verified" });
     }
+    const gatewayRows = await ensureDefaultPaymentGateways();
+    const matchedGateway = gatewayRows.find(
+      (g) => normalizeGatewayCode(g.code) === normalizeGatewayCode(order.paymentMethod)
+    );
     const verification = verifyPaymentServerSide(
       order.paymentMethod,
       parsed.data.transactionId,
-      order.totalAmount
+      order.totalAmount,
+      matchedGateway
     );
     if (!verification.verified) {
       return res.status(400).json({ error: verification.message });
@@ -3967,6 +4483,50 @@ app.post("/api/payments/verify", requireAuth, async (req, res) => {
     res.json({ verified: true, order: updated[0], message: verification.message });
   } catch (error) {
     res.status(500).json({ error: error.message || "Payment verification failed" });
+  }
+});
+app.post("/api/payments/webhook/:code", async (req, res) => {
+  const code = normalizeGatewayCode(String(req.params.code || ""));
+  if (!code) return res.status(400).json({ error: "Invalid gateway code" });
+  try {
+    const gwRows = await db.select().from(paymentGateways).where(eq3(paymentGateways.code, code)).limit(1);
+    const gateway = gwRows[0];
+    if (!gateway) return res.status(404).json({ error: `Payment gateway "${code}" not registered` });
+    const expectedSecret = String(gateway.webhookSecret || "").trim();
+    if (expectedSecret) {
+      const providedSecret = String(
+        req.header("x-webhook-secret") || req.body?.webhookSecret || ""
+      ).trim();
+      if (providedSecret !== expectedSecret) {
+        return res.status(401).json({ error: "Invalid payment webhook secret" });
+      }
+    }
+    const orderNumber = typeof req.body?.orderNumber === "string" ? req.body.orderNumber.trim() : "";
+    const txId = typeof req.body?.transactionId === "string" ? req.body.transactionId.trim() : "";
+    const statusRaw = typeof req.body?.status === "string" ? req.body.status.trim().toLowerCase() : "paid";
+    const nextPaymentStatus = statusRaw === "failed" ? "failed" : "paid";
+    if (!orderNumber && !txId) {
+      return res.status(400).json({ error: "orderNumber or transactionId is required" });
+    }
+    const matchingOrders = orderNumber ? await db.select().from(orders).where(eq3(orders.orderNumber, orderNumber)).limit(1) : await db.select().from(orders).where(eq3(orders.paymentTxId, txId)).limit(1);
+    if (matchingOrders.length === 0) {
+      return res.status(404).json({ error: "Matching order not found" });
+    }
+    const targetOrder = matchingOrders[0];
+    const updated = await db.update(orders).set({
+      paymentStatus: nextPaymentStatus,
+      paymentTxId: txId || targetOrder.paymentTxId,
+      updatedAt: /* @__PURE__ */ new Date()
+    }).where(eq3(orders.id, targetOrder.id)).returning();
+    await db.insert(orderStatusHistory).values({
+      orderId: targetOrder.id,
+      status: targetOrder.status,
+      note: `Webhook (${gateway.name}) marked payment as ${nextPaymentStatus}`,
+      actorUid: `webhook:${code}`
+    });
+    res.json({ ok: true, order: updated[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Webhook processing failed" });
   }
 });
 app.post("/api/reviews", requireAuth, async (req, res) => {
@@ -4030,6 +4590,7 @@ app.post("/api/restaurants/register", requireAuth, async (req, res) => {
   try {
     const slugBase = parsed.data.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
     const slug = `${slugBase}-${Date.now().toString(36).slice(-4)}`;
+    const isOwnerAdmin = req.user.role === "admin" || req.user.role === "super_admin";
     const inserted = await db.insert(restaurants).values({
       ownerUid: req.user.uid,
       name: parsed.data.name,
@@ -4053,7 +4614,7 @@ app.post("/api/restaurants/register", requireAuth, async (req, res) => {
       minOrder: parsed.data.minOrder,
       deliveryMode: parsed.data.deliveryMode,
       isNew: true,
-      status: "pending"
+      status: isOwnerAdmin ? "approved" : "pending"
     }).returning();
     if (req.user.role === "customer") {
       await db.update(users).set({ role: "restaurant_owner", fullName: parsed.data.ownerName }).where(eq3(users.uid, req.user.uid));
@@ -4061,8 +4622,8 @@ app.post("/api/restaurants/register", requireAuth, async (req, res) => {
     await db.insert(notifications).values({
       recipientUid: "demo-admin-uid",
       roleTarget: "super_admin",
-      title: "New Restaurant Application",
-      message: `${parsed.data.name} (${parsed.data.area}) submitted documents for approval.`,
+      title: isOwnerAdmin ? "Owner Store Launched" : "New Restaurant Application",
+      message: isOwnerAdmin ? `${parsed.data.name} (${parsed.data.area}) launched directly by Platform Owner.` : `${parsed.data.name} (${parsed.data.area}) submitted documents for approval.`,
       type: "approval"
     });
     res.status(201).json({ restaurant: inserted[0] });
@@ -4078,7 +4639,9 @@ app.get(
   async (req, res) => {
     try {
       const isSuperAdmin = req.user.role === "super_admin" || req.user.role === "admin";
-      const data = await getVendorWorkspace(req.user.uid, isSuperAdmin);
+      const requestedRaw = Number(req.query.restaurantId);
+      const requestedRestaurantId = Number.isInteger(requestedRaw) && requestedRaw > 0 ? requestedRaw : null;
+      const data = await getVendorWorkspace(req.user.uid, isSuperAdmin, requestedRestaurantId);
       res.json(data);
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -4185,6 +4748,287 @@ app.delete(
     }
   }
 );
+function hashPartnerApiKey(rawKey) {
+  return crypto3.createHash("sha256").update(rawKey.trim()).digest("hex");
+}
+function extractPartnerApiKey(req) {
+  const headerKey = req.header("x-partner-api-key")?.trim();
+  if (headerKey) return headerKey;
+  const authHeader = req.header("authorization")?.trim();
+  if (authHeader && authHeader.toLowerCase().startsWith("bearer fbd_")) {
+    return authHeader.slice(7).trim();
+  }
+  return null;
+}
+async function resolvePartnerRestaurant(req) {
+  const rawKey = extractPartnerApiKey(req);
+  if (!rawKey) return { ok: false, error: "Missing X-Partner-API-Key header", status: 401 };
+  const keyHash = hashPartnerApiKey(rawKey);
+  const keyRows = await db.select().from(partnerApiKeys).where(eq3(partnerApiKeys.keyHash, keyHash)).limit(1);
+  if (keyRows.length === 0) {
+    return { ok: false, error: "Invalid or revoked Partner API key", status: 401 };
+  }
+  const restRows = await db.select().from(restaurants).where(eq3(restaurants.id, keyRows[0].restaurantId)).limit(1);
+  if (restRows.length === 0) {
+    return { ok: false, error: "Linked restaurant no longer exists", status: 404 };
+  }
+  if (restRows[0].status === "suspended" || restRows[0].status === "rejected") {
+    return { ok: false, error: "Restaurant account is not active for Partner API access", status: 403 };
+  }
+  await db.update(partnerApiKeys).set({ lastUsedAt: /* @__PURE__ */ new Date() }).where(eq3(partnerApiKeys.id, keyRows[0].id));
+  return { ok: true, restaurant: restRows[0], apiKeyRow: keyRows[0] };
+}
+app.get(
+  "/api/vendor/api-key",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    try {
+      const requestedId = Number(req.query.restaurantId);
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      let restRows = Number.isInteger(requestedId) && requestedId > 0 ? await db.select().from(restaurants).where(eq3(restaurants.id, requestedId)).limit(1) : await db.select().from(restaurants).where(eq3(restaurants.ownerUid, req.user.uid)).limit(1);
+      if (restRows.length === 0 && isAdmin && !(Number.isInteger(requestedId) && requestedId > 0)) {
+        restRows = await db.select().from(restaurants).limit(1);
+      }
+      if (restRows.length === 0) {
+        return res.json({ hasKey: false, restaurantId: null, keyPrefix: null, label: null, lastUsedAt: null });
+      }
+      if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const keyRows = await db.select().from(partnerApiKeys).where(eq3(partnerApiKeys.restaurantId, restRows[0].id)).limit(1);
+      if (keyRows.length === 0) {
+        return res.json({
+          hasKey: false,
+          restaurantId: restRows[0].id,
+          keyPrefix: null,
+          label: null,
+          lastUsedAt: null,
+          updatedAt: null
+        });
+      }
+      return res.json({
+        hasKey: true,
+        restaurantId: restRows[0].id,
+        keyPrefix: keyRows[0].keyPrefix,
+        label: keyRows[0].label,
+        lastUsedAt: keyRows[0].lastUsedAt,
+        updatedAt: keyRows[0].updatedAt
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+app.post(
+  "/api/vendor/api-key/rotate",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const schema = z.object({
+      restaurantId: z.number().int().positive(),
+      label: z.string().min(2).max(60).optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid API key rotation request" });
+    }
+    try {
+      const restRows = await db.select().from(restaurants).where(eq3(restaurants.id, parsed.data.restaurantId)).limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const rawKey = `fbd_live_${crypto3.randomBytes(16).toString("hex")}`;
+      const keyHash = hashPartnerApiKey(rawKey);
+      const keyPrefix = `${rawKey.slice(0, 14)}...${rawKey.slice(-4)}`;
+      const label = parsed.data.label?.trim() || "Partner Menu API Key";
+      const upserted = await db.insert(partnerApiKeys).values({
+        restaurantId: restRows[0].id,
+        keyHash,
+        keyPrefix,
+        label,
+        updatedAt: /* @__PURE__ */ new Date()
+      }).onConflictDoUpdate({
+        target: partnerApiKeys.restaurantId,
+        set: {
+          keyHash,
+          keyPrefix,
+          label,
+          lastUsedAt: null,
+          updatedAt: /* @__PURE__ */ new Date()
+        }
+      }).returning();
+      await db.insert(auditLogs).values({
+        actorUid: req.user.uid,
+        action: "partner_api_key_rotated",
+        targetType: "restaurant",
+        targetId: String(restRows[0].id),
+        details: JSON.stringify({ keyPrefix, label })
+      });
+      res.status(201).json({
+        apiKey: rawKey,
+        restaurantId: restRows[0].id,
+        keyPrefix: upserted[0].keyPrefix,
+        label: upserted[0].label,
+        updatedAt: upserted[0].updatedAt
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+app.get("/api/partner/v1/products", async (req, res) => {
+  try {
+    const auth = await resolvePartnerRestaurant(req);
+    if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
+    const products = await db.select().from(foodItems).where(eq3(foodItems.restaurantId, auth.restaurant.id)).orderBy(desc2(foodItems.id));
+    res.json({
+      restaurant: {
+        id: auth.restaurant.id,
+        name: auth.restaurant.name,
+        nameBn: auth.restaurant.nameBn,
+        slug: auth.restaurant.slug,
+        area: auth.restaurant.area,
+        status: auth.restaurant.status
+      },
+      count: products.length,
+      products
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Failed to fetch partner products" });
+  }
+});
+app.post("/api/partner/v1/products", async (req, res) => {
+  try {
+    const auth = await resolvePartnerRestaurant(req);
+    if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
+    const body = req.body;
+    const rawItems = Array.isArray(body?.products) ? body.products : Array.isArray(body) ? body : [body];
+    if (rawItems.length === 0 || rawItems.length > 50) {
+      return res.status(400).json({ error: "Provide between 1 and 50 products per request." });
+    }
+    const normalizedList = [];
+    for (let i = 0; i < rawItems.length; i++) {
+      const check = normalizePartnerProductInput(
+        rawItems[i] && typeof rawItems[i] === "object" ? rawItems[i] : {},
+        auth.restaurant.coverUrl || IMG_BANGLA
+      );
+      if (!check.valid) {
+        return res.status(400).json({ error: check.reason, index: i });
+      }
+      normalizedList.push(check);
+    }
+    const inserted = await db.insert(foodItems).values(
+      normalizedList.map((entry) => ({
+        restaurantId: auth.restaurant.id,
+        category: entry.product.category,
+        name: entry.product.name,
+        nameBn: entry.product.nameBn,
+        description: entry.product.description,
+        imageUrl: entry.product.imageUrl,
+        price: entry.product.price,
+        discountPrice: entry.product.discountPrice,
+        inStock: entry.product.inStock,
+        isAvailable: entry.product.isAvailable,
+        isVisibleOnStorefront: true,
+        isPopular: entry.product.isPopular,
+        variationsJson: entry.product.variationsJson,
+        addonsJson: entry.product.addonsJson
+      }))
+    ).returning();
+    await db.insert(auditLogs).values({
+      actorUid: auth.restaurant.ownerUid,
+      action: "partner_api_product_created",
+      targetType: "food_item",
+      targetId: String(inserted[0].id),
+      details: JSON.stringify({
+        restaurantId: auth.restaurant.id,
+        count: inserted.length,
+        names: inserted.map((p) => p.name)
+      })
+    });
+    res.status(201).json({
+      count: inserted.length,
+      product: inserted.length === 1 ? inserted[0] : void 0,
+      products: inserted
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Partner API failed to add product" });
+  }
+});
+app.patch("/api/partner/v1/products/:id", async (req, res) => {
+  const itemId = Number(req.params.id);
+  if (!Number.isInteger(itemId) || itemId <= 0) {
+    return res.status(400).json({ error: "Invalid product ID" });
+  }
+  try {
+    const auth = await resolvePartnerRestaurant(req);
+    if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
+    const existing = await db.select().from(foodItems).where(and2(eq3(foodItems.id, itemId), eq3(foodItems.restaurantId, auth.restaurant.id))).limit(1);
+    if (existing.length === 0) {
+      return res.status(404).json({ error: "Product not found for this partner restaurant" });
+    }
+    const cur = existing[0];
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const merged = normalizePartnerProductInput(
+      {
+        name: body.name ?? cur.name,
+        nameBn: body.nameBn ?? cur.nameBn,
+        category: body.category ?? cur.category,
+        description: body.description ?? cur.description,
+        imageUrl: body.imageUrl ?? cur.imageUrl,
+        price: body.price ?? cur.price,
+        discountPrice: body.discountPrice === void 0 ? cur.discountPrice : body.discountPrice,
+        inStock: body.inStock ?? cur.inStock,
+        isAvailable: body.isAvailable ?? cur.isAvailable,
+        isPopular: body.isPopular ?? cur.isPopular,
+        variations: body.variations ?? cur.variationsJson,
+        addons: body.addons ?? cur.addonsJson
+      },
+      cur.imageUrl || auth.restaurant.coverUrl || IMG_BANGLA
+    );
+    if (!merged.valid) {
+      return res.status(400).json({ error: merged.reason });
+    }
+    const updated = await db.update(foodItems).set({
+      name: merged.product.name,
+      nameBn: merged.product.nameBn,
+      category: merged.product.category,
+      description: merged.product.description,
+      imageUrl: merged.product.imageUrl,
+      price: merged.product.price,
+      discountPrice: merged.product.discountPrice,
+      inStock: merged.product.inStock,
+      isAvailable: merged.product.isAvailable,
+      isPopular: merged.product.isPopular,
+      variationsJson: merged.product.variationsJson,
+      addonsJson: merged.product.addonsJson,
+      updatedAt: /* @__PURE__ */ new Date()
+    }).where(and2(eq3(foodItems.id, itemId), eq3(foodItems.restaurantId, auth.restaurant.id))).returning();
+    res.json({ product: updated[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Failed to update partner product" });
+  }
+});
+app.delete("/api/partner/v1/products/:id", async (req, res) => {
+  const itemId = Number(req.params.id);
+  if (!Number.isInteger(itemId) || itemId <= 0) {
+    return res.status(400).json({ error: "Invalid product ID" });
+  }
+  try {
+    const auth = await resolvePartnerRestaurant(req);
+    if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
+    const deleted = await db.delete(foodItems).where(and2(eq3(foodItems.id, itemId), eq3(foodItems.restaurantId, auth.restaurant.id))).returning();
+    if (deleted.length === 0) {
+      return res.status(404).json({ error: "Product not found for this partner restaurant" });
+    }
+    res.json({ deleted: true, id: itemId });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Failed to delete partner product" });
+  }
+});
 app.patch(
   "/api/vendor/restaurant",
   requireAuth,
@@ -4721,6 +5565,7 @@ app.post(
       discountPrice: z.number().int().positive().nullable().optional(),
       inStock: z.boolean().default(true),
       isAvailable: z.boolean().default(true),
+      isVisibleOnStorefront: z.boolean().default(true),
       isPopular: z.boolean().default(false),
       variationsJson: z.array(z.object({ name: z.string(), priceDelta: z.number() })).optional(),
       addonsJson: z.array(z.object({ name: z.string(), price: z.number() })).optional()
@@ -4741,6 +5586,7 @@ app.post(
         discountPrice: parsed.data.discountPrice ?? null,
         inStock: parsed.data.inStock,
         isAvailable: parsed.data.isAvailable,
+        isVisibleOnStorefront: parsed.data.isVisibleOnStorefront,
         isPopular: parsed.data.isPopular,
         variationsJson: parsed.data.variationsJson && parsed.data.variationsJson.length > 0 ? parsed.data.variationsJson : [{ name: "Regular", priceDelta: 0 }],
         addonsJson: parsed.data.addonsJson ?? []
@@ -4750,7 +5596,11 @@ app.post(
         action: "product_created",
         targetType: "food_item",
         targetId: String(inserted[0].id),
-        details: JSON.stringify({ name: inserted[0].name, restaurantId: inserted[0].restaurantId })
+        details: JSON.stringify({
+          name: inserted[0].name,
+          restaurantId: inserted[0].restaurantId,
+          isVisibleOnStorefront: inserted[0].isVisibleOnStorefront
+        })
       });
       res.status(201).json({ product: inserted[0] });
     } catch (error) {
@@ -4776,6 +5626,7 @@ app.patch(
       discountPrice: z.number().int().positive().nullable().optional(),
       inStock: z.boolean().optional(),
       isAvailable: z.boolean().optional(),
+      isVisibleOnStorefront: z.boolean().optional(),
       isPopular: z.boolean().optional(),
       variationsJson: z.array(z.object({ name: z.string(), priceDelta: z.number() })).optional(),
       addonsJson: z.array(z.object({ name: z.string(), price: z.number() })).optional()
@@ -4797,17 +5648,23 @@ app.patch(
         discountPrice: parsed.data.discountPrice === void 0 ? cur.discountPrice : parsed.data.discountPrice,
         inStock: parsed.data.inStock ?? cur.inStock,
         isAvailable: parsed.data.isAvailable ?? cur.isAvailable,
+        isVisibleOnStorefront: parsed.data.isVisibleOnStorefront ?? cur.isVisibleOnStorefront,
         isPopular: parsed.data.isPopular ?? cur.isPopular,
         variationsJson: parsed.data.variationsJson ?? cur.variationsJson,
         addonsJson: parsed.data.addonsJson ?? cur.addonsJson,
         updatedAt: /* @__PURE__ */ new Date()
       }).where(eq3(foodItems.id, id)).returning();
+      const visibilityChanged = parsed.data.isVisibleOnStorefront !== void 0 && parsed.data.isVisibleOnStorefront !== cur.isVisibleOnStorefront;
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
-        action: "product_updated",
+        action: visibilityChanged ? "product_visibility_toggled" : "product_updated",
         targetType: "food_item",
         targetId: String(id),
-        details: JSON.stringify({ name: updated[0].name, price: updated[0].price })
+        details: JSON.stringify({
+          name: updated[0].name,
+          price: updated[0].price,
+          isVisibleOnStorefront: updated[0].isVisibleOnStorefront
+        })
       });
       res.json({ product: updated[0] });
     } catch (error) {
@@ -5170,6 +6027,170 @@ app.patch(
       res.json({ rider: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
+    }
+  }
+);
+app.get(
+  "/api/admin/payment-gateways",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    try {
+      const origin = getRequestOrigin(req);
+      const rows = await ensureDefaultPaymentGateways();
+      res.json({
+        paymentGateways: rows.map(
+          (r) => toAdminPaymentGatewayView(r, origin, isEnvConfiguredForGateway(r.code))
+        )
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to load payment gateways" });
+    }
+  }
+);
+app.put(
+  "/api/admin/payment-gateways",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    const schema = z.object({
+      code: z.string().min(2).max(32),
+      name: z.string().min(2).max(60),
+      nameBn: z.string().min(1).max(60).optional(),
+      providerType: z.enum(["mfs", "card", "wallet", "cod", "custom"]).default("mfs"),
+      mode: z.enum(["sandbox", "live"]).default("sandbox"),
+      isActive: z.boolean().default(true),
+      apiBaseUrl: z.string().max(240).optional().default(""),
+      merchantId: z.string().max(120).optional().default(""),
+      apiKey: z.string().max(240).optional(),
+      apiSecret: z.string().max(240).optional(),
+      webhookSecret: z.string().max(240).optional(),
+      instructions: z.string().max(300).optional().default(""),
+      sortOrder: z.number().int().min(1).max(100).optional().default(10)
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid payment gateway configuration payload" });
+    }
+    const code = normalizeGatewayCode(parsed.data.code);
+    if (code.length < 2) {
+      return res.status(400).json({ error: "Gateway code must contain at least 2 alphanumeric characters" });
+    }
+    try {
+      await ensureDefaultPaymentGateways();
+      const existing = await db.select().from(paymentGateways).where(eq3(paymentGateways.code, code)).limit(1);
+      const keepOrReplaceSecret = (incoming, prev) => {
+        if (incoming === void 0) return prev || "";
+        const clean = incoming.trim();
+        if (!clean || clean.startsWith("\u2022\u2022\u2022\u2022")) return prev || "";
+        return clean;
+      };
+      const cur = existing[0];
+      const nextValues = {
+        code,
+        name: parsed.data.name.trim(),
+        nameBn: parsed.data.nameBn?.trim() || parsed.data.name.trim(),
+        providerType: parsed.data.providerType,
+        mode: code === "cod" ? "live" : parsed.data.mode,
+        isActive: parsed.data.isActive,
+        apiBaseUrl: parsed.data.apiBaseUrl.trim(),
+        merchantId: parsed.data.merchantId.trim(),
+        apiKey: keepOrReplaceSecret(parsed.data.apiKey, cur?.apiKey),
+        apiSecret: keepOrReplaceSecret(parsed.data.apiSecret, cur?.apiSecret),
+        webhookSecret: keepOrReplaceSecret(parsed.data.webhookSecret, cur?.webhookSecret),
+        instructions: parsed.data.instructions.trim(),
+        sortOrder: parsed.data.sortOrder,
+        updatedAt: /* @__PURE__ */ new Date()
+      };
+      const saved = await db.insert(paymentGateways).values(nextValues).onConflictDoUpdate({
+        target: paymentGateways.code,
+        set: nextValues
+      }).returning();
+      if (code === "bkash" || code === "sslcommerz") {
+        const settingsRows = await db.select().from(platformSettings).limit(1);
+        if (settingsRows.length > 0) {
+          await db.update(platformSettings).set(
+            code === "bkash" ? {
+              bkashEnabled: nextValues.isActive,
+              bkashSandbox: nextValues.mode !== "live",
+              updatedAt: /* @__PURE__ */ new Date()
+            } : {
+              sslcommerzEnabled: nextValues.isActive,
+              sslcommerzSandbox: nextValues.mode !== "live",
+              updatedAt: /* @__PURE__ */ new Date()
+            }
+          ).where(eq3(platformSettings.id, settingsRows[0].id));
+        }
+      }
+      await db.insert(auditLogs).values({
+        actorUid: req.user.uid,
+        action: cur ? "payment_gateway_updated" : "payment_gateway_created",
+        targetType: "payment_gateway",
+        targetId: code,
+        details: JSON.stringify({
+          name: nextValues.name,
+          mode: nextValues.mode,
+          isActive: nextValues.isActive,
+          providerType: nextValues.providerType
+        })
+      });
+      res.json({
+        paymentGateway: toAdminPaymentGatewayView(
+          saved[0],
+          getRequestOrigin(req),
+          isEnvConfiguredForGateway(code)
+        )
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to save payment gateway" });
+    }
+  }
+);
+app.post(
+  "/api/admin/payment-gateways/:code/test",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    const code = normalizeGatewayCode(String(req.params.code || ""));
+    if (!code) return res.status(400).json({ error: "Invalid gateway code" });
+    try {
+      await ensureDefaultPaymentGateways();
+      const rows = await db.select().from(paymentGateways).where(eq3(paymentGateways.code, code)).limit(1);
+      if (rows.length === 0) return res.status(404).json({ error: "Gateway not found" });
+      const result = validatePaymentGatewayConfiguration(
+        rows[0],
+        isEnvConfiguredForGateway(code)
+      );
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Gateway test failed" });
+    }
+  }
+);
+app.delete(
+  "/api/admin/payment-gateways/:code",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    const code = normalizeGatewayCode(String(req.params.code || ""));
+    if (!code) return res.status(400).json({ error: "Invalid gateway code" });
+    if (["bkash", "nagad", "sslcommerz", "cod"].includes(code)) {
+      return res.status(400).json({
+        error: "Built-in gateways cannot be deleted. Disable them instead."
+      });
+    }
+    try {
+      await db.delete(paymentGateways).where(eq3(paymentGateways.code, code));
+      await db.insert(auditLogs).values({
+        actorUid: req.user.uid,
+        action: "payment_gateway_deleted",
+        targetType: "payment_gateway",
+        targetId: code,
+        details: `Removed custom payment gateway ${code}`
+      });
+      res.json({ deleted: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to delete payment gateway" });
     }
   }
 );

@@ -54,6 +54,7 @@ interface VendorDashboardProps {
   lang: Lang;
   mapsApiKey: string;
   initialOnboarding?: boolean;
+  initialRestaurantId?: number | null;
   onRefreshUser: () => Promise<void>;
   onMenuMutated?: () => Promise<void>;
   onBack: () => void;
@@ -64,12 +65,18 @@ export function VendorDashboard({
   lang,
   mapsApiKey,
   initialOnboarding = false,
+  initialRestaurantId = null,
   onRefreshUser,
   onMenuMutated,
   onBack,
 }: VendorDashboardProps) {
   const [loading, setLoading] = useState(true);
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
+  const [allRestaurants, setAllRestaurants] = useState<Restaurant[]>([]);
+  const [ownRestaurantIds, setOwnRestaurantIds] = useState<number[]>([]);
+  const [selectedRestaurantId, setSelectedRestaurantId] = useState<number | null>(
+    initialRestaurantId
+  );
   const [menuItems, setMenuItems] = useState<FoodItem[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
@@ -175,61 +182,78 @@ export function VendorDashboard({
   const canAccessVendorApi =
     user.role === 'restaurant_owner' || user.role === 'admin' || user.role === 'super_admin';
 
-  const loadWorkspace = useCallback(async () => {
-    if (!canAccessVendorApi) {
-      setShowOnboarding(true);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await apiFetch<{
-        restaurant: Restaurant | null;
-        menuItems: FoodItem[];
-        orders: OrderRecord[];
-        ledger: LedgerEntry[];
-        payouts: PayoutRecord[];
-      }>('/api/vendor/workspace');
-      setRestaurant(res.restaurant);
-      setMenuItems(res.menuItems);
-      setOrders(res.orders);
-      setLedger(res.ledger);
-      setPayouts(res.payouts);
-      if (res.restaurant) {
-        setEditFee(String(res.restaurant.deliveryFee));
-        setEditMinOrder(String(res.restaurant.minOrder));
-        setEditHours(res.restaurant.openingHours);
-        setEditMode(res.restaurant.deliveryMode);
-        setEditLogoUrl(res.restaurant.logoUrl || '');
-        setEditCoverUrl(res.restaurant.coverUrl || '');
-        try {
-          const keyMeta = await apiFetch<{
-            hasKey: boolean;
-            keyPrefix: string | null;
-            label: string | null;
-            lastUsedAt: string | null;
-          }>(`/api/vendor/api-key?restaurantId=${res.restaurant.id}`);
-          setApiKeyInfo(keyMeta);
-        } catch {
-          // ignore if endpoint unavailable
-        }
-      } else {
+  const loadWorkspace = useCallback(
+    async (explicitId?: number | null) => {
+      if (!canAccessVendorApi) {
         setShowOnboarding(true);
+        setLoading(false);
+        return;
       }
-    } catch (err) {
-      console.error('Vendor workspace load failed:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [canAccessVendorApi]);
+      setLoading(true);
+      const targetId = explicitId !== undefined ? explicitId : selectedRestaurantId;
+      try {
+        const query = targetId ? `?restaurantId=${targetId}` : '';
+        const res = await apiFetch<{
+          restaurant: Restaurant | null;
+          restaurants?: Restaurant[];
+          ownRestaurantIds?: number[];
+          menuItems: FoodItem[];
+          orders: OrderRecord[];
+          ledger: LedgerEntry[];
+          payouts: PayoutRecord[];
+        }>(`/api/vendor/workspace${query}`);
+        setRestaurant(res.restaurant);
+        setAllRestaurants(res.restaurants || (res.restaurant ? [res.restaurant] : []));
+        setOwnRestaurantIds(res.ownRestaurantIds || []);
+        setMenuItems(res.menuItems);
+        setOrders(res.orders);
+        setLedger(res.ledger);
+        setPayouts(res.payouts);
+        setRevealedApiKey('');
+        if (res.restaurant) {
+          setSelectedRestaurantId(res.restaurant.id);
+          setEditFee(String(res.restaurant.deliveryFee));
+          setEditMinOrder(String(res.restaurant.minOrder));
+          setEditHours(res.restaurant.openingHours);
+          setEditMode(res.restaurant.deliveryMode);
+          setEditLogoUrl(res.restaurant.logoUrl || '');
+          setEditCoverUrl(res.restaurant.coverUrl || '');
+          try {
+            const keyMeta = await apiFetch<{
+              hasKey: boolean;
+              keyPrefix: string | null;
+              label: string | null;
+              lastUsedAt: string | null;
+            }>(`/api/vendor/api-key?restaurantId=${res.restaurant.id}`);
+            setApiKeyInfo(keyMeta);
+          } catch {
+            // ignore if endpoint unavailable
+          }
+        } else {
+          setShowOnboarding(true);
+        }
+      } catch (err) {
+        console.error('Vendor workspace load failed:', err);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [canAccessVendorApi, selectedRestaurantId]
+  );
 
   useEffect(() => {
     setShowOnboarding(initialOnboarding);
   }, [initialOnboarding]);
 
   useEffect(() => {
-    loadWorkspace();
-  }, [loadWorkspace]);
+    if (initialRestaurantId && initialRestaurantId !== selectedRestaurantId) {
+      setSelectedRestaurantId(initialRestaurantId);
+    }
+  }, [initialRestaurantId, selectedRestaurantId]);
+
+  useEffect(() => {
+    loadWorkspace(selectedRestaurantId);
+  }, [loadWorkspace, selectedRestaurantId]);
 
   const handleRegisterRestaurant = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -262,14 +286,21 @@ export function VendorDashboard({
         }),
       });
       setRestaurant(res.restaurant);
+      setSelectedRestaurantId(res.restaurant.id);
       setShowOnboarding(false);
       await onRefreshUser();
+      if (onMenuMutated) await onMenuMutated();
+      const isInstantLive = res.restaurant.status === 'approved';
       setFeedback(
-        lang === 'bn'
+        isInstantLive
+          ? lang === 'bn'
+            ? 'আপনার নিজস্ব রেস্টুরেন্ট সরাসরি লাইভ হয়েছে! এখন আপনার মেনুতে পণ্য আপলোড করতে পারেন।'
+            : 'Your store is live immediately! You can now upload products and manage orders.'
+          : lang === 'bn'
           ? 'আপনার রেস্টুরেন্ট আবেদন জমা হয়েছে। সুপার অ্যাডমিন অনুমোদনের পর এটি মার্কেটপ্লেসে দৃশ্যমান হবে।'
           : 'Application submitted! Your restaurant is pending Super Admin approval.'
       );
-      await loadWorkspace();
+      await loadWorkspace(res.restaurant.id);
     } catch (err: unknown) {
       setFeedback(err instanceof Error ? err.message : 'Registration failed');
     } finally {
@@ -1020,10 +1051,25 @@ export function VendorDashboard({
                 </div>
               )}
               <div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <h1 className="text-xl font-bold text-[#2E3138]">
                     {lang === 'bn' ? restaurant.nameBn : restaurant.name}
                   </h1>
+                  <span
+                    className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-md ${
+                      ownRestaurantIds.includes(restaurant.id) || restaurant.ownerUid === user.uid
+                        ? 'bg-[#FFF0F6] text-[#E21B70] border border-[#E21B70]/25'
+                        : 'bg-blue-50 text-blue-700 border border-blue-200'
+                    }`}
+                  >
+                    {ownRestaurantIds.includes(restaurant.id) || restaurant.ownerUid === user.uid
+                      ? lang === 'bn'
+                        ? 'আমার নিজস্ব স্টোর'
+                        : 'My Own Store'
+                      : lang === 'bn'
+                      ? 'পার্টনার স্টোর'
+                      : 'Partner Store'}
+                  </span>
                   <span
                     className={`text-[11px] font-bold uppercase px-2 py-0.5 rounded-md ${
                       restaurant.status === 'approved'
@@ -1041,7 +1087,38 @@ export function VendorDashboard({
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
+              {allRestaurants.length > 1 && (
+                <select
+                  value={restaurant.id}
+                  onChange={(e) => setSelectedRestaurantId(Number(e.target.value))}
+                  aria-label="Switch Restaurant Store"
+                  className="px-3 py-2 rounded-xl border border-neutral-200 bg-neutral-50 text-xs font-semibold text-[#2E3138] max-w-[240px]"
+                >
+                  {allRestaurants.map((r) => {
+                    const isMine = ownRestaurantIds.includes(r.id) || r.ownerUid === user.uid;
+                    return (
+                      <option key={r.id} value={r.id}>
+                        {isMine ? '★ [My Store] ' : '[Partner] '}
+                        {lang === 'bn' ? r.nameBn : r.name}
+                      </option>
+                    );
+                  })}
+                </select>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setStep(1);
+                  setShowOnboarding(true);
+                }}
+                className="px-3 py-2 rounded-xl border border-[#E21B70]/40 bg-[#FFF0F6] hover:bg-[#FFE4EF] text-[#E21B70] text-xs font-semibold inline-flex items-center gap-1"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{lang === 'bn' ? 'নতুন স্টোর খুলুন' : 'Add Store'}</span>
+              </button>
+
               <button
                 type="button"
                 onClick={handleToggleOpen}

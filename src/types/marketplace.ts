@@ -223,6 +223,30 @@ export interface RiderRecord {
   totalEarnings: number;
 }
 
+export interface PublicPaymentGateway {
+  code: string;
+  name: string;
+  nameBn: string;
+  providerType: 'mfs' | 'card' | 'wallet' | 'cod' | 'custom';
+  mode: 'sandbox' | 'live';
+  isActive: boolean;
+  instructions: string;
+  sortOrder: number;
+  isConfigured: boolean;
+}
+
+export interface AdminPaymentGateway extends PublicPaymentGateway {
+  apiBaseUrl: string;
+  merchantId: string;
+  hasApiKey: boolean;
+  hasApiSecret: boolean;
+  hasWebhookSecret: boolean;
+  apiKeyPreview: string;
+  apiSecretPreview: string;
+  webhookSecretPreview: string;
+  webhookUrl: string;
+}
+
 export interface StorefrontConfig {
   brandPrefix: string;
   brandSuffix: string;
@@ -261,6 +285,12 @@ export interface StorefrontConfig {
   footerCopyright: string;
   maintenanceMode: boolean;
   maintenanceMessage: string;
+  seoTitleEn: string;
+  seoTitleBn: string;
+  seoDescriptionEn: string;
+  seoDescriptionBn: string;
+  seoKeywords: string;
+  googleSiteVerification: string;
 }
 
 export interface PlatformSettings {

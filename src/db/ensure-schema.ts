@@ -20,6 +20,7 @@ const EXPECTED_TABLES = [
   'restaurants',
   'food_items',
   'partner_api_keys',
+  'payment_gateways',
   'coupons',
   'orders',
   'order_status_history',
@@ -193,6 +194,29 @@ async function createMissingTables(existingSet: Set<string>): Promise<void> {
         key_prefix TEXT NOT NULL,
         label TEXT NOT NULL DEFAULT 'POS / Inventory Sync',
         last_used_at TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+
+  if (!existingSet.has('payment_gateways')) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS payment_gateways (
+        id SERIAL PRIMARY KEY,
+        code TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        name_bn TEXT NOT NULL,
+        provider_type TEXT NOT NULL DEFAULT 'mfs',
+        mode TEXT NOT NULL DEFAULT 'sandbox',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        api_base_url TEXT DEFAULT '',
+        merchant_id TEXT DEFAULT '',
+        api_key TEXT DEFAULT '',
+        api_secret TEXT DEFAULT '',
+        webhook_secret TEXT DEFAULT '',
+        instructions TEXT DEFAULT '',
+        sort_order INTEGER NOT NULL DEFAULT 10,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );

@@ -3,12 +3,16 @@ import {
   Activity,
   ArrowLeft,
   Bell,
+  Check,
   CheckCircle2,
+  Copy,
   CreditCard,
   Database,
   Download,
+  ExternalLink,
   Eye,
   EyeOff,
+  Globe,
   KeyRound,
   LayoutTemplate,
   Package,
@@ -35,12 +39,14 @@ import {
   ADMIN_PIN_DEFAULT_EMAIL,
   canActorModifyUserAccount,
   formatBdt,
+  isOwnerRestaurant,
   isProtectedSuperAdminEmail,
   OrderStatus,
   PRIMARY_SUPER_ADMIN_EMAIL,
 } from '../lib/marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from '../lib/storefront-config';
 import type {
+  AdminPaymentGateway,
   AppUser,
   AuditLogItem,
   BackendStatusSummary,
@@ -69,6 +75,7 @@ interface AdminDashboardProps {
   lang: Lang;
   currentUser: AppUser;
   onRestaurantsMutated: () => Promise<void>;
+  onOpenVendorStore?: (restaurantId: number) => void;
   onBack: () => void;
 }
 
@@ -109,6 +116,23 @@ interface RestaurantFormState {
   isSponsored: boolean;
 }
 
+interface GatewayFormState {
+  isNew: boolean;
+  code: string;
+  name: string;
+  nameBn: string;
+  providerType: 'mfs' | 'card' | 'wallet' | 'cod' | 'custom';
+  mode: 'sandbox' | 'live';
+  isActive: boolean;
+  apiBaseUrl: string;
+  merchantId: string;
+  apiKey: string;
+  apiSecret: string;
+  webhookSecret: string;
+  instructions: string;
+  sortOrder: string;
+}
+
 const ORDER_STATUS_OPTIONS: OrderStatus[] = [
   'confirmed',
   'accepted',
@@ -121,7 +145,13 @@ const ORDER_STATUS_OPTIONS: OrderStatus[] = [
   'cancelled',
 ];
 
-export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack }: AdminDashboardProps) {
+export function AdminDashboard({
+  lang,
+  currentUser,
+  onRestaurantsMutated,
+  onOpenVendorStore,
+  onBack,
+}: AdminDashboardProps) {
   const [tab, setTab] = useState<
     | 'overview'
     | 'frontend'
@@ -188,9 +218,21 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
   const [productSearch, setProductSearch] = useState('');
   const [productRestFilter, setProductRestFilter] = useState<string>('all');
   const [productVisibilityFilter, setProductVisibilityFilter] = useState<'all' | 'visible' | 'hidden'>('all');
+  const [productOwnershipFilter, setProductOwnershipFilter] = useState<'all' | 'own' | 'partner'>('all');
+  const [restaurantOwnershipFilter, setRestaurantOwnershipFilter] = useState<'all' | 'own' | 'partner'>('all');
   const [productModal, setProductModal] = useState<ProductFormState | null>(null);
   const [savingProduct, setSavingProduct] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+
+  // Payment Gateway API Integrations state
+  const [paymentGateways, setPaymentGateways] = useState<AdminPaymentGateway[]>([]);
+  const [gatewayModal, setGatewayModal] = useState<GatewayFormState | null>(null);
+  const [savingGateway, setSavingGateway] = useState(false);
+  const [testingGatewayCode, setTestingGatewayCode] = useState<string | null>(null);
+  const [gatewayTestResults, setGatewayTestResults] = useState<
+    Record<string, { ok: boolean; message: string }>
+  >({});
+  const [copiedWebhookCode, setCopiedWebhookCode] = useState<string | null>(null);
 
   // Restaurant Create / Edit Modal
   const [restaurantModal, setRestaurantModal] = useState<RestaurantFormState | null>(null);
@@ -253,6 +295,14 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
         setMinOrderDefault(String(res.settings.minOrderDefault));
         setStorefrontForm(mergeStorefrontConfig(res.settings.storefrontConfig));
       }
+      try {
+        const gwRes = await apiFetch<{ paymentGateways: AdminPaymentGateway[] }>(
+          '/api/admin/payment-gateways'
+        );
+        setPaymentGateways(gwRes.paymentGateways || []);
+      } catch {
+        // non-blocking
+      }
     } catch (err) {
       console.error('Failed to load admin workspace:', err);
     } finally {
@@ -270,6 +320,26 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
     }
   }, [tab, loadBackendStatus]);
 
+  const myRestaurants = useMemo(
+    () => restaurants.filter((r) => isOwnerRestaurant(r.ownerUid, currentUser.uid)),
+    [restaurants, currentUser.uid]
+  );
+
+  const myRestaurantIds = useMemo(
+    () => new Set(myRestaurants.map((r) => r.id)),
+    [myRestaurants]
+  );
+
+  const filteredRestaurants = useMemo(() => {
+    if (restaurantOwnershipFilter === 'own') {
+      return restaurants.filter((r) => myRestaurantIds.has(r.id));
+    }
+    if (restaurantOwnershipFilter === 'partner') {
+      return restaurants.filter((r) => !myRestaurantIds.has(r.id));
+    }
+    return restaurants;
+  }, [restaurants, restaurantOwnershipFilter, myRestaurantIds]);
+
   const restaurantNameMap = useMemo(() => {
     const map = new Map<number, string>();
     for (const r of restaurants) {
@@ -280,6 +350,12 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
 
   const filteredProducts = useMemo(() => {
     return products.filter((item) => {
+      if (productOwnershipFilter === 'own' && !myRestaurantIds.has(item.restaurantId)) {
+        return false;
+      }
+      if (productOwnershipFilter === 'partner' && myRestaurantIds.has(item.restaurantId)) {
+        return false;
+      }
       if (productRestFilter !== 'all' && item.restaurantId !== Number(productRestFilter)) {
         return false;
       }
@@ -296,7 +372,14 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       }
       return true;
     });
-  }, [products, productRestFilter, productVisibilityFilter, productSearch]);
+  }, [
+    products,
+    productRestFilter,
+    productVisibilityFilter,
+    productOwnershipFilter,
+    myRestaurantIds,
+    productSearch,
+  ]);
 
   const handleUploadImage = async (file: File, onUploaded: (url: string) => void) => {
     if (file.size > 4.5 * 1024 * 1024) {
@@ -543,8 +626,8 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
     }
   };
 
-  const openCreateProductModal = () => {
-    const defaultRestId = restaurants[0]?.id || 1;
+  const openCreateProductModal = (preferredRestaurantId?: number) => {
+    const defaultRestId = preferredRestaurantId || myRestaurants[0]?.id || restaurants[0]?.id || 1;
     setProductModal({
       restaurantId: defaultRestId,
       category: 'Main Course',
@@ -559,6 +642,145 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
       isVisibleOnStorefront: true,
       isPopular: true,
     });
+  };
+
+  const openEditGatewayModal = (gw: AdminPaymentGateway) => {
+    setErrorMsg(null);
+    setGatewayModal({
+      isNew: false,
+      code: gw.code,
+      name: gw.name,
+      nameBn: gw.nameBn,
+      providerType: gw.providerType,
+      mode: gw.mode,
+      isActive: gw.isActive,
+      apiBaseUrl: gw.apiBaseUrl,
+      merchantId: gw.merchantId,
+      apiKey: gw.apiKeyPreview || '',
+      apiSecret: gw.apiSecretPreview || '',
+      webhookSecret: gw.webhookSecretPreview || '',
+      instructions: gw.instructions,
+      sortOrder: String(gw.sortOrder),
+    });
+  };
+
+  const openAddFutureGatewayModal = (preset?: {
+    code: string;
+    name: string;
+    nameBn: string;
+    providerType: 'mfs' | 'card' | 'wallet' | 'custom';
+    apiBaseUrl: string;
+    instructions: string;
+  }) => {
+    setErrorMsg(null);
+    setGatewayModal({
+      isNew: true,
+      code: preset?.code || '',
+      name: preset?.name || '',
+      nameBn: preset?.nameBn || '',
+      providerType: preset?.providerType || 'mfs',
+      mode: 'sandbox',
+      isActive: true,
+      apiBaseUrl: preset?.apiBaseUrl || '',
+      merchantId: '',
+      apiKey: '',
+      apiSecret: '',
+      webhookSecret: '',
+      instructions: preset?.instructions || '',
+      sortOrder: String(paymentGateways.length + 1),
+    });
+  };
+
+  const handleSaveGatewayModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gatewayModal) return;
+    setSavingGateway(true);
+    setErrorMsg(null);
+    try {
+      await apiFetch('/api/admin/payment-gateways', {
+        method: 'PUT',
+        body: JSON.stringify({
+          code: gatewayModal.code,
+          name: gatewayModal.name,
+          nameBn: gatewayModal.nameBn || gatewayModal.name,
+          providerType: gatewayModal.providerType,
+          mode: gatewayModal.mode,
+          isActive: gatewayModal.isActive,
+          apiBaseUrl: gatewayModal.apiBaseUrl,
+          merchantId: gatewayModal.merchantId,
+          apiKey: gatewayModal.apiKey,
+          apiSecret: gatewayModal.apiSecret,
+          webhookSecret: gatewayModal.webhookSecret,
+          instructions: gatewayModal.instructions,
+          sortOrder: Number(gatewayModal.sortOrder) || 10,
+        }),
+      });
+      setFeedback(
+        lang === 'bn'
+          ? `${gatewayModal.name} পেমেন্ট গেটওয়ে API সেভ হয়েছে এবং চেকআউটে যুক্ত হয়েছে।`
+          : `Saved ${gatewayModal.name} payment gateway integration.`
+      );
+      setGatewayModal(null);
+      await loadAdmin();
+      await onRestaurantsMutated();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to save payment gateway');
+    } finally {
+      setSavingGateway(false);
+    }
+  };
+
+  const handleToggleGatewayActive = async (gw: AdminPaymentGateway) => {
+    try {
+      await apiFetch('/api/admin/payment-gateways', {
+        method: 'PUT',
+        body: JSON.stringify({
+          code: gw.code,
+          name: gw.name,
+          nameBn: gw.nameBn,
+          providerType: gw.providerType,
+          mode: gw.mode,
+          isActive: !gw.isActive,
+          apiBaseUrl: gw.apiBaseUrl,
+          merchantId: gw.merchantId,
+          instructions: gw.instructions,
+          sortOrder: gw.sortOrder,
+        }),
+      });
+      await loadAdmin();
+      await onRestaurantsMutated();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to toggle gateway');
+    }
+  };
+
+  const handleTestGateway = async (code: string) => {
+    setTestingGatewayCode(code);
+    try {
+      const res = await apiFetch<{ ok: boolean; configured: boolean; mode: string; message: string }>(
+        `/api/admin/payment-gateways/${code}/test`,
+        { method: 'POST' }
+      );
+      setGatewayTestResults((prev) => ({ ...prev, [code]: { ok: res.ok, message: res.message } }));
+    } catch (err: unknown) {
+      setGatewayTestResults((prev) => ({
+        ...prev,
+        [code]: { ok: false, message: err instanceof Error ? err.message : 'Test failed' },
+      }));
+    } finally {
+      setTestingGatewayCode(null);
+    }
+  };
+
+  const handleDeleteGateway = async (code: string) => {
+    try {
+      await apiFetch(`/api/admin/payment-gateways/${code}`, { method: 'DELETE' });
+      setFeedback(`Removed custom payment gateway "${code}".`);
+      await loadAdmin();
+      await onRestaurantsMutated();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to remove gateway');
+    }
   };
 
   const openEditProductModal = (item: FoodItem) => {
@@ -1019,6 +1241,87 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
         </div>
       ) : tab === 'overview' ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Owner's Own Restaurant & Business Card */}
+          <div className="lg:col-span-12 bg-gradient-to-r from-[#FFF0F6] via-white to-white rounded-2xl border border-[#E21B70]/25 p-5 flex flex-wrap items-center justify-between gap-4">
+            <div className="space-y-1 max-w-2xl">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded bg-[#E21B70] text-white text-[10px] font-bold uppercase tracking-wider">
+                  {lang === 'bn' ? 'আমার নিজস্ব ব্যবসা' : 'My Own Restaurant Business'}
+                </span>
+                <span className="text-xs font-semibold text-neutral-600">
+                  {myRestaurants.length > 0
+                    ? `${myRestaurants.length} ${lang === 'bn' ? 'টি নিজস্ব স্টোর সক্রিয়' : 'own store(s) active'}`
+                    : lang === 'bn'
+                    ? 'আপনার নিজস্ব রেস্টুরেন্ট খুলুন'
+                    : 'Run your own store alongside partners'}
+                </span>
+              </div>
+              <h2 className="font-bold text-base text-[#2E3138]">
+                {myRestaurants.length > 0
+                  ? lang === 'bn'
+                    ? `আমার স্টোর: ${myRestaurants.map((r) => r.nameBn).join(', ')}`
+                    : `Your Own Store(s): ${myRestaurants.map((r) => r.name).join(', ')}`
+                  : lang === 'bn'
+                  ? 'মার্কেটপ্লেসের পাশাপাশি আপনার নিজের রেস্টুরেন্ট চালু করুন ও পণ্য আপলোড করুন'
+                  : 'Launch your own restaurant store alongside partners and upload products directly'}
+              </h2>
+              <p className="text-xs text-neutral-600">
+                {lang === 'bn'
+                  ? 'আপনি ও আপনার রেস্টুরেন্ট পার্টনাররা আলাদাভাবে নিজেদের পণ্য আপলোড ও এডিট করতে পারবেন, এবং পেমেন্ট/API ইন্টিগ্রেশন নিয়ন্ত্রণ করতে পারবেন।'
+                  : 'You and your partner restaurants manage separate products, menus, orders, and Partner API keys independently.'}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2.5">
+              {myRestaurants.length > 0 ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => openCreateProductModal(myRestaurants[0].id)}
+                    className="px-4 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold inline-flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'আমার স্টোরে পণ্য আপলোড' : 'Upload to My Store'}</span>
+                  </button>
+                  {onOpenVendorStore && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenVendorStore(myRestaurants[0].id)}
+                      className="px-4 py-2 rounded-xl bg-[#2E3138] hover:bg-black text-white text-xs font-bold inline-flex items-center gap-1.5"
+                    >
+                      <Store className="w-3.5 h-3.5 text-[#E21B70]" />
+                      <span>{lang === 'bn' ? 'আমার স্টোর ড্যাশবোর্ড' : 'Open My Store Hub'}</span>
+                    </button>
+                  )}
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={openCreateRestaurantModal}
+                  className="px-4 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold inline-flex items-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>{lang === 'bn' ? 'আমার নিজস্ব রেস্টুরেন্ট চালু করুন' : 'Launch My Own Restaurant'}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setTab('backend')}
+                className="px-3.5 py-2 rounded-xl border border-neutral-300 bg-white hover:border-[#E21B70] text-xs font-semibold text-[#2E3138] inline-flex items-center gap-1.5"
+              >
+                <CreditCard className="w-3.5 h-3.5 text-[#E21B70]" />
+                <span>{lang === 'bn' ? 'পেমেন্ট ও API ইন্টিগ্রেশন' : 'Payment & API Integrations'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab('frontend')}
+                className="px-3.5 py-2 rounded-xl border border-neutral-300 bg-white hover:border-[#E21B70] text-xs font-semibold text-[#2E3138] inline-flex items-center gap-1.5"
+              >
+                <Globe className="w-3.5 h-3.5 text-[#E21B70]" />
+                <span>{lang === 'bn' ? 'Google SEO ও সার্চ কনসোল' : 'Google SEO Settings'}</span>
+              </button>
+            </div>
+          </div>
+
           {/* Global Numeric & Brand Config */}
           <form
             onSubmit={handleSaveGlobalSettings}
@@ -1575,48 +1878,238 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
               </button>
             </form>
 
-            {/* Gateway Modes + Super Admin DB Backup & Seed Repair */}
-            <div className="lg:col-span-6 space-y-6">
-              <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
-                <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
-                  <CreditCard className="w-4 h-4 text-[#E21B70]" />
-                  <span>
+            {/* Gateway Modes + Extensible Payment API Integrations */}
+            <div className="lg:col-span-12 bg-white rounded-2xl border border-neutral-200 p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                    <CreditCard className="w-4 h-4 text-[#E21B70]" />
+                    <span>
+                      {lang === 'bn'
+                        ? 'এক্সটেনসিবল পেমেন্ট গেটওয়ে API ইন্টিগ্রেশন (bKash, Nagad, SSLCommerz ও ভবিষ্যতের গেটওয়ে)'
+                        : 'Payment Gateway API Integrations (bKash, Nagad, SSLCommerz & Future Gateways)'}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-neutral-500 mt-0.5">
                     {lang === 'bn'
-                      ? 'ব্যাকএন্ড পেমেন্ট ও কুরিয়ার গেটওয়ে কন্ট্রোল'
-                      : 'Backend Payment & Courier Gateway Toggles'}
-                  </span>
-                </h3>
-                {settings && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-                    {[
-                      { key: 'pathaoEnabled' as const, label: 'Pathao Courier Dispatch' },
-                      { key: 'pathaoSandbox' as const, label: 'Pathao Sandbox Mode' },
-                      { key: 'bkashEnabled' as const, label: 'bKash Tokenized API' },
-                      { key: 'bkashSandbox' as const, label: 'bKash Sandbox Mode' },
-                      { key: 'sslcommerzEnabled' as const, label: 'SSLCommerz MFS/Card' },
-                      { key: 'sslcommerzSandbox' as const, label: 'SSLCommerz Sandbox Mode' },
-                    ].map((item) => (
-                      <div
-                        key={item.key}
-                        className="flex items-center justify-between p-2.5 rounded-xl border border-neutral-200"
-                      >
-                        <span className="font-semibold text-[#2E3138]">{item.label}</span>
+                      ? 'এখানে বিকাশ, নগদ, SSLCommerz বা ভবিষ্যতে Rocket, Upay, ShurjoPay, Stripe-এর API Key যুক্ত ও পরিচালনা করুন। সক্রিয় গেটওয়ে চেকআউটে দেখা যাবে।'
+                      : 'Configure Merchant IDs, API Keys, Endpoints, Sandbox/Live modes, or add future bKash-style MFS/Card gateways. API secrets stay encrypted server-side.'}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openAddFutureGatewayModal({
+                        code: 'rocket',
+                        name: 'DBBL Rocket',
+                        nameBn: 'রকেট (Rocket)',
+                        providerType: 'mfs',
+                        apiBaseUrl: 'https://api.rocket.com.bd/v1',
+                        instructions: 'Pay securely via DBBL Rocket MFS wallet.',
+                      })
+                    }
+                    className="px-3 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-neutral-700"
+                  >
+                    + Rocket Preset
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openAddFutureGatewayModal({
+                        code: 'upay',
+                        name: 'Upay MFS',
+                        nameBn: 'উপায় (Upay)',
+                        providerType: 'mfs',
+                        apiBaseUrl: 'https://api.upaybd.com/v1',
+                        instructions: 'Instant MFS checkout with Upay.',
+                      })
+                    }
+                    className="px-3 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-neutral-700"
+                  >
+                    + Upay Preset
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openAddFutureGatewayModal()}
+                    className="px-3.5 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold inline-flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'নতুন পেমেন্ট গেটওয়ে যুক্ত করুন' : 'Add Future Payment Gateway'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                {paymentGateways.map((gw) => {
+                  const testRes = gatewayTestResults[gw.code];
+                  const isBuiltin = ['bkash', 'nagad', 'sslcommerz', 'cod'].includes(gw.code);
+                  return (
+                    <div
+                      key={gw.code}
+                      className={`p-4 rounded-xl border space-y-2.5 ${
+                        gw.isActive ? 'border-neutral-200 bg-white' : 'border-neutral-200 bg-neutral-50 opacity-80'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-bold text-sm text-[#2E3138]">
+                              {lang === 'bn' ? gw.nameBn : gw.name}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600 font-mono-nums text-[10px] uppercase">
+                              {gw.code}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600 text-[10px] uppercase">
+                              {gw.providerType}
+                            </span>
+                            {gw.code !== 'cod' && (
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                  gw.mode === 'live'
+                                    ? 'bg-emerald-50 text-emerald-700'
+                                    : 'bg-amber-50 text-amber-700'
+                                }`}
+                              >
+                                {gw.mode}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-neutral-500 mt-0.5">
+                            {gw.isConfigured
+                              ? `Merchant: ${gw.merchantId || 'Env Configured'} · Key: ${gw.apiKeyPreview || 'Ready'}`
+                              : 'Sandbox ready · Add API keys to enable live production transactions'}
+                          </p>
+                        </div>
                         <button
                           type="button"
-                          onClick={() => handleToggleSetting(item.key, !settings[item.key])}
-                          className={`px-2.5 py-1 rounded-lg font-semibold ${
-                            settings[item.key]
+                          onClick={() => handleToggleGatewayActive(gw)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold shrink-0 ${
+                            gw.isActive
                               ? 'bg-emerald-600 text-white'
                               : 'bg-neutral-200 text-neutral-700'
                           }`}
                         >
-                          {settings[item.key] ? 'ON' : 'OFF'}
+                          {gw.isActive ? 'ACTIVE' : 'DISABLED'}
                         </button>
                       </div>
-                    ))}
-                  </div>
-                )}
+
+                      <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-neutral-50 border border-neutral-200 text-[11px]">
+                        <span className="truncate font-mono-nums text-neutral-600">
+                          Webhook: {gw.webhookUrl}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(gw.webhookUrl);
+                            setCopiedWebhookCode(gw.code);
+                            setTimeout(() => setCopiedWebhookCode(null), 1500);
+                          }}
+                          className="shrink-0 text-[#E21B70] font-semibold inline-flex items-center gap-1"
+                        >
+                          {copiedWebhookCode === gw.code ? (
+                            <>
+                              <Check className="w-3 h-3" />
+                              <span>Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" />
+                              <span>Copy</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {testRes && (
+                        <p
+                          className={`text-[11px] px-2.5 py-1.5 rounded-lg border ${
+                            testRes.ok
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                              : 'bg-red-50 border-red-200 text-red-700'
+                          }`}
+                        >
+                          {testRes.message}
+                        </p>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => openEditGatewayModal(gw)}
+                          className="px-3 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] font-semibold text-[#2E3138] inline-flex items-center gap-1"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          <span>{lang === 'bn' ? 'API কনফিগার করুন' : 'Configure API'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={testingGatewayCode === gw.code}
+                          onClick={() => handleTestGateway(gw.code)}
+                          className="px-3 py-1.5 rounded-lg border border-neutral-200 hover:border-emerald-500 font-semibold text-neutral-700 disabled:opacity-50"
+                        >
+                          {testingGatewayCode === gw.code ? 'Testing...' : 'Test Config'}
+                        </button>
+                        {!isBuiltin && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteGateway(gw.code)}
+                            className="px-2.5 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 font-semibold inline-flex items-center gap-1"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>Remove</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
+            </div>
+
+            {/* Courier & Gateway Quick Switches + Super Admin DB Backup & Seed Repair */}
+            <div className="lg:col-span-6 bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
+              <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                <CreditCard className="w-4 h-4 text-[#E21B70]" />
+                <span>
+                  {lang === 'bn'
+                    ? 'কুরিয়ার ও কুইক গেটওয়ে টগল'
+                    : 'Courier & Quick Integration Toggles'}
+                </span>
+              </h3>
+              {settings && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                  {[
+                    { key: 'pathaoEnabled' as const, label: 'Pathao Courier Dispatch' },
+                    { key: 'pathaoSandbox' as const, label: 'Pathao Sandbox Mode' },
+                    { key: 'bkashEnabled' as const, label: 'bKash Tokenized API' },
+                    { key: 'bkashSandbox' as const, label: 'bKash Sandbox Mode' },
+                    { key: 'sslcommerzEnabled' as const, label: 'SSLCommerz MFS/Card' },
+                    { key: 'sslcommerzSandbox' as const, label: 'SSLCommerz Sandbox Mode' },
+                  ].map((item) => (
+                    <div
+                      key={item.key}
+                      className="flex items-center justify-between p-2.5 rounded-xl border border-neutral-200"
+                    >
+                      <span className="font-semibold text-[#2E3138]">{item.label}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleSetting(item.key, !settings[item.key])}
+                        className={`px-2.5 py-1 rounded-lg font-semibold ${
+                          settings[item.key]
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-neutral-200 text-neutral-700'
+                        }`}
+                      >
+                        {settings[item.key] ? 'ON' : 'OFF'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="lg:col-span-6 space-y-6">
 
               <div className="bg-[#2E3138] text-white rounded-2xl p-5 space-y-3">
                 <div className="flex items-center justify-between gap-2">
@@ -2009,6 +2502,132 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                   </div>
                 </div>
               </div>
+
+              {/* Google SEO & Search Console Control Panel */}
+              <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                      <Globe className="w-4 h-4 text-[#E21B70]" />
+                      <span>
+                        {lang === 'bn'
+                          ? 'Google SEO ও Search Console কনফিগারেশন'
+                          : 'Google SEO, Meta Tags & Search Console'}
+                      </span>
+                    </h3>
+                    <p className="text-[11px] text-neutral-500 mt-0.5">
+                      Dynamic Schema.org Product/Restaurant JSON-LD, XML Sitemap, and Google Search Console verification.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 text-[11px]">
+                    <a
+                      href="/sitemap.xml"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold inline-flex items-center gap-1 hover:bg-emerald-100"
+                    >
+                      <span>/sitemap.xml</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                    <a
+                      href="/robots.txt"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-2.5 py-1 rounded-lg bg-neutral-100 border border-neutral-200 text-neutral-700 font-semibold inline-flex items-center gap-1 hover:bg-neutral-200"
+                    >
+                      <span>/robots.txt</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">Google SEO Title (EN)</label>
+                    <input
+                      value={storefrontForm.seoTitleEn}
+                      onChange={(e) =>
+                        setStorefrontForm({ ...storefrontForm, seoTitleEn: e.target.value })
+                      }
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">Google SEO Title (BN)</label>
+                    <input
+                      value={storefrontForm.seoTitleBn}
+                      onChange={(e) =>
+                        setStorefrontForm({ ...storefrontForm, seoTitleBn: e.target.value })
+                      }
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block font-semibold text-neutral-700 mb-1">Meta Description (EN)</label>
+                    <textarea
+                      rows={2}
+                      value={storefrontForm.seoDescriptionEn}
+                      onChange={(e) =>
+                        setStorefrontForm({ ...storefrontForm, seoDescriptionEn: e.target.value })
+                      }
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block font-semibold text-neutral-700 mb-1">Meta Description (BN)</label>
+                    <textarea
+                      rows={2}
+                      value={storefrontForm.seoDescriptionBn}
+                      onChange={(e) =>
+                        setStorefrontForm({ ...storefrontForm, seoDescriptionBn: e.target.value })
+                      }
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      Google Search Console Verification Code
+                    </label>
+                    <input
+                      value={storefrontForm.googleSiteVerification}
+                      onChange={(e) =>
+                        setStorefrontForm({
+                          ...storefrontForm,
+                          googleSiteVerification: e.target.value,
+                        })
+                      }
+                      placeholder="Paste content token from google-site-verification"
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg font-mono-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">Target Keywords</label>
+                    <input
+                      value={storefrontForm.seoKeywords}
+                      onChange={(e) =>
+                        setStorefrontForm({ ...storefrontForm, seoKeywords: e.target.value })
+                      }
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                </div>
+
+                {/* Live Google Search Snippet Preview */}
+                <div className="p-3.5 rounded-xl bg-neutral-50 border border-neutral-200 space-y-1">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">
+                    Google Search Result Preview
+                  </p>
+                  <p className="text-[11px] text-emerald-700 truncate">
+                    {typeof window !== 'undefined' ? window.location.origin : 'https://foodorabd.com'}/
+                  </p>
+                  <p className="text-sm font-semibold text-[#1a0dab] truncate">
+                    {lang === 'bn' ? storefrontForm.seoTitleBn : storefrontForm.seoTitleEn}
+                  </p>
+                  <p className="text-xs text-neutral-600 line-clamp-2">
+                    {lang === 'bn' ? storefrontForm.seoDescriptionBn : storefrontForm.seoDescriptionEn}
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         </form>
@@ -2027,6 +2646,24 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                 />
               </div>
               <select
+                value={productOwnershipFilter}
+                onChange={(e) =>
+                  setProductOwnershipFilter(e.target.value as 'all' | 'own' | 'partner')
+                }
+                aria-label="Filter products by ownership"
+                className="px-3 py-2 text-xs border border-neutral-200 rounded-xl bg-white font-semibold"
+              >
+                <option value="all">
+                  {lang === 'bn' ? 'সব মালিকানা (নিজস্ব + পার্টনার)' : 'All Stores (Own + Partner)'}
+                </option>
+                <option value="own">
+                  {lang === 'bn' ? 'আমার নিজস্ব স্টোরের পণ্য' : 'My Own Restaurant Products'}
+                </option>
+                <option value="partner">
+                  {lang === 'bn' ? 'পার্টনার রেস্টুরেন্টের পণ্য' : 'Partner Restaurant Products'}
+                </option>
+              </select>
+              <select
                 value={productRestFilter}
                 onChange={(e) => setProductRestFilter(e.target.value)}
                 aria-label="Filter products by restaurant"
@@ -2035,6 +2672,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                 <option value="all">{lang === 'bn' ? 'সব রেস্টুরেন্ট' : 'All Restaurants'}</option>
                 {restaurants.map((r) => (
                   <option key={r.id} value={String(r.id)}>
+                    {myRestaurantIds.has(r.id) ? '★ ' : ''}
                     {lang === 'bn' ? r.nameBn : r.name}
                   </option>
                 ))}
@@ -2065,7 +2703,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
 
             <button
               type="button"
-              onClick={openCreateProductModal}
+              onClick={() => openCreateProductModal()}
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold"
             >
               <Plus className="w-4 h-4" />
@@ -2076,6 +2714,7 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {filteredProducts.map((item) => {
               const shownOnSite = item.isVisibleOnStorefront !== false && item.isAvailable !== false;
+              const isMine = myRestaurantIds.has(item.restaurantId);
               return (
                 <div
                   key={item.id}
@@ -2093,6 +2732,15 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                     />
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5 flex-wrap">
+                        <span
+                          className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                            isMine
+                              ? 'bg-[#FFF0F6] text-[#E21B70] border border-[#E21B70]/25'
+                              : 'bg-blue-50 text-blue-700 border border-blue-200'
+                          }`}
+                        >
+                          {isMine ? 'My Store' : 'Partner'}
+                        </span>
                         <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600">
                           {item.category}
                         </span>
@@ -2206,72 +2854,116 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
         </div>
       ) : tab === 'restaurants' ? (
         <div className="space-y-4">
-          <div className="flex justify-end">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              {[
+                { id: 'all' as const, label: `All Stores (${restaurants.length})` },
+                { id: 'own' as const, label: `My Own Store(s) (${myRestaurants.length})` },
+                {
+                  id: 'partner' as const,
+                  label: `Partner Restaurants (${restaurants.length - myRestaurants.length})`,
+                },
+              ].map((flt) => (
+                <button
+                  key={flt.id}
+                  type="button"
+                  onClick={() => setRestaurantOwnershipFilter(flt.id)}
+                  className={`px-3.5 py-1.5 rounded-xl font-semibold border transition-colors ${
+                    restaurantOwnershipFilter === flt.id
+                      ? 'bg-[#2E3138] text-white border-[#2E3138]'
+                      : 'bg-white text-neutral-700 border-neutral-200 hover:border-neutral-300'
+                  }`}
+                >
+                  {flt.label}
+                </button>
+              ))}
+            </div>
             <button
               type="button"
               onClick={openCreateRestaurantModal}
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold"
             >
               <Plus className="w-4 h-4" />
-              <span>{lang === 'bn' ? 'নতুন রেস্টুরেন্ট যুক্ত করুন' : 'Create Restaurant'}</span>
+              <span>{lang === 'bn' ? 'আমার / নতুন রেস্টুরেন্ট চালু করুন' : 'Launch Own / New Restaurant'}</span>
             </button>
           </div>
 
           <div className="space-y-3">
-            {restaurants.map((rest) => (
-              <div
-                key={rest.id}
-                className="bg-white rounded-2xl border border-neutral-200 p-4 flex flex-wrap items-center justify-between gap-4"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="relative shrink-0">
-                    <img
-                      src={rest.coverUrl}
-                      alt={rest.name}
-                      className="w-14 h-14 rounded-xl object-cover bg-neutral-100"
-                    />
-                    {rest.logoUrl && (
+            {filteredRestaurants.map((rest) => {
+              const isMine = myRestaurantIds.has(rest.id);
+              return (
+                <div
+                  key={rest.id}
+                  className="bg-white rounded-2xl border border-neutral-200 p-4 flex flex-wrap items-center justify-between gap-4"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="relative shrink-0">
                       <img
-                        src={rest.logoUrl}
-                        alt={`${rest.name} logo`}
-                        className="w-6 h-6 rounded-lg object-cover border-2 border-white shadow-xs bg-white absolute -bottom-1 -right-1"
+                        src={rest.coverUrl}
+                        alt={rest.name}
+                        className="w-14 h-14 rounded-xl object-cover bg-neutral-100"
                       />
-                    )}
-                  </div>
-                  <div className="space-y-0.5">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="font-bold text-sm text-[#2E3138]">
-                        {rest.name} ({rest.nameBn})
-                      </h3>
-                      <span
-                        className={`text-[11px] font-bold uppercase px-2 py-0.5 rounded ${
-                          rest.status === 'approved'
-                            ? 'bg-emerald-50 text-emerald-700'
-                            : rest.status === 'pending'
-                            ? 'bg-amber-50 text-amber-700'
-                            : 'bg-red-50 text-red-700'
-                        }`}
-                      >
-                        {rest.status}
-                      </span>
+                      {rest.logoUrl && (
+                        <img
+                          src={rest.logoUrl}
+                          alt={`${rest.name} logo`}
+                          className="w-6 h-6 rounded-lg object-cover border-2 border-white shadow-xs bg-white absolute -bottom-1 -right-1"
+                        />
+                      )}
                     </div>
-                    <p className="text-xs text-neutral-500">
-                      {rest.area} · {rest.cuisine} · Fee ৳{rest.deliveryFee} · Min ৳{rest.minOrder} · Mode:{' '}
-                      {rest.deliveryMode}
-                    </p>
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-bold text-sm text-[#2E3138]">
+                          {rest.name} ({rest.nameBn})
+                        </h3>
+                        <span
+                          className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
+                            isMine
+                              ? 'bg-[#FFF0F6] text-[#E21B70] border border-[#E21B70]/25'
+                              : 'bg-blue-50 text-blue-700 border border-blue-200'
+                          }`}
+                        >
+                          {isMine ? 'My Store' : 'Partner'}
+                        </span>
+                        <span
+                          className={`text-[11px] font-bold uppercase px-2 py-0.5 rounded ${
+                            rest.status === 'approved'
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : rest.status === 'pending'
+                              ? 'bg-amber-50 text-amber-700'
+                              : 'bg-red-50 text-red-700'
+                          }`}
+                        >
+                          {rest.status}
+                        </span>
+                      </div>
+                      <p className="text-xs text-neutral-500">
+                        {rest.area} · {rest.cuisine} · Fee ৳{rest.deliveryFee} · Min ৳{rest.minOrder} · Mode:{' '}
+                        {rest.deliveryMode}
+                      </p>
+                    </div>
                   </div>
-                </div>
 
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => openEditRestaurantModal(rest)}
-                    aria-label={`Edit restaurant ${rest.name}`}
-                    className="px-2.5 py-1 rounded border border-neutral-200 hover:border-[#E21B70] font-semibold inline-flex items-center gap-1"
-                  >
-                    <Pencil className="w-3 h-3" />
-                    <span>Edit</span>
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    {onOpenVendorStore && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenVendorStore(rest.id)}
+                        className="px-2.5 py-1 rounded border border-[#E21B70]/40 bg-[#FFF0F6] text-[#E21B70] hover:bg-[#FFE4EF] font-semibold inline-flex items-center gap-1"
+                      >
+                        <Store className="w-3 h-3" />
+                        <span>{lang === 'bn' ? 'মেনু ও API হাব' : 'Menu & API Hub'}</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => openEditRestaurantModal(rest)}
+                      aria-label={`Edit restaurant ${rest.name}`}
+                      className="px-2.5 py-1 rounded border border-neutral-200 hover:border-[#E21B70] font-semibold inline-flex items-center gap-1"
+                    >
+                      <Pencil className="w-3 h-3" />
+                      <span>Edit</span>
+                    </button>
 
                   <label className="inline-flex items-center gap-1 text-neutral-600">
                     <span>Comm %</span>
@@ -2334,7 +3026,8 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                   )}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       ) : tab === 'orders' ? (
@@ -3192,6 +3885,226 @@ export function AdminDashboard({ lang, currentUser, onRestaurantsMutated, onBack
                 className="px-5 py-2 rounded-xl bg-[#E21B70] text-white text-xs font-semibold disabled:opacity-50"
               >
                 {savingRestaurant ? 'Saving...' : 'Save Restaurant'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Payment Gateway API Configuration Modal (bKash / Nagad / SSLCommerz / Future Gateways) */}
+      {gatewayModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleSaveGatewayModal}
+            className="bg-white rounded-2xl border border-neutral-200 max-w-xl w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-base text-[#2E3138]">
+                  {gatewayModal.isNew
+                    ? lang === 'bn'
+                      ? 'নতুন পেমেন্ট গেটওয়ে API যোগ করুন'
+                      : 'Add Payment Gateway Integration'
+                    : lang === 'bn'
+                    ? `${gatewayModal.name} পেমেন্ট API সেটআপ`
+                    : `Configure ${gatewayModal.name} API`}
+                </h3>
+                <p className="text-[11px] text-neutral-500 mt-0.5">
+                  {lang === 'bn'
+                    ? 'সার্ভার-সাইডে সিক্রেট সংরক্ষিত থাকবে; কখনো ক্লায়েন্টে এক্সপোজ হবে না।'
+                    : 'Credentials are stored server-side only; masked previews keep existing secrets intact.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setGatewayModal(null)}
+                aria-label="Close gateway modal"
+                className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">
+                  Gateway Code (slug)
+                </label>
+                <input
+                  required
+                  disabled={!gatewayModal.isNew}
+                  value={gatewayModal.code}
+                  onChange={(e) => setGatewayModal({ ...gatewayModal, code: e.target.value })}
+                  placeholder="e.g. bkash, rocket, upay, shurjopay"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums disabled:bg-neutral-100"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">Provider Type</label>
+                <select
+                  value={gatewayModal.providerType}
+                  onChange={(e) =>
+                    setGatewayModal({
+                      ...gatewayModal,
+                      providerType: e.target.value as GatewayFormState['providerType'],
+                    })
+                  }
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
+                >
+                  <option value="mfs">Mobile Banking (MFS — bKash/Nagad/Rocket)</option>
+                  <option value="card">Card / SSL Gateway (SSLCommerz/Stripe)</option>
+                  <option value="wallet">Digital Wallet</option>
+                  <option value="cod">Cash on Delivery (COD)</option>
+                  <option value="custom">Custom REST Gateway</option>
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">Display Name (EN)</label>
+                <input
+                  required
+                  value={gatewayModal.name}
+                  onChange={(e) => setGatewayModal({ ...gatewayModal, name: e.target.value })}
+                  placeholder="e.g. bKash Checkout"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">নাম (বাংলা)</label>
+                <input
+                  value={gatewayModal.nameBn}
+                  onChange={(e) => setGatewayModal({ ...gatewayModal, nameBn: e.target.value })}
+                  placeholder="যেমন: বিকাশ পেমেন্ট"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">Environment Mode</label>
+                <select
+                  value={gatewayModal.mode}
+                  onChange={(e) =>
+                    setGatewayModal({
+                      ...gatewayModal,
+                      mode: e.target.value as 'sandbox' | 'live',
+                    })
+                  }
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
+                >
+                  <option value="sandbox">Sandbox / Test Mode</option>
+                  <option value="live">Live Production</option>
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">Checkout Order</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={gatewayModal.sortOrder}
+                  onChange={(e) => setGatewayModal({ ...gatewayModal, sortOrder: e.target.value })}
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg tabular-nums"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block font-semibold text-neutral-700 mb-1">API Base URL</label>
+                <input
+                  type="url"
+                  value={gatewayModal.apiBaseUrl}
+                  onChange={(e) =>
+                    setGatewayModal({ ...gatewayModal, apiBaseUrl: e.target.value })
+                  }
+                  placeholder="https://tokenized.pay.bka.sh/v1.2.0-beta"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">
+                  Merchant / Store ID
+                </label>
+                <input
+                  value={gatewayModal.merchantId}
+                  onChange={(e) =>
+                    setGatewayModal({ ...gatewayModal, merchantId: e.target.value })
+                  }
+                  placeholder="Merchant or Store ID"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">
+                  API Key / App Key
+                </label>
+                <input
+                  value={gatewayModal.apiKey}
+                  onChange={(e) => setGatewayModal({ ...gatewayModal, apiKey: e.target.value })}
+                  placeholder="Leave •••• unchanged or paste new key"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">
+                  API Secret / Password
+                </label>
+                <input
+                  value={gatewayModal.apiSecret}
+                  onChange={(e) => setGatewayModal({ ...gatewayModal, apiSecret: e.target.value })}
+                  placeholder="Leave •••• unchanged or paste secret"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">
+                  Webhook Signature Secret
+                </label>
+                <input
+                  value={gatewayModal.webhookSecret}
+                  onChange={(e) =>
+                    setGatewayModal({ ...gatewayModal, webhookSecret: e.target.value })
+                  }
+                  placeholder="Optional x-webhook-secret"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block font-semibold text-neutral-700 mb-1">
+                  Customer Checkout Note / Instructions
+                </label>
+                <input
+                  value={gatewayModal.instructions}
+                  onChange={(e) =>
+                    setGatewayModal({ ...gatewayModal, instructions: e.target.value })
+                  }
+                  placeholder="e.g. Pay instantly via bKash wallet or OTP verification"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                />
+              </div>
+            </div>
+
+            <label className="inline-flex items-center gap-2 text-xs font-semibold text-[#2E3138] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={gatewayModal.isActive}
+                onChange={(e) => setGatewayModal({ ...gatewayModal, isActive: e.target.checked })}
+              />
+              <span>
+                {lang === 'bn'
+                  ? 'কাস্টমার চেকআউটে চালু রাখুন (Active at Checkout)'
+                  : 'Enable at Customer Checkout (Active)'}
+              </span>
+            </label>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setGatewayModal(null)}
+                className="px-4 py-2 rounded-xl border border-neutral-200 text-xs font-semibold text-neutral-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={savingGateway}
+                className="px-5 py-2 rounded-xl bg-[#E21B70] text-white text-xs font-semibold disabled:opacity-50"
+              >
+                {savingGateway ? 'Saving...' : 'Save Gateway API'}
               </button>
             </div>
           </form>

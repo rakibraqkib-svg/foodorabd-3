@@ -1,5 +1,7 @@
 export type DeliveryMode = 'platform' | 'restaurant' | 'third_party';
-export type PaymentMethod = 'bkash' | 'nagad' | 'sslcommerz' | 'cod';
+export const BUILTIN_PAYMENT_METHODS = ['bkash', 'nagad', 'sslcommerz', 'cod'] as const;
+export type BuiltinPaymentMethod = (typeof BUILTIN_PAYMENT_METHODS)[number];
+export type PaymentMethod = string;
 export type OrderStatus =
   | 'confirmed'
   | 'accepted'
@@ -752,5 +754,260 @@ export function normalizePartnerProductInput(
     },
   };
 }
+
+export type PaymentProviderType = 'mfs' | 'card' | 'wallet' | 'cod' | 'custom';
+export type PaymentGatewayMode = 'sandbox' | 'live';
+
+export interface PaymentGatewayRowLike {
+  code: string;
+  name: string;
+  nameBn: string;
+  providerType: string;
+  mode: string;
+  isActive: boolean;
+  apiBaseUrl?: string | null;
+  merchantId?: string | null;
+  apiKey?: string | null;
+  apiSecret?: string | null;
+  webhookSecret?: string | null;
+  instructions?: string | null;
+  sortOrder?: number | null;
+}
+
+export const DEFAULT_PAYMENT_GATEWAYS: Array<{
+  code: string;
+  name: string;
+  nameBn: string;
+  providerType: PaymentProviderType;
+  mode: PaymentGatewayMode;
+  isActive: boolean;
+  apiBaseUrl: string;
+  instructions: string;
+  sortOrder: number;
+}> = [
+  {
+    code: 'bkash',
+    name: 'bKash',
+    nameBn: 'বিকাশ',
+    providerType: 'mfs',
+    mode: 'sandbox',
+    isActive: true,
+    apiBaseUrl: 'https://tokenized.sandbox.bka.sh/v1.2.0-beta',
+    instructions: 'Pay securely via bKash tokenized checkout.',
+    sortOrder: 1,
+  },
+  {
+    code: 'nagad',
+    name: 'Nagad',
+    nameBn: 'নগদ',
+    providerType: 'mfs',
+    mode: 'sandbox',
+    isActive: true,
+    apiBaseUrl: 'https://api.mynagad.com/api/dfs',
+    instructions: 'Fast MFS checkout with Nagad merchant wallet.',
+    sortOrder: 2,
+  },
+  {
+    code: 'sslcommerz',
+    name: 'SSLCommerz / Card',
+    nameBn: 'এসএসএলকমার্জ / কার্ড',
+    providerType: 'card',
+    mode: 'sandbox',
+    isActive: true,
+    apiBaseUrl: 'https://sandbox.sslcommerz.com',
+    instructions: 'Visa, Mastercard, AMEX & Net Banking.',
+    sortOrder: 3,
+  },
+  {
+    code: 'cod',
+    name: 'Cash on Delivery',
+    nameBn: 'ক্যাশ অন ডেলিভারি',
+    providerType: 'cod',
+    mode: 'live',
+    isActive: true,
+    apiBaseUrl: '',
+    instructions: 'Pay in cash to the rider at delivery.',
+    sortOrder: 4,
+  },
+];
+
+export function normalizeGatewayCode(input: string): string {
+  return String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 32);
+}
+
+export function maskSecretValue(secret: string | null | undefined): string {
+  const clean = typeof secret === 'string' ? secret.trim() : '';
+  if (!clean) return '';
+  if (clean.length <= 4) return '••••';
+  return `••••${clean.slice(-4)}`;
+}
+
+export function isGatewayCredentialsConfigured(
+  row: Pick<PaymentGatewayRowLike, 'code' | 'merchantId' | 'apiKey' | 'apiSecret'>,
+  envConfigured = false
+): boolean {
+  if (normalizeGatewayCode(row.code) === 'cod') return true;
+  const hasDbCreds = Boolean(
+    (row.apiKey && row.apiKey.trim()) ||
+      (row.apiSecret && row.apiSecret.trim()) ||
+      (row.merchantId && row.merchantId.trim())
+  );
+  return hasDbCreds || envConfigured;
+}
+
+export function buildGatewayWebhookUrl(origin: string, code: string): string {
+  const cleanOrigin = origin.replace(/\/+$/, '');
+  const cleanCode = normalizeGatewayCode(code) || 'custom';
+  return `${cleanOrigin}/api/payments/webhook/${cleanCode}`;
+}
+
+export function toPublicPaymentGatewayView(
+  row: PaymentGatewayRowLike,
+  envConfigured = false
+) {
+  const providerType = (['mfs', 'card', 'wallet', 'cod', 'custom'].includes(row.providerType)
+    ? row.providerType
+    : 'custom') as PaymentProviderType;
+  const mode = (row.mode === 'live' ? 'live' : 'sandbox') as PaymentGatewayMode;
+  return {
+    code: normalizeGatewayCode(row.code),
+    name: row.name,
+    nameBn: row.nameBn || row.name,
+    providerType,
+    mode,
+    isActive: Boolean(row.isActive),
+    instructions: row.instructions || '',
+    sortOrder: Number(row.sortOrder ?? 10),
+    isConfigured: isGatewayCredentialsConfigured(row, envConfigured),
+  };
+}
+
+export function toAdminPaymentGatewayView(
+  row: PaymentGatewayRowLike,
+  origin: string,
+  envConfigured = false
+) {
+  const pub = toPublicPaymentGatewayView(row, envConfigured);
+  const apiKey = typeof row.apiKey === 'string' ? row.apiKey.trim() : '';
+  const apiSecret = typeof row.apiSecret === 'string' ? row.apiSecret.trim() : '';
+  const webhookSecret = typeof row.webhookSecret === 'string' ? row.webhookSecret.trim() : '';
+  return {
+    ...pub,
+    apiBaseUrl: row.apiBaseUrl || '',
+    merchantId: row.merchantId || '',
+    hasApiKey: apiKey.length > 0,
+    hasApiSecret: apiSecret.length > 0,
+    hasWebhookSecret: webhookSecret.length > 0,
+    apiKeyPreview: maskSecretValue(apiKey),
+    apiSecretPreview: maskSecretValue(apiSecret),
+    webhookSecretPreview: maskSecretValue(webhookSecret),
+    webhookUrl: buildGatewayWebhookUrl(origin, pub.code),
+  };
+}
+
+export function isGatewaySelectableAtCheckout(gateway: { isActive: boolean }): boolean {
+  return Boolean(gateway.isActive);
+}
+
+export function isOwnerRestaurant(
+  restaurantOwnerUid: string | null | undefined,
+  actorUid: string | null | undefined
+): boolean {
+  if (!restaurantOwnerUid || !actorUid) return false;
+  return restaurantOwnerUid.trim() === actorUid.trim();
+}
+
+export function partitionOwnedVsPartnerRestaurants<T extends { id: number; ownerUid: string }>(
+  restaurants: T[],
+  actorUid: string
+): { own: T[]; partners: T[]; ordered: T[] } {
+  const own: T[] = [];
+  const partners: T[] = [];
+  for (const r of restaurants) {
+    if (isOwnerRestaurant(r.ownerUid, actorUid)) {
+      own.push(r);
+    } else {
+      partners.push(r);
+    }
+  }
+  return {
+    own,
+    partners,
+    ordered: [...own, ...partners],
+  };
+}
+
+export function escapeXml(input: string): string {
+  return String(input || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+export function buildRobotsTxt(origin: string): string {
+  const cleanOrigin = origin.replace(/\/+$/, '');
+  return [
+    'User-agent: *',
+    'Allow: /',
+    'Disallow: /api/admin/',
+    'Disallow: /api/vendor/',
+    'Disallow: /api/auth/',
+    `Sitemap: ${cleanOrigin}/sitemap.xml`,
+    '',
+  ].join('\n');
+}
+
+export function buildSitemapXml(
+  origin: string,
+  restaurants: Array<{ slug: string; updatedAt?: string | Date | null }>
+): string {
+  const cleanOrigin = origin.replace(/\/+$/, '');
+  const today = new Date().toISOString().slice(0, 10);
+  const urls: Array<{ loc: string; lastmod: string; changefreq: string; priority: string }> = [
+    {
+      loc: `${cleanOrigin}/`,
+      lastmod: today,
+      changefreq: 'daily',
+      priority: '1.0',
+    },
+  ];
+
+  const seenSlugs = new Set<string>();
+  for (const r of restaurants) {
+    const slug = String(r.slug || '').trim();
+    if (!slug || seenSlugs.has(slug)) continue;
+    seenSlugs.add(slug);
+    let lastmod = today;
+    if (r.updatedAt) {
+      const d = new Date(r.updatedAt);
+      if (!Number.isNaN(d.getTime())) {
+        lastmod = d.toISOString().slice(0, 10);
+      }
+    }
+    urls.push({
+      loc: `${cleanOrigin}/?restaurant=${encodeURIComponent(slug)}`,
+      lastmod,
+      changefreq: 'daily',
+      priority: '0.8',
+    });
+  }
+
+  const urlNodes = urls
+    .map(
+      (u) =>
+        `  <url>\n    <loc>${escapeXml(u.loc)}</loc>\n    <lastmod>${escapeXml(u.lastmod)}</lastmod>\n    <changefreq>${u.changefreq}</changefreq>\n    <priority>${u.priority}</priority>\n  </url>`
+    )
+    .join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urlNodes}\n</urlset>\n`;
+}
+
 
 

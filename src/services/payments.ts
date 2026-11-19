@@ -1,5 +1,10 @@
 import crypto from 'node:crypto';
-import { PaymentMethod } from '../lib/marketplace-logic.ts';
+import {
+  isGatewayCredentialsConfigured,
+  normalizeGatewayCode,
+  type PaymentGatewayRowLike,
+  type PaymentMethod,
+} from '../lib/marketplace-logic.ts';
 
 export interface PaymentInitResult {
   gateway: PaymentMethod;
@@ -38,13 +43,21 @@ export function getGatewayAvailability() {
   };
 }
 
+export function isEnvConfiguredForGateway(code: string): boolean {
+  const clean = normalizeGatewayCode(code);
+  const avail = getGatewayAvailability() as Record<string, { configured: boolean; sandbox: boolean }>;
+  return Boolean(avail[clean]?.configured);
+}
+
 export function initiatePaymentSession(
   method: PaymentMethod,
   orderNumber: string,
-  amountBdt: number
+  amountBdt: number,
+  gatewayRow?: PaymentGatewayRowLike | null
 ): PaymentInitResult {
+  const cleanCode = normalizeGatewayCode(method) || 'cod';
   const rand = crypto.randomBytes(4).toString('hex').toUpperCase();
-  if (method === 'cod') {
+  if (cleanCode === 'cod') {
     return {
       gateway: 'cod',
       transactionId: `COD-${orderNumber}`,
@@ -54,35 +67,52 @@ export function initiatePaymentSession(
     };
   }
 
-  const avail = getGatewayAvailability()[method];
-  const prefix = method === 'bkash' ? 'BKS' : method === 'nagad' ? 'NGD' : 'SSL';
+  const envConfigured = isEnvConfiguredForGateway(cleanCode);
+  const dbConfigured = gatewayRow
+    ? isGatewayCredentialsConfigured(gatewayRow, envConfigured)
+    : envConfigured;
+  const isLiveMode = gatewayRow ? gatewayRow.mode === 'live' && dbConfigured : false;
+  const displayName = gatewayRow?.name || cleanCode.toUpperCase();
+  const prefix =
+    cleanCode === 'bkash'
+      ? 'BKS'
+      : cleanCode === 'nagad'
+      ? 'NGD'
+      : cleanCode === 'sslcommerz'
+      ? 'SSL'
+      : cleanCode.slice(0, 3).toUpperCase().padEnd(3, 'X');
+
   return {
-    gateway: method,
+    gateway: cleanCode,
     transactionId: `${prefix}-${rand}-${orderNumber.slice(-4)}`,
     status: 'pending',
-    isSandbox: !avail.configured || avail.sandbox,
-    gatewayMessage: avail.configured
-      ? `${method.toUpperCase()} payment session initialized`
-      : `${method.toUpperCase()} Sandbox session initialized (configure live keys in server env for production)`,
+    isSandbox: !isLiveMode,
+    gatewayMessage: isLiveMode
+      ? `${displayName} live payment session initialized`
+      : `${displayName} sandbox session initialized${
+          dbConfigured ? '' : ' (add API keys in Admin → Payment Integrations for live production)'
+        }`,
   };
 }
 
 export function verifyPaymentServerSide(
   method: PaymentMethod,
   transactionId: string,
-  expectedAmountBdt: number
+  expectedAmountBdt: number,
+  gatewayRow?: PaymentGatewayRowLike | null
 ): PaymentVerificationResult {
+  const cleanCode = normalizeGatewayCode(method) || 'cod';
   if (!transactionId || expectedAmountBdt <= 0) {
     return {
       verified: false,
       transactionId,
-      gateway: method,
+      gateway: cleanCode,
       isSandbox: true,
       message: 'Invalid transaction ID or order amount',
     };
   }
 
-  if (method === 'cod') {
+  if (cleanCode === 'cod') {
     return {
       verified: true,
       transactionId,
@@ -92,14 +122,68 @@ export function verifyPaymentServerSide(
     };
   }
 
-  const avail = getGatewayAvailability()[method];
+  const envConfigured = isEnvConfiguredForGateway(cleanCode);
+  const dbConfigured = gatewayRow
+    ? isGatewayCredentialsConfigured(gatewayRow, envConfigured)
+    : envConfigured;
+  const isLiveMode = gatewayRow ? gatewayRow.mode === 'live' && dbConfigured : false;
+  const displayName = gatewayRow?.name || cleanCode.toUpperCase();
+
   return {
     verified: true,
     transactionId,
-    gateway: method,
-    isSandbox: !avail.configured || avail.sandbox,
-    message: avail.configured
-      ? `Server-verified ${method.toUpperCase()} transaction ${transactionId}`
-      : `Sandbox-verified ${method.toUpperCase()} transaction ${transactionId}`,
+    gateway: cleanCode,
+    isSandbox: !isLiveMode,
+    message: isLiveMode
+      ? `Server-verified ${displayName} transaction ${transactionId}`
+      : `Sandbox-verified ${displayName} transaction ${transactionId}`,
+  };
+}
+
+export function validatePaymentGatewayConfiguration(
+  row: PaymentGatewayRowLike,
+  envConfigured = false
+): { ok: boolean; configured: boolean; mode: 'sandbox' | 'live'; message: string } {
+  const code = normalizeGatewayCode(row.code);
+  const mode = row.mode === 'live' ? 'live' : 'sandbox';
+  if (code === 'cod') {
+    return {
+      ok: true,
+      configured: true,
+      mode: 'live',
+      message: 'Cash on Delivery requires no external API keys and is ready for checkout.',
+    };
+  }
+  const configured = isGatewayCredentialsConfigured(row, envConfigured);
+  const hasValidBaseUrl =
+    !row.apiBaseUrl ||
+    row.apiBaseUrl.trim() === '' ||
+    /^https?:\/\/.+/i.test(row.apiBaseUrl.trim());
+
+  if (!hasValidBaseUrl) {
+    return {
+      ok: false,
+      configured,
+      mode,
+      message: 'API Base URL must start with http:// or https://',
+    };
+  }
+
+  if (mode === 'live' && !configured) {
+    return {
+      ok: false,
+      configured: false,
+      mode,
+      message: `${row.name} is set to LIVE mode but Merchant ID / API Key / Secret is missing.`,
+    };
+  }
+
+  return {
+    ok: true,
+    configured,
+    mode,
+    message: configured
+      ? `${row.name} (${mode.toUpperCase()}) credentials and endpoint validated cleanly.`
+      : `${row.name} is active in SANDBOX mode (ready for test checkout; add API keys anytime for live payments).`,
   };
 }

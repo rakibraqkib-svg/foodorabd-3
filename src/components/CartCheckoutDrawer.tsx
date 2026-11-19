@@ -7,13 +7,16 @@ import {
   calculateOrderFinancials,
   type CartItemInput,
   convertBdtToCurrency,
+  DEFAULT_PAYMENT_GATEWAYS,
   type DeliveryMode,
   formatBdt,
+  isGatewaySelectableAtCheckout,
   type PaymentMethod,
+  toPublicPaymentGatewayView,
 } from '../lib/marketplace-logic';
 import { DHAKA_AREAS } from '../lib/i18n';
 import { DhakaMapPicker } from './DhakaMapPicker';
-import type { Lang, Restaurant } from '../types/marketplace';
+import type { Lang, PublicPaymentGateway, Restaurant } from '../types/marketplace';
 
 interface CartCheckoutDrawerProps {
   open: boolean;
@@ -22,6 +25,7 @@ interface CartCheckoutDrawerProps {
   restaurant: Restaurant | null;
   lang: Lang;
   mapsApiKey: string;
+  paymentGateways?: PublicPaymentGateway[];
   selectedArea: { name: string; lat: number; lng: number };
   customerName: string;
   onUpdateQty: (idx: number, delta: number) => void;
@@ -37,6 +41,7 @@ export function CartCheckoutDrawer({
   restaurant,
   lang,
   mapsApiKey,
+  paymentGateways,
   selectedArea,
   customerName,
   onUpdateQty,
@@ -44,6 +49,17 @@ export function CartCheckoutDrawer({
   onClearCart,
   onOrderCreated,
 }: CartCheckoutDrawerProps) {
+  const activeGateways = React.useMemo(() => {
+    const source =
+      paymentGateways && paymentGateways.length > 0
+        ? paymentGateways
+        : DEFAULT_PAYMENT_GATEWAYS.map((g) => toPublicPaymentGatewayView(g, false));
+    const filtered = source.filter(isGatewaySelectableAtCheckout);
+    return filtered.length > 0
+      ? filtered
+      : DEFAULT_PAYMENT_GATEWAYS.map((g) => toPublicPaymentGatewayView(g, false));
+  }, [paymentGateways]);
+
   const [step, setStep] = useState<'cart' | 'checkout'>('cart');
   const [couponInput, setCouponInput] = useState('');
   const [appliedCoupon, setAppliedCoupon] = useState<{
@@ -60,7 +76,7 @@ export function CartCheckoutDrawer({
   const [coords, setCoords] = useState({ lat: selectedArea.lat, lng: selectedArea.lng });
   const [instructions, setInstructions] = useState('');
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>(restaurant?.deliveryMode || 'platform');
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('bkash');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(() => activeGateways[0]?.code || 'bkash');
   const [quoteFee, setQuoteFee] = useState<number>(restaurant?.deliveryFee ?? 49);
   const [quoteEta, setQuoteEta] = useState<number>(restaurant?.deliveryTimeMin ?? 25);
   const [quoteDistanceKm, setQuoteDistanceKm] = useState<number | null>(null);
@@ -68,6 +84,12 @@ export function CartCheckoutDrawer({
   const [usdRate, setUsdRate] = useState<number>(0.00833);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!activeGateways.some((g) => g.code === paymentMethod)) {
+      setPaymentMethod(activeGateways[0]?.code || 'cod');
+    }
+  }, [activeGateways, paymentMethod]);
 
   useEffect(() => {
     setArea(selectedArea.name);
@@ -560,27 +582,44 @@ export function CartCheckoutDrawer({
                   {lang === 'bn' ? 'পেমেন্ট পদ্ধতি' : 'Payment Method'}
                 </label>
                 <div className="grid grid-cols-2 gap-2">
-                  {[
-                    { id: 'bkash' as const, label: 'bKash (বিকাশ)' },
-                    { id: 'nagad' as const, label: 'Nagad (নগদ)' },
-                    { id: 'sslcommerz' as const, label: 'SSLCommerz / Card' },
-                    { id: 'cod' as const, label: 'Cash on Delivery' },
-                  ].map((pm) => (
-                    <button
-                      key={pm.id}
-                      type="button"
-                      onClick={() => setPaymentMethod(pm.id)}
-                      className={`px-3 py-2.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
-                        paymentMethod === pm.id
-                          ? 'border-[#E21B70] bg-[#FFF0F6] text-[#E21B70]'
-                          : 'border-neutral-200 text-neutral-700'
-                      }`}
-                    >
-                      <CreditCard className="w-3.5 h-3.5 shrink-0" />
-                      <span className="truncate">{pm.label}</span>
-                    </button>
-                  ))}
+                  {activeGateways.map((pm) => {
+                    const selected = paymentMethod === pm.code;
+                    return (
+                      <button
+                        key={pm.code}
+                        type="button"
+                        onClick={() => setPaymentMethod(pm.code)}
+                        className={`px-3 py-2.5 rounded-xl border text-xs font-semibold flex items-center justify-between gap-1.5 text-left ${
+                          selected
+                            ? 'border-[#E21B70] bg-[#FFF0F6] text-[#E21B70]'
+                            : 'border-neutral-200 text-neutral-700 hover:border-neutral-300'
+                        }`}
+                      >
+                        <span className="inline-flex items-center gap-1.5 min-w-0">
+                          <CreditCard className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">{lang === 'bn' ? pm.nameBn : pm.name}</span>
+                        </span>
+                        {pm.code !== 'cod' && (
+                          <span
+                            className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded shrink-0 ${
+                              pm.mode === 'live' && pm.isConfigured
+                                ? 'bg-emerald-50 text-emerald-700'
+                                : 'bg-neutral-100 text-neutral-500'
+                            }`}
+                          >
+                            {pm.mode === 'live' && pm.isConfigured ? 'Live' : 'Test'}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
+                {(() => {
+                  const chosen = activeGateways.find((g) => g.code === paymentMethod);
+                  return chosen?.instructions ? (
+                    <p className="text-[11px] text-neutral-500 mt-1.5">{chosen.instructions}</p>
+                  ) : null;
+                })()}
               </div>
 
               <div>

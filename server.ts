@@ -19,6 +19,7 @@ import {
   orders,
   orderStatusHistory,
   partnerApiKeys,
+  paymentGateways,
   platformSettings,
   restaurantPayouts,
   restaurants,
@@ -29,6 +30,7 @@ import {
 import { ensureSchemaTables } from './src/db/ensure-schema.ts';
 import { ensureDatabaseSeeded, IMG_BANGLA } from './src/db/seed.ts';
 import {
+  ensureDefaultPaymentGateways,
   getActiveCoupons,
   getAdminWorkspace,
   getApprovedRestaurants,
@@ -56,6 +58,8 @@ import {
 import { supabaseServer } from './src/lib/supabase-admin.ts';
 import {
   ADMIN_PIN_DEFAULT_EMAIL,
+  buildRobotsTxt,
+  buildSitemapXml,
   calculateCartItemUnitPrice,
   calculateOrderFinancials,
   canActorModifyUserAccount,
@@ -64,9 +68,12 @@ import {
   estimateDeliveryFeeAndEta,
   evaluateCoupon,
   isProtectedSuperAdminEmail,
+  normalizeGatewayCode,
   normalizePartnerProductInput,
   OrderStatus,
   PaymentMethod,
+  toAdminPaymentGatewayView,
+  toPublicPaymentGatewayView,
   validateBroadcastNotification,
 } from './src/lib/marketplace-logic.ts';
 import { getDeliveryProvider } from './src/services/delivery.ts';
@@ -81,6 +88,8 @@ import {
 import {
   getGatewayAvailability,
   initiatePaymentSession,
+  isEnvConfiguredForGateway,
+  validatePaymentGatewayConfiguration,
   verifyPaymentServerSide,
 } from './src/services/payments.ts';
 
@@ -155,6 +164,41 @@ async function settleOrderCommissionIdempotent(orderId: number) {
   });
 }
 
+function getRequestOrigin(req: express.Request): string {
+  const protoHeader = String(req.headers['x-forwarded-proto'] || req.protocol || 'http')
+    .split(',')[0]
+    .trim();
+  const hostHeader = String(req.headers['x-forwarded-host'] || req.get('host') || 'localhost:3000')
+    .split(',')[0]
+    .trim();
+  return `${protoHeader || 'http'}://${hostHeader || 'localhost:3000'}`;
+}
+
+app.get('/robots.txt', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.send(buildRobotsTxt(getRequestOrigin(req)));
+});
+
+app.get('/sitemap.xml', async (req, res) => {
+  try {
+    if (hasDatabaseConfig()) {
+      await ensureDatabaseSeeded();
+    }
+    const approved = hasDatabaseConfig() ? await getApprovedRestaurants() : [];
+    const xml = buildSitemapXml(
+      getRequestOrigin(req),
+      approved.map((r) => ({ slug: r.slug, updatedAt: r.updatedAt }))
+    );
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=900');
+    res.send(xml);
+  } catch {
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.send(buildSitemapXml(getRequestOrigin(req), []));
+  }
+});
+
 // ---------- Public & Health Routes ----------
 
 app.get('/api/health', async (_req, res) => {
@@ -168,10 +212,17 @@ app.get('/api/health', async (_req, res) => {
 
 app.get('/api/public-config', async (_req, res) => {
   try {
-    const settings = await getPlatformSettingsRow();
+    const [settings, gatewayRows] = await Promise.all([
+      getPlatformSettingsRow(),
+      ensureDefaultPaymentGateways(),
+    ]);
+    const paymentGatewaysList = gatewayRows.map((row) =>
+      toPublicPaymentGatewayView(row, isEnvConfiguredForGateway(row.code))
+    );
     res.json({
       mapsApiKey: process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '',
       gateways: getGatewayAvailability(),
+      paymentGateways: paymentGatewaysList,
       settings,
     });
   } catch (error: any) {
@@ -1264,7 +1315,7 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
     deliveryLng: z.number(),
     deliveryInstructions: z.string().optional(),
     deliveryMode: z.enum(['platform', 'restaurant', 'third_party']),
-    paymentMethod: z.enum(['bkash', 'nagad', 'sslcommerz', 'cod']),
+    paymentMethod: z.string().min(2).max(32),
     couponCode: z.string().optional(),
     items: z
       .array(
@@ -1285,8 +1336,19 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
   }
 
   const input = parsed.data;
+  const normalizedMethod = normalizeGatewayCode(input.paymentMethod);
 
   try {
+    const gatewayRows = await ensureDefaultPaymentGateways();
+    const matchedGateway = gatewayRows.find(
+      (g) => normalizeGatewayCode(g.code) === normalizedMethod && g.isActive
+    );
+    if (!matchedGateway) {
+      return res.status(400).json({
+        error: `Selected payment method "${input.paymentMethod}" is currently inactive or unsupported.`,
+      });
+    }
+
     const created = await db.transaction(async (tx) => {
       // 1. Load authoritative restaurant record
       const restRows = await tx
@@ -1438,9 +1500,10 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
 
       const orderNumber = `FD-BD-${Math.floor(10000 + Math.random() * 89999)}`;
       const paymentInit = initiatePaymentSession(
-        input.paymentMethod as PaymentMethod,
+        normalizedMethod as PaymentMethod,
         orderNumber,
-        financials.totalPayable
+        financials.totalPayable,
+        matchedGateway
       );
       const deliveryDispatch = await provider.createDelivery({
         orderNumber,
@@ -1475,8 +1538,8 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
           deliveryMode: input.deliveryMode,
           deliveryProvider: deliveryDispatch.provider,
           consignmentId: deliveryDispatch.consignmentId,
-          paymentMethod: input.paymentMethod,
-          paymentStatus: input.paymentMethod === 'cod' ? 'pending' : 'pending',
+          paymentMethod: normalizedMethod,
+          paymentStatus: 'pending',
           paymentTxId: paymentInit.transactionId,
           subtotal: financials.subtotal,
           discountAmount: financials.discountAmount,
@@ -1554,10 +1617,15 @@ app.post('/api/payments/verify', requireAuth, async (req: AuthRequest, res) => {
       return res.json({ verified: true, order, message: 'Payment already verified' });
     }
 
+    const gatewayRows = await ensureDefaultPaymentGateways();
+    const matchedGateway = gatewayRows.find(
+      (g) => normalizeGatewayCode(g.code) === normalizeGatewayCode(order.paymentMethod)
+    );
     const verification = verifyPaymentServerSide(
       order.paymentMethod as PaymentMethod,
       parsed.data.transactionId,
-      order.totalAmount
+      order.totalAmount,
+      matchedGateway
     );
 
     if (!verification.verified) {
@@ -1584,6 +1652,71 @@ app.post('/api/payments/verify', requireAuth, async (req: AuthRequest, res) => {
     res.json({ verified: true, order: updated[0], message: verification.message });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Payment verification failed' });
+  }
+});
+
+// Extensible Payment Gateway Webhook Callback (bKash, Nagad, SSLCommerz, Rocket, Upay, Stripe, Custom)
+app.post('/api/payments/webhook/:code', async (req, res) => {
+  const code = normalizeGatewayCode(String(req.params.code || ''));
+  if (!code) return res.status(400).json({ error: 'Invalid gateway code' });
+
+  try {
+    const gwRows = await db
+      .select()
+      .from(paymentGateways)
+      .where(eq(paymentGateways.code, code))
+      .limit(1);
+    const gateway = gwRows[0];
+    if (!gateway) return res.status(404).json({ error: `Payment gateway "${code}" not registered` });
+
+    const expectedSecret = String(gateway.webhookSecret || '').trim();
+    if (expectedSecret) {
+      const providedSecret = String(
+        req.header('x-webhook-secret') || req.body?.webhookSecret || ''
+      ).trim();
+      if (providedSecret !== expectedSecret) {
+        return res.status(401).json({ error: 'Invalid payment webhook secret' });
+      }
+    }
+
+    const orderNumber = typeof req.body?.orderNumber === 'string' ? req.body.orderNumber.trim() : '';
+    const txId = typeof req.body?.transactionId === 'string' ? req.body.transactionId.trim() : '';
+    const statusRaw = typeof req.body?.status === 'string' ? req.body.status.trim().toLowerCase() : 'paid';
+    const nextPaymentStatus = statusRaw === 'failed' ? 'failed' : 'paid';
+
+    if (!orderNumber && !txId) {
+      return res.status(400).json({ error: 'orderNumber or transactionId is required' });
+    }
+
+    const matchingOrders = orderNumber
+      ? await db.select().from(orders).where(eq(orders.orderNumber, orderNumber)).limit(1)
+      : await db.select().from(orders).where(eq(orders.paymentTxId, txId)).limit(1);
+
+    if (matchingOrders.length === 0) {
+      return res.status(404).json({ error: 'Matching order not found' });
+    }
+    const targetOrder = matchingOrders[0];
+
+    const updated = await db
+      .update(orders)
+      .set({
+        paymentStatus: nextPaymentStatus,
+        paymentTxId: txId || targetOrder.paymentTxId,
+        updatedAt: new Date(),
+      })
+      .where(eq(orders.id, targetOrder.id))
+      .returning();
+
+    await db.insert(orderStatusHistory).values({
+      orderId: targetOrder.id,
+      status: targetOrder.status,
+      note: `Webhook (${gateway.name}) marked payment as ${nextPaymentStatus}`,
+      actorUid: `webhook:${code}`,
+    });
+
+    res.json({ ok: true, order: updated[0] });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Webhook processing failed' });
   }
 });
 
@@ -1672,6 +1805,8 @@ app.post('/api/restaurants/register', requireAuth, async (req: AuthRequest, res)
       .replace(/(^-|-$)/g, '');
     const slug = `${slugBase}-${Date.now().toString(36).slice(-4)}`;
 
+    const isOwnerAdmin = req.user!.role === 'admin' || req.user!.role === 'super_admin';
+
     const inserted = await db
       .insert(restaurants)
       .values({
@@ -1697,7 +1832,7 @@ app.post('/api/restaurants/register', requireAuth, async (req: AuthRequest, res)
         minOrder: parsed.data.minOrder,
         deliveryMode: parsed.data.deliveryMode,
         isNew: true,
-        status: 'pending',
+        status: isOwnerAdmin ? 'approved' : 'pending',
       })
       .returning();
 
@@ -1711,8 +1846,10 @@ app.post('/api/restaurants/register', requireAuth, async (req: AuthRequest, res)
     await db.insert(notifications).values({
       recipientUid: 'demo-admin-uid',
       roleTarget: 'super_admin',
-      title: 'New Restaurant Application',
-      message: `${parsed.data.name} (${parsed.data.area}) submitted documents for approval.`,
+      title: isOwnerAdmin ? 'Owner Store Launched' : 'New Restaurant Application',
+      message: isOwnerAdmin
+        ? `${parsed.data.name} (${parsed.data.area}) launched directly by Platform Owner.`
+        : `${parsed.data.name} (${parsed.data.area}) submitted documents for approval.`,
       type: 'approval',
     });
 
@@ -1730,7 +1867,10 @@ app.get(
   async (req: AuthRequest, res) => {
     try {
       const isSuperAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
-      const data = await getVendorWorkspace(req.user!.uid, isSuperAdmin);
+      const requestedRaw = Number(req.query.restaurantId);
+      const requestedRestaurantId =
+        Number.isInteger(requestedRaw) && requestedRaw > 0 ? requestedRaw : null;
+      const data = await getVendorWorkspace(req.user!.uid, isSuperAdmin, requestedRestaurantId);
       res.json(data);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1947,11 +2087,18 @@ app.get(
     try {
       const requestedId = Number(req.query.restaurantId);
       const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
-      const restRows = Number.isInteger(requestedId) && requestedId > 0
-        ? await db.select().from(restaurants).where(eq(restaurants.id, requestedId)).limit(1)
-        : isAdmin
-        ? await db.select().from(restaurants).limit(1)
-        : await db.select().from(restaurants).where(eq(restaurants.ownerUid, req.user!.uid)).limit(1);
+      let restRows =
+        Number.isInteger(requestedId) && requestedId > 0
+          ? await db.select().from(restaurants).where(eq(restaurants.id, requestedId)).limit(1)
+          : await db
+              .select()
+              .from(restaurants)
+              .where(eq(restaurants.ownerUid, req.user!.uid))
+              .limit(1);
+
+      if (restRows.length === 0 && isAdmin && !(Number.isInteger(requestedId) && requestedId > 0)) {
+        restRows = await db.select().from(restaurants).limit(1);
+      }
 
       if (restRows.length === 0) {
         return res.json({ hasKey: false, restaurantId: null, keyPrefix: null, label: null, lastUsedAt: null });
@@ -3547,6 +3694,202 @@ app.patch(
       res.json({ rider: updated[0] });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// ---------- Super Admin Extensible Payment Gateway Integrations (bKash, Nagad, SSLCommerz & Future Gateways) ----------
+
+app.get(
+  '/api/admin/payment-gateways',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    try {
+      const origin = getRequestOrigin(req);
+      const rows = await ensureDefaultPaymentGateways();
+      res.json({
+        paymentGateways: rows.map((r) =>
+          toAdminPaymentGatewayView(r, origin, isEnvConfiguredForGateway(r.code))
+        ),
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to load payment gateways' });
+    }
+  }
+);
+
+app.put(
+  '/api/admin/payment-gateways',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      code: z.string().min(2).max(32),
+      name: z.string().min(2).max(60),
+      nameBn: z.string().min(1).max(60).optional(),
+      providerType: z.enum(['mfs', 'card', 'wallet', 'cod', 'custom']).default('mfs'),
+      mode: z.enum(['sandbox', 'live']).default('sandbox'),
+      isActive: z.boolean().default(true),
+      apiBaseUrl: z.string().max(240).optional().default(''),
+      merchantId: z.string().max(120).optional().default(''),
+      apiKey: z.string().max(240).optional(),
+      apiSecret: z.string().max(240).optional(),
+      webhookSecret: z.string().max(240).optional(),
+      instructions: z.string().max(300).optional().default(''),
+      sortOrder: z.number().int().min(1).max(100).optional().default(10),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid payment gateway configuration payload' });
+    }
+
+    const code = normalizeGatewayCode(parsed.data.code);
+    if (code.length < 2) {
+      return res.status(400).json({ error: 'Gateway code must contain at least 2 alphanumeric characters' });
+    }
+
+    try {
+      await ensureDefaultPaymentGateways();
+      const existing = await db
+        .select()
+        .from(paymentGateways)
+        .where(eq(paymentGateways.code, code))
+        .limit(1);
+
+      const keepOrReplaceSecret = (incoming: string | undefined, prev: string | null | undefined) => {
+        if (incoming === undefined) return prev || '';
+        const clean = incoming.trim();
+        if (!clean || clean.startsWith('••••')) return prev || '';
+        return clean;
+      };
+
+      const cur = existing[0];
+      const nextValues = {
+        code,
+        name: parsed.data.name.trim(),
+        nameBn: parsed.data.nameBn?.trim() || parsed.data.name.trim(),
+        providerType: parsed.data.providerType,
+        mode: code === 'cod' ? 'live' : parsed.data.mode,
+        isActive: parsed.data.isActive,
+        apiBaseUrl: parsed.data.apiBaseUrl.trim(),
+        merchantId: parsed.data.merchantId.trim(),
+        apiKey: keepOrReplaceSecret(parsed.data.apiKey, cur?.apiKey),
+        apiSecret: keepOrReplaceSecret(parsed.data.apiSecret, cur?.apiSecret),
+        webhookSecret: keepOrReplaceSecret(parsed.data.webhookSecret, cur?.webhookSecret),
+        instructions: parsed.data.instructions.trim(),
+        sortOrder: parsed.data.sortOrder,
+        updatedAt: new Date(),
+      };
+
+      const saved = await db
+        .insert(paymentGateways)
+        .values(nextValues)
+        .onConflictDoUpdate({
+          target: paymentGateways.code,
+          set: nextValues,
+        })
+        .returning();
+
+      if (code === 'bkash' || code === 'sslcommerz') {
+        const settingsRows = await db.select().from(platformSettings).limit(1);
+        if (settingsRows.length > 0) {
+          await db
+            .update(platformSettings)
+            .set(
+              code === 'bkash'
+                ? {
+                    bkashEnabled: nextValues.isActive,
+                    bkashSandbox: nextValues.mode !== 'live',
+                    updatedAt: new Date(),
+                  }
+                : {
+                    sslcommerzEnabled: nextValues.isActive,
+                    sslcommerzSandbox: nextValues.mode !== 'live',
+                    updatedAt: new Date(),
+                  }
+            )
+            .where(eq(platformSettings.id, settingsRows[0].id));
+        }
+      }
+
+      await db.insert(auditLogs).values({
+        actorUid: req.user!.uid,
+        action: cur ? 'payment_gateway_updated' : 'payment_gateway_created',
+        targetType: 'payment_gateway',
+        targetId: code,
+        details: JSON.stringify({
+          name: nextValues.name,
+          mode: nextValues.mode,
+          isActive: nextValues.isActive,
+          providerType: nextValues.providerType,
+        }),
+      });
+
+      res.json({
+        paymentGateway: toAdminPaymentGatewayView(
+          saved[0],
+          getRequestOrigin(req),
+          isEnvConfiguredForGateway(code)
+        ),
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to save payment gateway' });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/payment-gateways/:code/test',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const code = normalizeGatewayCode(String(req.params.code || ''));
+    if (!code) return res.status(400).json({ error: 'Invalid gateway code' });
+    try {
+      await ensureDefaultPaymentGateways();
+      const rows = await db
+        .select()
+        .from(paymentGateways)
+        .where(eq(paymentGateways.code, code))
+        .limit(1);
+      if (rows.length === 0) return res.status(404).json({ error: 'Gateway not found' });
+      const result = validatePaymentGatewayConfiguration(
+        rows[0],
+        isEnvConfiguredForGateway(code)
+      );
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Gateway test failed' });
+    }
+  }
+);
+
+app.delete(
+  '/api/admin/payment-gateways/:code',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const code = normalizeGatewayCode(String(req.params.code || ''));
+    if (!code) return res.status(400).json({ error: 'Invalid gateway code' });
+    if (['bkash', 'nagad', 'sslcommerz', 'cod'].includes(code)) {
+      return res.status(400).json({
+        error: 'Built-in gateways cannot be deleted. Disable them instead.',
+      });
+    }
+    try {
+      await db.delete(paymentGateways).where(eq(paymentGateways.code, code));
+      await db.insert(auditLogs).values({
+        actorUid: req.user!.uid,
+        action: 'payment_gateway_deleted',
+        targetType: 'payment_gateway',
+        targetId: code,
+        details: `Removed custom payment gateway ${code}`,
+      });
+      res.json({ deleted: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to delete payment gateway' });
     }
   }
 );

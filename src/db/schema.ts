@@ -126,6 +126,25 @@ export const partnerApiKeys = pgTable('partner_api_keys', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+export const paymentGateways = pgTable('payment_gateways', {
+  id: serial('id').primaryKey(),
+  code: text('code').notNull().unique(), // bkash | nagad | sslcommerz | cod | rocket | upay | custom
+  name: text('name').notNull(),
+  nameBn: text('name_bn').notNull(),
+  providerType: text('provider_type').notNull().default('mfs'), // mfs | card | wallet | cod | custom
+  mode: text('mode').notNull().default('sandbox'), // sandbox | live
+  isActive: boolean('is_active').notNull().default(true),
+  apiBaseUrl: text('api_base_url').default(''),
+  merchantId: text('merchant_id').default(''),
+  apiKey: text('api_key').default(''),
+  apiSecret: text('api_secret').default(''),
+  webhookSecret: text('webhook_secret').default(''),
+  instructions: text('instructions').default(''),
+  sortOrder: integer('sort_order').notNull().default(10),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 export const coupons = pgTable('coupons', {
   id: serial('id').primaryKey(),
   code: text('code').notNull().unique(),

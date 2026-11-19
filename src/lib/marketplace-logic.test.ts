@@ -21,6 +21,13 @@ import {
   isProductVisibleToCustomers,
   filterStorefrontProducts,
   normalizePartnerProductInput,
+  normalizeGatewayCode,
+  maskSecretValue,
+  toAdminPaymentGatewayView,
+  toPublicPaymentGatewayView,
+  partitionOwnedVsPartnerRestaurants,
+  buildRobotsTxt,
+  buildSitemapXml,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 
@@ -441,6 +448,74 @@ test('normalizePartnerProductInput validates and applies safe defaults for exter
     assert.equal(ok.product.addonsJson[0].price, 45);
   }
 });
+
+test('payment gateway normalization, secret masking, and public/admin view sanitization', () => {
+  assert.equal(normalizeGatewayCode('  Rocket MFS! '), 'rocket_mfs');
+  assert.equal(maskSecretValue(''), '');
+  assert.equal(maskSecretValue('abc'), '••••');
+  assert.equal(maskSecretValue('live_secret_9981'), '••••9981');
+
+  const row = {
+    code: 'rocket',
+    name: 'DBBL Rocket',
+    nameBn: 'রকেট',
+    providerType: 'mfs',
+    mode: 'live',
+    isActive: true,
+    apiBaseUrl: 'https://api.rocket.example/v1',
+    merchantId: 'MRC-101',
+    apiKey: 'key_abcdef1234',
+    apiSecret: 'sec_super_secret_9876',
+    webhookSecret: 'wh_token_5544',
+    instructions: 'Enter PIN in Rocket popup',
+    sortOrder: 5,
+  };
+
+  const pubView = toPublicPaymentGatewayView(row);
+  assert.equal('apiKey' in pubView, false);
+  assert.equal('apiSecret' in pubView, false);
+  assert.equal('webhookSecret' in pubView, false);
+  assert.equal(pubView.isConfigured, true);
+
+  const adminView = toAdminPaymentGatewayView(row, 'https://foodorabd.example/');
+  assert.equal(adminView.hasApiKey, true);
+  assert.equal(adminView.apiKeyPreview, '••••1234');
+  assert.equal(adminView.apiSecretPreview, '••••9876');
+  assert.equal(adminView.webhookUrl, 'https://foodorabd.example/api/payments/webhook/rocket');
+  assert.equal('apiKey' in adminView, false);
+  assert.equal('apiSecret' in adminView, false);
+});
+
+test('partitionOwnedVsPartnerRestaurants separates owner stores from partners and prioritizes own stores', () => {
+  const list = [
+    { id: 1, ownerUid: 'partner-uid-1', name: 'Partner Kitchen' },
+    { id: 2, ownerUid: 'owner-uid', name: 'My Own Cafe' },
+    { id: 3, ownerUid: 'partner-uid-2', name: 'Partner Pizza' },
+  ];
+  const partitioned = partitionOwnedVsPartnerRestaurants(list, 'owner-uid');
+  assert.equal(partitioned.own.length, 1);
+  assert.equal(partitioned.own[0].id, 2);
+  assert.equal(partitioned.partners.length, 2);
+  assert.equal(partitioned.ordered[0].id, 2);
+});
+
+test('buildRobotsTxt and buildSitemapXml emit valid SEO crawl files with escaped slugs', () => {
+  const robots = buildRobotsTxt('https://foodora.example/');
+  assert.ok(robots.includes('User-agent: *'));
+  assert.ok(robots.includes('Disallow: /api/admin/'));
+  assert.ok(robots.includes('Sitemap: https://foodora.example/sitemap.xml'));
+
+  const xml = buildSitemapXml('https://foodora.example/', [
+    { slug: 'sultans-dine', updatedAt: '2026-11-18T10:00:00Z' },
+    { slug: 'sultans-dine', updatedAt: '2026-11-18T10:00:00Z' }, // deduplicated
+    { slug: 'my-own-kitchen&grill', updatedAt: '2026-11-19T00:00:00Z' },
+  ]);
+  assert.ok(xml.includes('<loc>https://foodora.example/</loc>'));
+  assert.ok(xml.includes('<loc>https://foodora.example/?restaurant=sultans-dine</loc>'));
+  assert.ok(xml.includes('%26'));
+  assert.equal(xml.match(/sultans-dine/g)?.length, 1);
+});
+
 
 
 

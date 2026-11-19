@@ -41,6 +41,15 @@ export const DEFAULT_STOREFRONT_CONFIG: StorefrontConfig = {
   maintenanceMode: false,
   maintenanceMessage:
     'Scheduled kitchen & courier maintenance is in progress. Ordering will resume shortly.',
+  seoTitleEn: 'Foodora BD | Order Food Online in Dhaka — Biriyani, Burgers & Fast Delivery',
+  seoTitleBn: 'ফুডোরা বিডি | ঢাকায় অনলাইনে খাবার অর্ডার করুন — দ্রুত ডেলিভারি',
+  seoDescriptionEn:
+    'Order food online from top Dhaka restaurants & cloud kitchens. Fast delivery across Gulshan, Banani, Dhanmondi, Uttara & Mirpur with bKash, Nagad & SSLCommerz.',
+  seoDescriptionBn:
+    'গুলশান, বনানী, ধানমন্ডি, উত্তরা ও মিরপুরের সেরা রেস্টুরেন্ট থেকে বিকাশ, নগদ ও কার্ডে দ্রুত খাবার অর্ডার করুন।',
+  seoKeywords:
+    'food delivery dhaka, online food order bangladesh, kacchi biriyani dhaka, bKash food delivery, restaurant marketplace bangladesh',
+  googleSiteVerification: '',
 };
 
 export function mergeStorefrontConfig(
@@ -56,7 +65,11 @@ export function mergeStorefrontConfig(
     if (typeof DEFAULT_STOREFRONT_CONFIG[key] === 'boolean') {
       (merged as Record<string, unknown>)[key] = Boolean(val);
     } else if (typeof val === 'string') {
-      (merged as Record<string, unknown>)[key] = val.trim() ? val : DEFAULT_STOREFRONT_CONFIG[key];
+      if (key === 'googleSiteVerification') {
+        merged.googleSiteVerification = val.trim();
+      } else {
+        (merged as Record<string, unknown>)[key] = val.trim() ? val : DEFAULT_STOREFRONT_CONFIG[key];
+      }
     }
   }
   return merged;

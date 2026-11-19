@@ -54,6 +54,7 @@ import type {
   Lang,
   NotificationItem,
   PlatformSettings,
+  PublicPaymentGateway,
   Restaurant,
   ReviewItem,
   StorefrontProduct,
@@ -64,7 +65,7 @@ type ViewMode =
   | { type: 'restaurant'; slug: string }
   | { type: 'tracking'; orderId: number }
   | { type: 'customer' }
-  | { type: 'vendor'; onboarding?: boolean }
+  | { type: 'vendor'; onboarding?: boolean; restaurantId?: number }
   | { type: 'rider' }
   | { type: 'admin' };
 
@@ -107,6 +108,7 @@ function MarketplaceApp() {
     () => (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || ''
   );
   const [publicSettings, setPublicSettings] = useState<PlatformSettings | null>(null);
+  const [publicGateways, setPublicGateways] = useState<PublicPaymentGateway[]>([]);
   const [gmpQuotaBanner, setGmpQuotaBanner] = useState(false);
 
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
@@ -120,6 +122,14 @@ function MarketplaceApp() {
     const orderParam = Number(params.get('order'));
     if (Number.isInteger(orderParam) && orderParam > 0) {
       return { type: 'tracking', orderId: orderParam };
+    }
+    const restParam = params.get('restaurant')?.trim();
+    if (restParam) {
+      return { type: 'restaurant', slug: restParam };
+    }
+    const pathMatch = window.location.pathname.match(/^\/restaurant\/([^/]+)\/?$/);
+    if (pathMatch?.[1]) {
+      return { type: 'restaurant', slug: decodeURIComponent(pathMatch[1]) };
     }
     return { type: 'home' };
   });
@@ -264,19 +274,20 @@ function MarketplaceApp() {
       // ignore
     }
     document.documentElement.lang = lang;
-    document.title =
-      lang === 'bn'
-        ? 'Foodora BD — ঢাকা ও বাংলাদেশে অনলাইন ফুড অর্ডার'
-        : 'Foodora BD — Order Food Online in Dhaka & Bangladesh';
   }, [lang]);
 
-  // Sync URL query param for tracking persistence across reload
+  // Sync URL query param for tracking & restaurant deep-link SEO persistence across reload
   useEffect(() => {
     const url = new URL(window.location.href);
     if (view.type === 'tracking') {
       url.searchParams.set('order', String(view.orderId));
+      url.searchParams.delete('restaurant');
+    } else if (view.type === 'restaurant') {
+      url.searchParams.set('restaurant', view.slug);
+      url.searchParams.delete('order');
     } else {
       url.searchParams.delete('order');
+      url.searchParams.delete('restaurant');
     }
     window.history.replaceState({}, '', url.toString());
   }, [view]);
@@ -320,7 +331,11 @@ function MarketplaceApp() {
     setLoadingStore(true);
     try {
       const [cfgRes, restRes, prodRes, coupRes] = await Promise.all([
-        apiFetch<{ mapsApiKey: string; settings?: PlatformSettings | null }>('/api/public-config'),
+        apiFetch<{
+          mapsApiKey: string;
+          settings?: PlatformSettings | null;
+          paymentGateways?: PublicPaymentGateway[];
+        }>('/api/public-config'),
         apiFetch<{ restaurants: Restaurant[] }>('/api/restaurants'),
         apiFetch<{ products: StorefrontProduct[] }>('/api/products').catch(() => ({ products: [] })),
         apiFetch<{ coupons: Coupon[] }>('/api/coupons'),
@@ -329,6 +344,7 @@ function MarketplaceApp() {
         cfgRes.mapsApiKey || (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || ''
       );
       setPublicSettings(cfgRes.settings || null);
+      setPublicGateways(cfgRes.paymentGateways || []);
       setRestaurants(restRes.restaurants);
       setStorefrontProducts(prodRes.products || []);
       setCoupons(coupRes.coupons);
@@ -343,10 +359,70 @@ function MarketplaceApp() {
     loadStorefront();
   }, [loadStorefront]);
 
-  // Dynamic SEO Metadata & Schema.org JSON-LD Structured Data (Products + Restaurants)
+  // Load restaurant detail automatically if opened via SEO ?restaurant=slug deep link
+  useEffect(() => {
+    if (view.type !== 'restaurant') return;
+    if (detailData?.restaurant.slug === view.slug) return;
+    let cancelled = false;
+    setLoadingDetail(true);
+    apiFetch<{
+      restaurant: Restaurant;
+      items: FoodItem[];
+      reviews: ReviewItem[];
+    }>(`/api/restaurants/${encodeURIComponent(view.slug)}`)
+      .then((res) => {
+        if (!cancelled) setDetailData(res);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoadingDetail(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, detailData?.restaurant.slug]);
+
+  // Dynamic Google SEO Metadata, Search Console Verification, OpenGraph & Schema.org JSON-LD
   useEffect(() => {
     try {
-      const canonicalUrl = `${window.location.origin}${window.location.pathname}`;
+      const upsertMeta = (attr: 'name' | 'property', key: string, content: string) => {
+        if (!content) return;
+        let tag = document.querySelector<HTMLMetaElement>(`meta[${attr}="${key}"]`);
+        if (!tag) {
+          tag = document.createElement('meta');
+          tag.setAttribute(attr, key);
+          document.head.appendChild(tag);
+        }
+        tag.content = content;
+      };
+
+      const activeRestaurant =
+        view.type === 'restaurant' && detailData?.restaurant.slug === view.slug
+          ? detailData.restaurant
+          : null;
+
+      const pageTitle = activeRestaurant
+        ? lang === 'bn'
+          ? `${activeRestaurant.nameBn} — মেনু ও অনলাইন অর্ডার | Foodora BD`
+          : `${activeRestaurant.name} — Menu & Online Food Order | Foodora BD`
+        : lang === 'bn'
+        ? sc.seoTitleBn
+        : sc.seoTitleEn;
+
+      const pageDesc = activeRestaurant
+        ? lang === 'bn'
+          ? `${activeRestaurant.nameBn} (${activeRestaurant.area}) থেকে অনলাইনে ${activeRestaurant.cuisine} অর্ডার করুন। দ্রুত ডেলিভারি ও বিকাশ/নগদ পেমেন্ট।`
+          : `Order ${activeRestaurant.cuisine} online from ${activeRestaurant.name} in ${activeRestaurant.area}, Dhaka. Fast delivery with bKash, Nagad & COD.`
+        : lang === 'bn'
+        ? sc.seoDescriptionBn
+        : sc.seoDescriptionEn;
+
+      document.title = pageTitle;
+
+      const canonicalUrl = activeRestaurant
+        ? `${window.location.origin}/?restaurant=${encodeURIComponent(activeRestaurant.slug)}`
+        : `${window.location.origin}/`;
+
       let link = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
       if (!link) {
         link = document.createElement('link');
@@ -355,13 +431,16 @@ function MarketplaceApp() {
       }
       link.href = canonicalUrl;
 
-      let ogUrl = document.querySelector<HTMLMetaElement>('meta[property="og:url"]');
-      if (!ogUrl) {
-        ogUrl = document.createElement('meta');
-        ogUrl.setAttribute('property', 'og:url');
-        document.head.appendChild(ogUrl);
+      upsertMeta('name', 'description', pageDesc);
+      upsertMeta('name', 'keywords', sc.seoKeywords);
+      upsertMeta('name', 'robots', 'index, follow');
+      if (sc.googleSiteVerification.trim()) {
+        upsertMeta('name', 'google-site-verification', sc.googleSiteVerification.trim());
       }
-      ogUrl.content = canonicalUrl;
+      upsertMeta('property', 'og:type', 'website');
+      upsertMeta('property', 'og:title', pageTitle);
+      upsertMeta('property', 'og:description', pageDesc);
+      upsertMeta('property', 'og:url', canonicalUrl);
 
       const scriptId = 'foodora-seo-jsonld';
       let jsonLdEl = document.getElementById(scriptId) as HTMLScriptElement | null;
@@ -376,12 +455,23 @@ function MarketplaceApp() {
         '@context': 'https://schema.org',
         '@graph': [
           {
+            '@type': 'WebSite',
+            name: `${sc.brandPrefix}${sc.brandSuffix}`,
+            url: `${window.location.origin}/`,
+            potentialAction: {
+              '@type': 'SearchAction',
+              target: `${window.location.origin}/?q={search_term_string}`,
+              'query-input': 'required name=search_term_string',
+            },
+          },
+          {
             '@type': 'ItemList',
-            name: 'Order Popular Food Dishes Online in Dhaka — Foodora BD',
+            name: pageTitle,
             numberOfItems: storefrontProducts.length,
             itemListElement: storefrontProducts.slice(0, 24).map((p, idx) => ({
               '@type': 'ListItem',
               position: idx + 1,
+              url: `${window.location.origin}/?restaurant=${encodeURIComponent(p.restaurantSlug)}`,
               item: {
                 '@type': 'Product',
                 name: p.name,
@@ -404,22 +494,46 @@ function MarketplaceApp() {
               },
             })),
           },
-          ...restaurants.slice(0, 12).map((r) => ({
-            '@type': 'Restaurant',
-            name: r.name,
-            servesCuisine: r.cuisine,
-            address: {
-              '@type': 'PostalAddress',
-              addressLocality: r.area,
-              addressRegion: 'Dhaka',
-              addressCountry: 'BD',
-            },
-            aggregateRating: {
-              '@type': 'AggregateRating',
-              ratingValue: Number(r.rating) || 4.5,
-              reviewCount: Math.max(1, r.reviewCount || 1),
-            },
-          })),
+          ...(activeRestaurant
+            ? [
+                {
+                  '@type': 'Restaurant',
+                  name: activeRestaurant.name,
+                  url: canonicalUrl,
+                  servesCuisine: activeRestaurant.cuisine,
+                  image: activeRestaurant.coverUrl,
+                  address: {
+                    '@type': 'PostalAddress',
+                    streetAddress: activeRestaurant.address,
+                    addressLocality: activeRestaurant.area,
+                    addressRegion: 'Dhaka',
+                    addressCountry: 'BD',
+                  },
+                  aggregateRating: {
+                    '@type': 'AggregateRating',
+                    ratingValue: Number(activeRestaurant.rating) || 4.5,
+                    reviewCount: Math.max(1, activeRestaurant.reviewCount || 1),
+                  },
+                },
+              ]
+            : restaurants.slice(0, 12).map((r) => ({
+                '@type': 'Restaurant',
+                name: r.name,
+                url: `${window.location.origin}/?restaurant=${encodeURIComponent(r.slug)}`,
+                servesCuisine: r.cuisine,
+                image: r.coverUrl,
+                address: {
+                  '@type': 'PostalAddress',
+                  addressLocality: r.area,
+                  addressRegion: 'Dhaka',
+                  addressCountry: 'BD',
+                },
+                aggregateRating: {
+                  '@type': 'AggregateRating',
+                  ratingValue: Number(r.rating) || 4.5,
+                  reviewCount: Math.max(1, r.reviewCount || 1),
+                },
+              }))),
         ],
       };
 
@@ -427,7 +541,7 @@ function MarketplaceApp() {
     } catch {
       // non-fatal SEO injection guard
     }
-  }, [storefrontProducts, restaurants]);
+  }, [storefrontProducts, restaurants, sc, lang, view, detailData]);
 
   // Load favorites & notifications when user session is active
   const loadUserSignals = useCallback(async () => {
@@ -912,20 +1026,33 @@ function MarketplaceApp() {
             ) : user ? (
               <>
                 {isPrivilegedAdmin && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setView({ type: 'admin' });
-                      window.scrollTo({ top: 0, behavior: 'smooth' });
-                    }}
-                    className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg bg-[#2E3138] hover:bg-black text-white text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
-                  >
-                    <Shield className="w-3.5 h-3.5 text-[#E21B70]" />
-                    <span className="hidden sm:inline">
-                      {user.role === 'super_admin' ? 'Super Admin' : 'Admin'}
-                    </span>
-                    <span className="sm:hidden">Admin</span>
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setView({ type: 'vendor' });
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      }}
+                      className="hidden md:inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#FFF0F6] hover:bg-[#FFE4EF] text-[#E21B70] border border-[#E21B70]/30 text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
+                    >
+                      <Store className="w-3.5 h-3.5" />
+                      <span>{lang === 'bn' ? 'আমার স্টোর' : 'My Store'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setView({ type: 'admin' });
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      }}
+                      className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg bg-[#2E3138] hover:bg-black text-white text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
+                    >
+                      <Shield className="w-3.5 h-3.5 text-[#E21B70]" />
+                      <span className="hidden sm:inline">
+                        {user.role === 'super_admin' ? 'Super Admin' : 'Admin'}
+                      </span>
+                      <span className="sm:hidden">Admin</span>
+                    </button>
+                  </>
                 )}
                 <button
                   type="button"
@@ -1343,6 +1470,7 @@ function MarketplaceApp() {
             lang={lang}
             mapsApiKey={mapsApiKey}
             initialOnboarding={view.onboarding}
+            initialRestaurantId={view.restaurantId ?? null}
             onRefreshUser={refreshUser}
             onMenuMutated={loadStorefront}
             onBack={() => setView({ type: 'home' })}
@@ -1362,6 +1490,10 @@ function MarketplaceApp() {
               lang={lang}
               currentUser={user}
               onRestaurantsMutated={loadStorefront}
+              onOpenVendorStore={(restaurantId) => {
+                setView({ type: 'vendor', restaurantId });
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
               onBack={() => setView({ type: 'home' })}
             />
           ) : (
@@ -2272,6 +2404,7 @@ function MarketplaceApp() {
         mapsApiKey={mapsApiKey}
         selectedArea={selectedArea}
         customerName={user?.fullName || 'Rahim Uddin'}
+        paymentGateways={publicGateways}
         onUpdateQty={handleUpdateQty}
         onRemoveItem={handleRemoveCartItem}
         onClearCart={handleClearCart}

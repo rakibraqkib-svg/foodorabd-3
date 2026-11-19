@@ -1,4 +1,4 @@
-import { and, desc, eq, like, or } from 'drizzle-orm';
+import { and, asc, desc, eq, like, or } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   auditLogs,
@@ -11,6 +11,7 @@ import {
   notifications,
   orders,
   orderStatusHistory,
+  paymentGateways,
   platformSettings,
   restaurantPayouts,
   restaurants,
@@ -18,7 +19,11 @@ import {
   riders,
   users,
 } from './schema.ts';
-import { PROTECTED_SUPER_ADMIN_EMAILS } from '../lib/marketplace-logic.ts';
+import {
+  DEFAULT_PAYMENT_GATEWAYS,
+  partitionOwnedVsPartnerRestaurants,
+  PROTECTED_SUPER_ADMIN_EMAILS,
+} from '../lib/marketplace-logic.ts';
 
 export async function getApprovedRestaurants() {
   try {
@@ -225,15 +230,83 @@ export async function getPlatformSettingsRow() {
   }
 }
 
-export async function getVendorWorkspace(ownerUid: string, isSuperAdmin: boolean) {
+export async function ensureDefaultPaymentGateways() {
   try {
-    const owned = isSuperAdmin
-      ? await db.select().from(restaurants).orderBy(restaurants.id)
-      : await db.select().from(restaurants).where(eq(restaurants.ownerUid, ownerUid));
+    const existing = await db
+      .select()
+      .from(paymentGateways)
+      .orderBy(asc(paymentGateways.sortOrder), asc(paymentGateways.id));
 
-    const target = owned[0] ?? null;
+    if (existing.length === 0) {
+      const settings = await getPlatformSettingsRow();
+      const seedRows = DEFAULT_PAYMENT_GATEWAYS.map((gw) => {
+        if (gw.code === 'bkash' && settings) {
+          return {
+            ...gw,
+            isActive: settings.bkashEnabled,
+            mode: settings.bkashSandbox ? 'sandbox' : 'live',
+          };
+        }
+        if (gw.code === 'sslcommerz' && settings) {
+          return {
+            ...gw,
+            isActive: settings.sslcommerzEnabled,
+            mode: settings.sslcommerzSandbox ? 'sandbox' : 'live',
+          };
+        }
+        return gw;
+      });
+      await db.insert(paymentGateways).values(seedRows).onConflictDoNothing();
+      return await db
+        .select()
+        .from(paymentGateways)
+        .orderBy(asc(paymentGateways.sortOrder), asc(paymentGateways.id));
+    }
+    return existing;
+  } catch (error) {
+    console.error('Failed to load payment gateways:', error);
+    return DEFAULT_PAYMENT_GATEWAYS.map((gw, idx) => ({
+      id: idx + 1,
+      ...gw,
+      merchantId: '',
+      apiKey: '',
+      apiSecret: '',
+      webhookSecret: '',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
+  }
+}
+
+export async function getVendorWorkspace(
+  ownerUid: string,
+  isSuperAdmin: boolean,
+  requestedRestaurantId?: number | null
+) {
+  try {
+    const rawList = isSuperAdmin
+      ? await db.select().from(restaurants).orderBy(restaurants.id)
+      : await db.select().from(restaurants).where(eq(restaurants.ownerUid, ownerUid)).orderBy(restaurants.id);
+
+    const partitioned = partitionOwnedVsPartnerRestaurants(rawList, ownerUid);
+    const owned = partitioned.ordered;
+
+    const requestedMatch =
+      requestedRestaurantId && Number.isInteger(requestedRestaurantId)
+        ? owned.find((r) => r.id === requestedRestaurantId) ?? null
+        : null;
+    const target = requestedMatch ?? owned[0] ?? null;
+
     if (!target) {
-      return { restaurant: null, restaurants: [], menuItems: [], orders: [], ledger: [], payouts: [] };
+      return {
+        restaurant: null,
+        restaurants: [],
+        ownRestaurantIds: [] as number[],
+        menuItems: [],
+        orders: [],
+        ledger: [],
+        payouts: [],
+      };
     }
 
     const menuItems = await db
@@ -260,6 +333,7 @@ export async function getVendorWorkspace(ownerUid: string, isSuperAdmin: boolean
     return {
       restaurant: target,
       restaurants: owned,
+      ownRestaurantIds: partitioned.own.map((r) => r.id),
       menuItems,
       orders: restOrders,
       ledger,
