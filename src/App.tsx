@@ -32,6 +32,7 @@ import {
   X,
 } from 'lucide-react';
 import { AdminDashboard } from './components/AdminDashboard';
+import { AiHelpWidget } from './components/AiHelpWidget';
 import { CartCheckoutDrawer } from './components/CartCheckoutDrawer';
 import { CustomerDashboard } from './components/CustomerDashboard';
 import { DhakaMapPicker } from './components/DhakaMapPicker';
@@ -43,6 +44,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { apiFetch } from './lib/api';
 import { BANGLADESH_AREAS, CUISINE_CATEGORIES, localizeCouponTitle, t } from './lib/i18n';
 import {
+  buildRestaurantUnavailableMessage,
   canAddToSingleRestaurantCart,
   type CartItemInput,
   filterStorefrontProducts,
@@ -796,6 +798,12 @@ function MarketplaceApp() {
   };
 
   const handleQuickAddProduct = (product: StorefrontProduct) => {
+    if (!product.isOpen) {
+      showToast(
+        buildRestaurantUnavailableMessage(product.restaurantName, 'approved', false, lang)
+      );
+      return;
+    }
     if (!product.inStock) {
       showToast(lang === 'bn' ? 'দুঃখিত, খাবারটি স্টকে নেই' : 'Sorry, this dish is out of stock');
       return;
@@ -2108,11 +2116,15 @@ function MarketplaceApp() {
                                 {lang === 'bn' ? 'জনপ্রিয়' : 'Best Seller'}
                               </span>
                             ) : null}
-                            {!product.inStock && (
+                            {!product.isOpen ? (
+                              <span className="absolute inset-0 bg-black/55 flex items-center justify-center text-white text-xs font-bold px-2 text-center">
+                                {lang === 'bn' ? 'রেস্টুরেন্ট বন্ধ' : 'Store Closed'}
+                              </span>
+                            ) : !product.inStock ? (
                               <span className="absolute inset-0 bg-black/50 flex items-center justify-center text-white text-xs font-bold">
                                 {lang === 'bn' ? 'স্টক শেষ' : 'Out of Stock'}
                               </span>
-                            )}
+                            ) : null}
                           </div>
 
                           <div className="p-3.5 flex-1 flex flex-col justify-between gap-2.5">
@@ -2160,13 +2172,21 @@ function MarketplaceApp() {
                               </div>
                               <button
                                 type="button"
-                                disabled={!product.inStock}
+                                disabled={!product.inStock || !product.isOpen}
                                 onClick={() => handleQuickAddProduct(product)}
                                 style={{ backgroundColor: sc.accentColor }}
                                 className="px-3 py-1.5 rounded-lg text-white text-xs font-bold inline-flex items-center gap-1 hover:opacity-90 disabled:opacity-40 transition-opacity shrink-0"
                               >
                                 <Plus className="w-3.5 h-3.5" />
-                                <span>{lang === 'bn' ? 'অর্ডার' : 'Add'}</span>
+                                <span>
+                                  {!product.isOpen
+                                    ? lang === 'bn'
+                                      ? 'বন্ধ'
+                                      : 'Closed'
+                                    : lang === 'bn'
+                                    ? 'অর্ডার'
+                                    : 'Add'}
+                                </span>
                               </button>
                             </div>
                           </div>
@@ -2396,7 +2416,11 @@ function MarketplaceApp() {
                               className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                             />
                             {/* Single Clean Image Tag */}
-                            {rest.discountPct > 0 ? (
+                            {!rest.isOpen ? (
+                              <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md bg-neutral-900/85 text-white text-[11px] font-bold shadow-xs">
+                                {lang === 'bn' ? 'বন্ধ রয়েছে' : 'Closed'}
+                              </span>
+                            ) : rest.discountPct > 0 ? (
                               <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md bg-[#E21B70] text-white text-[11px] font-bold shadow-xs">
                                 {rest.discountPct}{t(lang, 'discountOff')}
                               </span>
@@ -3838,6 +3862,15 @@ function MarketplaceApp() {
           </form>
         </div>
       )}
+
+      {/* Bilingual AI Help Assistant (Bangla & English) */}
+      <AiHelpWidget
+        uiLang={lang}
+        area={selectedArea.name}
+        viewType={view.type}
+        activeOrderNumber={lastTrackedOrder?.orderNumber}
+        accentColor={sc.accentColor}
+      />
 
       {/* Toast Notification */}
       {toastMsg && (

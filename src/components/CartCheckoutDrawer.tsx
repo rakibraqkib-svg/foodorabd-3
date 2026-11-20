@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Bike, CreditCard, Mail, ShieldCheck, ShoppingBag, Store, Tag, Trash2, Truck, X } from 'lucide-react';
+import { AlertCircle, Bike, CreditCard, Mail, ShieldCheck, ShoppingBag, Store, Tag, Trash2, Truck, X } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import {
+  buildRestaurantUnavailableMessage,
   calculateCartItemUnitPrice,
   calculateCartSubtotal,
   calculateOrderFinancials,
@@ -459,6 +460,23 @@ export function CartCheckoutDrawer({
                 </div>
               </div>
 
+              {restaurant && (restaurant.status !== 'approved' || !restaurant.isOpen) && (
+                <div
+                  role="alert"
+                  className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2"
+                >
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>
+                    {buildRestaurantUnavailableMessage(
+                      restaurant.name,
+                      restaurant.status,
+                      restaurant.isOpen,
+                      lang
+                    )}
+                  </span>
+                </div>
+              )}
+
               {restaurant && subtotal < restaurant.minOrder && (
                 <p className="text-xs text-amber-700 font-medium">
                   {lang === 'bn'
@@ -469,7 +487,12 @@ export function CartCheckoutDrawer({
 
               <button
                 type="button"
-                disabled={Boolean(restaurant && subtotal < restaurant.minOrder)}
+                disabled={Boolean(
+                  restaurant &&
+                    (subtotal < restaurant.minOrder ||
+                      restaurant.status !== 'approved' ||
+                      !restaurant.isOpen)
+                )}
                 onClick={() => setStep('checkout')}
                 className="w-full py-3 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white font-semibold text-sm disabled:opacity-50 transition-colors mt-2"
               >
@@ -487,6 +510,23 @@ export function CartCheckoutDrawer({
               >
                 ← {lang === 'bn' ? 'কার্টে ফিরুন' : 'Back to Cart'}
               </button>
+
+              {restaurant && (restaurant.status !== 'approved' || !restaurant.isOpen) && (
+                <div
+                  role="alert"
+                  className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2"
+                >
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>
+                    {buildRestaurantUnavailableMessage(
+                      restaurant.name,
+                      restaurant.status,
+                      restaurant.isOpen,
+                      lang
+                    )}
+                  </span>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -724,7 +764,12 @@ export function CartCheckoutDrawer({
               </div>
               <button
                 type="submit"
-                disabled={submitting}
+                disabled={
+                  submitting ||
+                  Boolean(
+                    restaurant && (restaurant.status !== 'approved' || !restaurant.isOpen)
+                  )
+                }
                 className="w-full py-3 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white font-semibold text-sm disabled:opacity-50 transition-colors"
               >
                 {submitting

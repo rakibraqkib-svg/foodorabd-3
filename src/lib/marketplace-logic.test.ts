@@ -37,6 +37,8 @@ import {
   mergeCustomSelectOptions,
   pickNearestStandbyRider,
   computeOrderEtaSummary,
+  buildRestaurantUnavailableMessage,
+  buildAiHelpSystemInstruction,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 
@@ -708,4 +710,33 @@ test('computeOrderEtaSummary provides phase-aware ETA and distance across order 
   assert.equal(delivered.phase, 'delivered');
   assert.equal(delivered.etaMinutes, 0);
 });
+
+test('buildRestaurantUnavailableMessage explains closed vs pending restaurant states in EN and BN', () => {
+  const closedEn = buildRestaurantUnavailableMessage("Sultan's Dine", 'approved', false, 'en');
+  assert.ok(closedEn.includes("Sultan's Dine"));
+  assert.ok(closedEn.includes('closed'));
+
+  const closedBn = buildRestaurantUnavailableMessage("Sultan's Dine", 'approved', false, 'bn');
+  assert.ok(closedBn.includes('বন্ধ'));
+
+  const pendingEn = buildRestaurantUnavailableMessage('New Cafe', 'pending', true, 'en');
+  assert.ok(pendingEn.includes('pending'));
+  assert.ok(pendingEn.includes('Admin approval'));
+});
+
+test('buildAiHelpSystemInstruction configures Bangla/English language modes and marketplace context', () => {
+  const bnPrompt = buildAiHelpSystemInstruction({
+    langPreference: 'bn',
+    area: 'Sylhet',
+    activeOrderNumber: 'FD-BD-1001',
+  });
+  assert.ok(bnPrompt.includes('Bengali'));
+  assert.ok(bnPrompt.includes('Sylhet'));
+  assert.ok(bnPrompt.includes('FD-BD-1001'));
+
+  const autoPrompt = buildAiHelpSystemInstruction({ langPreference: 'auto' });
+  assert.ok(autoPrompt.includes('Bangla'));
+  assert.ok(autoPrompt.includes('English'));
+});
+
 

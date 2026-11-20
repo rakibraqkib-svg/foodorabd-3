@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import JSZip from 'jszip';
 import { and, desc, eq, or, sql } from 'drizzle-orm';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { z } from 'zod';
 import { db, hasDatabaseConfig } from './src/db/index.ts';
 import {
@@ -58,6 +59,9 @@ import {
 import { supabaseServer } from './src/lib/supabase-admin.ts';
 import {
   ADMIN_PIN_DEFAULT_EMAIL,
+  type AiHelpLangPreference,
+  buildAiHelpSystemInstruction,
+  buildRestaurantUnavailableMessage,
   buildRobotsTxt,
   buildSitemapXml,
   calculateCartItemUnitPrice,
@@ -1528,7 +1532,9 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
       if (restRows.length === 0) throw new Error('Restaurant not found');
       const rest = restRows[0];
       if (rest.status !== 'approved' || !rest.isOpen) {
-        throw new Error('This restaurant is currently unavailable for orders');
+        throw new Error(
+          buildRestaurantUnavailableMessage(rest.name, rest.status, rest.isOpen, 'en')
+        );
       }
 
       // 2. Load authoritative menu items & calculate snapshot totals
@@ -4701,6 +4707,112 @@ app.post('/api/notifications/:id/read', requireAuth, async (req: AuthRequest, re
       )
     );
   res.json({ ok: true });
+});
+
+// ---------- Bilingual AI Help Assistant (Bangla & English via Gemini) ----------
+
+function getGeminiHelpClient(): GoogleGenAI | null {
+  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+  if (!apiKey) return null;
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
+
+const aiHelpRequestSchema = z.object({
+  message: z.string().trim().min(1, 'Please enter a question.').max(1500),
+  langPreference: z.enum(['auto', 'bn', 'en']).optional().default('auto'),
+  history: z
+    .array(
+      z.object({
+        role: z.enum(['user', 'model']),
+        text: z.string().trim().min(1).max(1500),
+      })
+    )
+    .optional()
+    .default([]),
+  context: z
+    .object({
+      area: z.string().trim().max(120).optional(),
+      viewType: z.string().trim().max(60).optional(),
+      activeOrderNumber: z.string().trim().max(60).optional(),
+    })
+    .optional(),
+});
+
+app.post('/api/ai/help', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const parsed = aiHelpRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || 'Invalid AI Help request payload.',
+      });
+    }
+
+    const ai = getGeminiHelpClient();
+    if (!ai) {
+      return res.status(503).json({
+        error:
+          'AI Help is unavailable because GEMINI_API_KEY is not configured in Settings > Secrets.',
+      });
+    }
+
+    const { message, langPreference, history, context } = parsed.data;
+    const systemInstruction = buildAiHelpSystemInstruction({
+      langPreference: langPreference as AiHelpLangPreference,
+      area: context?.area,
+      viewType: context?.viewType,
+      activeOrderNumber: context?.activeOrderNumber,
+    });
+
+    const contents = [
+      ...history.slice(-8).map((item) => ({
+        role: item.role,
+        parts: [{ text: item.text }],
+      })),
+      {
+        role: 'user' as const,
+        parts: [{ text: message }],
+      },
+    ];
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents,
+      config: {
+        systemInstruction,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+    });
+
+    const reply = (response.text || '').trim();
+    if (!reply) {
+      return res.status(502).json({
+        error: 'AI Help returned an empty response. Please try asking again.',
+      });
+    }
+
+    return res.json({
+      reply,
+      model: 'gemini-4-hydrogen',
+    });
+  } catch (err: unknown) {
+    const status =
+      typeof (err as { status?: unknown })?.status === 'number'
+        ? (err as { status: number }).status
+        : 502;
+    const rawMsg =
+      err instanceof Error ? err.message : 'Failed to generate AI Help response.';
+    console.error('POST /api/ai/help error:', rawMsg);
+    return res.status(status >= 400 && status < 600 ? status : 502).json({
+      error: rawMsg,
+    });
+  }
 });
 
 // ---------- Server Bootstrap (Vite Dev Middleware or Static Production) ----------

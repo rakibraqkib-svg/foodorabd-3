@@ -1361,3 +1361,66 @@ export function computeOrderEtaSummary(input: OrderEtaSummaryInput): OrderEtaSum
   };
 }
 
+export function buildRestaurantUnavailableMessage(
+  restaurantName: string,
+  status: string,
+  isOpen: boolean,
+  lang: 'bn' | 'en' = 'en'
+): string {
+  const safeName = restaurantName.trim() || (lang === 'bn' ? 'এই রেস্টুরেন্টটি' : 'This restaurant');
+  if (status !== 'approved') {
+    if (lang === 'bn') {
+      return `${safeName} বর্তমানে অ্যাডমিন অনুমোদনের (${status}) অপেক্ষায় আছে, তাই এখন অর্ডার নেওয়া হচ্ছে না।`;
+    }
+    return `${safeName} is currently "${status}" and awaiting Admin approval before accepting orders.`;
+  }
+  if (!isOpen) {
+    if (lang === 'bn') {
+      return `${safeName} বর্তমানে বন্ধ (Closed) রাখা হয়েছে। পার্টনার/অ্যাডমিন ড্যাশবোর্ড থেকে Store Open চালু করুন অথবা অন্য খোলা রেস্টুরেন্ট থেকে অর্ডার করুন।`;
+    }
+    return `${safeName} is currently closed for orders (Store Open is turned OFF in Partner/Admin Dashboard). Please open another active restaurant or re-open the store.`;
+  }
+  return lang === 'bn' ? 'রেস্টুরেন্টটি অর্ডার নিতে প্রস্তুত।' : 'Restaurant is open for orders.';
+}
+
+export type AiHelpLangPreference = 'auto' | 'bn' | 'en';
+
+export function buildAiHelpSystemInstruction(params: {
+  langPreference?: AiHelpLangPreference;
+  area?: string;
+  viewType?: string;
+  activeOrderNumber?: string;
+}): string {
+  const pref = params.langPreference || 'auto';
+  const langRule =
+    pref === 'bn'
+      ? 'Always respond strictly in clear, natural Bengali (বাংলা script).'
+      : pref === 'en'
+      ? 'Always respond strictly in clear, helpful English.'
+      : 'Detect the user language automatically: if they write in Bangla (বাংলা) or Banglish/Romanized Bengali, respond in clear, helpful Bangla (বাংলা). If they write in English, respond in English.';
+
+  const contextNotes = [
+    params.area ? `User selected area: ${params.area}, Bangladesh.` : '',
+    params.viewType ? `Current screen: ${params.viewType}.` : '',
+    params.activeOrderNumber ? `Active order number: ${params.activeOrderNumber}.` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  return [
+    'You are the official Foodora BD AI Help Assistant for Bangladesh’s multi-vendor food delivery marketplace.',
+    langRule,
+    'Keep answers concise, practical, and easy to scan (2-5 short sentences or bullet steps). Never invent order IDs, prices, or live GPS coordinates.',
+    'Platform knowledge:',
+    '- Ordering: Customers can order directly from the homepage "Order Popular Food Now" dishes or open any restaurant menu, then pay via bKash, Nagad, SSLCommerz, or Cash on Delivery (COD).',
+    '- Why "This restaurant is currently unavailable for orders" appears: It means either the restaurant has "Store Open" switched OFF (isOpen = false) in Vendor/Admin Dashboard, or its status is not "approved" yet (e.g. pending/suspended). Re-enabling "Store Open" in Partner/Admin Dashboard or picking an Open restaurant resolves it immediately.',
+    '- Nationwide Map & Location: Users can search any city/thana across all 64 districts of Bangladesh, enter a custom area, drag/click the interactive Google Map pin, or press Back / click outside the map modal to return.',
+    '- Live Rider Tracking & ETA: Users can click "Track Rider" in the header or look up orders via Checkout Email + Order Number to see live rider GPS coordinates, nearest standby rider, and estimated arrival time (ETA).',
+    '- Partner & Rider Portals: Restaurant owners can register, add custom cuisines/categories/areas, and integrate Partner APIs; Riders anywhere in Bangladesh can apply to join and share live GPS locations.',
+    contextNotes,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+

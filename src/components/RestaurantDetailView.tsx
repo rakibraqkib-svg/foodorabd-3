@@ -1,6 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { ArrowLeft, Clock, Heart, MapPin, Plus, Search, Star, X } from 'lucide-react';
-import { formatBdt, calculateCartItemUnitPrice, type CartAddon, type CartItemInput } from '../lib/marketplace-logic';
+import { AlertCircle, ArrowLeft, Clock, Heart, MapPin, Plus, Search, Star, X } from 'lucide-react';
+import {
+  buildRestaurantUnavailableMessage,
+  calculateCartItemUnitPrice,
+  formatBdt,
+  type CartAddon,
+  type CartItemInput,
+} from '../lib/marketplace-logic';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import type { FoodItem, Lang, Restaurant, ReviewItem } from '../types/marketplace';
 
@@ -36,6 +42,11 @@ export function RestaurantDetailView({
   const [selectedAddons, setSelectedAddons] = useState<CartAddon[]>([]);
   const [qty, setQty] = useState(1);
   const [specialNote, setSpecialNote] = useState('');
+
+  const storeUnavailable = restaurant.status !== 'approved' || !restaurant.isOpen;
+  const unavailableBannerText = storeUnavailable
+    ? buildRestaurantUnavailableMessage(restaurant.name, restaurant.status, restaurant.isOpen, lang)
+    : null;
 
   const categories = useMemo(() => {
     const cats = Array.from(new Set(items.map((i) => i.category)));
@@ -192,6 +203,24 @@ export function RestaurantDetailView({
         </div>
       </div>
 
+      {unavailableBannerText && (
+        <div
+          role="alert"
+          data-testid="restaurant-unavailable-banner"
+          className="mb-6 p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 flex items-start gap-3 text-xs sm:text-sm"
+        >
+          <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+          <div className="space-y-0.5">
+            <p className="font-bold">
+              {lang === 'bn'
+                ? 'এই রেস্টুরেন্টটি এখন অর্ডার নিচ্ছে না'
+                : 'Restaurant Currently Unavailable for Orders'}
+            </p>
+            <p className="text-amber-800">{unavailableBannerText}</p>
+          </div>
+        </div>
+      )}
+
       {/* Menu Controls & Grid + Map/Reviews Split */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         <div className="lg:col-span-8">
@@ -233,12 +262,12 @@ export function RestaurantDetailView({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {filteredItems.map((food) => {
                 const effectivePrice = food.discountPrice || food.price;
-                const disabled = !food.inStock || !food.isAvailable;
+                const itemDisabled = !food.inStock || !food.isAvailable || storeUnavailable;
                 return (
                   <div
                     key={food.id}
                     className={`flex justify-between gap-3 p-4 rounded-xl border border-neutral-200 bg-white shadow-[0_1px_3px_rgba(0,0,0,0.04)] transition-all duration-200 ${
-                      disabled ? 'opacity-60' : 'hover:-translate-y-0.5 hover:shadow-md'
+                      itemDisabled ? 'opacity-60' : 'hover:-translate-y-0.5 hover:shadow-md'
                     }`}
                   >
                     <div className="flex-1 flex flex-col justify-between min-w-0">
@@ -268,14 +297,18 @@ export function RestaurantDetailView({
                         </div>
                         <button
                           type="button"
-                          disabled={disabled}
+                          disabled={itemDisabled}
                           onClick={() => openFoodModal(food)}
                           aria-label={`Add ${food.name}`}
                           className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#FFF0F6] text-[#E21B70] hover:bg-[#E21B70] hover:text-white disabled:opacity-40 transition-colors whitespace-nowrap shrink-0"
                         >
                           <Plus className="w-3.5 h-3.5" />
                           <span>
-                            {disabled
+                            {storeUnavailable
+                              ? lang === 'bn'
+                                ? 'বন্ধ'
+                                : 'Closed'
+                              : !food.inStock || !food.isAvailable
                               ? lang === 'bn'
                                 ? 'স্টক নেই'
                                 : 'Sold out'
