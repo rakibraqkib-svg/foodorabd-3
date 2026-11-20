@@ -16,8 +16,10 @@ import {
   advanceRiderAlongRoute,
   calculateLiveRiderEta,
   formatBdt,
+  VEHICLE_TYPE_PRESET_OPTIONS,
 } from '../lib/marketplace-logic';
 import { DhakaMapPicker } from './DhakaMapPicker';
+import { SelectWithCustom } from './SelectWithCustom';
 import type { AppUser, Lang, OrderRecord, RiderRecord } from '../types/marketplace';
 
 interface RiderDashboardProps {
@@ -383,57 +385,65 @@ export function RiderDashboard({
             </div>
             <div>
               <label className="block text-xs font-semibold text-neutral-700 mb-1">Vehicle Type</label>
-              <select
+              <SelectWithCustom
+                required
+                lang={lang}
                 value={vehicleType}
-                onChange={(e) => setVehicleType(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
-              >
-                <option value="Motorbike">Motorbike</option>
-                <option value="Bicycle">Bicycle</option>
-                <option value="Scooter">Scooter</option>
-                <option value="E-Bike / Van">E-Bike / Van</option>
-              </select>
+                onChange={setVehicleType}
+                storageKey="rider_vehicles"
+                ariaLabel="Rider vehicle type"
+                placeholder={
+                  lang === 'bn'
+                    ? 'কাস্টম যানবাহন লিখুন (যেমন: E-Cargo Bike)'
+                    : 'Custom vehicle (e.g. Cargo Bike / Pickup)'
+                }
+                customOptionLabel={
+                  lang === 'bn' ? '+ কাস্টম যানবাহন যোগ...' : '+ Add Custom Vehicle...'
+                }
+                presets={VEHICLE_TYPE_PRESET_OPTIONS.map((v) => ({ value: v, label: v }))}
+              />
             </div>
             <div>
               <label className="block text-xs font-semibold text-neutral-700 mb-1">
                 Working City / Zone (All Bangladesh)
               </label>
-              <select
-                value={zone}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setZone(val);
-                  if (val !== '__custom__') {
-                    const found = BANGLADESH_AREAS.find((a) => a.name === val);
-                    if (found) setApplyCoords({ lat: found.lat, lng: found.lng });
+              <SelectWithCustom
+                required
+                lang={lang}
+                value={zone === '__custom__' ? customZone : zone}
+                onChange={(val) => {
+                  const found = BANGLADESH_AREAS.find((a) => a.name === val);
+                  if (found) {
+                    setZone(found.name);
+                    setCustomZone('');
+                  } else {
+                    setZone('__custom__');
+                    setCustomZone(val);
                   }
                 }}
-                className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
-              >
-                {BANGLADESH_AREAS.map((a) => (
-                  <option key={a.name} value={a.name}>
-                    {a.name} ({a.division}) — {a.nameBn}
-                  </option>
-                ))}
-                <option value="__custom__">Other / Custom Area in Bangladesh...</option>
-              </select>
-            </div>
-          </div>
-
-          {zone === '__custom__' && (
-            <div>
-              <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                Custom District / Area Name
-              </label>
-              <input
-                required
-                value={customZone}
-                onChange={(e) => setCustomZone(e.target.value)}
-                placeholder="e.g. Zindabazar, Sylhet or Cox's Bazar Town"
-                className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                storageKey="bd_areas"
+                ariaLabel="Working city or zone in Bangladesh"
+                placeholder={
+                  lang === 'bn'
+                    ? 'কাস্টম জেলা/এলাকা লিখুন (যেমন: জিন্দাবাজার, সিলেট)'
+                    : 'e.g. Zindabazar, Sylhet or Coxs Bazar Town'
+                }
+                customOptionLabel={
+                  lang === 'bn'
+                    ? '+ কাস্টম এলাকা যোগ করুন...'
+                    : '+ Add Custom Area in Bangladesh...'
+                }
+                presets={BANGLADESH_AREAS.map((a) => ({
+                  value: a.name,
+                  label: `${a.name} (${a.division}) — ${a.nameBn}`,
+                }))}
+                onSelectPreset={(val) => {
+                  const found = BANGLADESH_AREAS.find((a) => a.name === val);
+                  if (found) setApplyCoords({ lat: found.lat, lng: found.lng });
+                }}
               />
             </div>
-          )}
+          </div>
 
           <div>
             <label className="block text-xs font-semibold text-neutral-700 mb-1">NID Number</label>

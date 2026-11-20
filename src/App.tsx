@@ -40,7 +40,7 @@ import { RiderDashboard } from './components/RiderDashboard';
 import { VendorDashboard } from './components/VendorDashboard';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { apiFetch } from './lib/api';
-import { CUISINE_CATEGORIES, DHAKA_AREAS, localizeCouponTitle, t } from './lib/i18n';
+import { BANGLADESH_AREAS, CUISINE_CATEGORIES, localizeCouponTitle, t } from './lib/i18n';
 import {
   canAddToSingleRestaurantCart,
   type CartItemInput,
@@ -63,10 +63,10 @@ import type {
 type ViewMode =
   | { type: 'home' }
   | { type: 'restaurant'; slug: string }
-  | { type: 'tracking'; orderId: number }
+  | { type: 'tracking'; orderId: number; token?: string }
   | { type: 'customer' }
   | { type: 'vendor'; onboarding?: boolean; restaurantId?: number }
-  | { type: 'rider' }
+  | { type: 'rider'; onboarding?: boolean }
   | { type: 'admin' };
 
 const STORAGE_CART_KEY = 'foodora_bd_cart_v1';
@@ -120,8 +120,9 @@ function MarketplaceApp() {
   const [view, setView] = useState<ViewMode>(() => {
     const params = new URLSearchParams(window.location.search);
     const orderParam = Number(params.get('order'));
+    const tokenParam = params.get('token')?.trim() || undefined;
     if (Number.isInteger(orderParam) && orderParam > 0) {
-      return { type: 'tracking', orderId: orderParam };
+      return { type: 'tracking', orderId: orderParam, token: tokenParam };
     }
     const restParam = params.get('restaurant')?.trim();
     if (restParam) {
@@ -142,7 +143,7 @@ function MarketplaceApp() {
   } | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  // Selected delivery area
+  // Selected delivery area (Anywhere in Bangladesh)
   const [selectedArea, setSelectedArea] = useState<{ name: string; nameBn: string; lat: number; lng: number }>(
     () => {
       try {
@@ -151,10 +152,16 @@ function MarketplaceApp() {
       } catch {
         // ignore
       }
-      return DHAKA_AREAS[0];
+      return BANGLADESH_AREAS[0];
     }
   );
   const [locationModalOpen, setLocationModalOpen] = useState(false);
+  const [customAreaInput, setCustomAreaInput] = useState('');
+  const [emailTrackModalOpen, setEmailTrackModalOpen] = useState(false);
+  const [trackEmailInput, setTrackEmailInput] = useState('');
+  const [trackOrderNumInput, setTrackOrderNumInput] = useState('');
+  const [trackLookupLoading, setTrackLookupLoading] = useState(false);
+  const [trackLookupError, setTrackLookupError] = useState<string | null>(null);
 
   // Filters
   const [fulfillmentTab, setFulfillmentTab] = useState<'delivery' | 'pickup'>('delivery');
@@ -281,12 +288,19 @@ function MarketplaceApp() {
     const url = new URL(window.location.href);
     if (view.type === 'tracking') {
       url.searchParams.set('order', String(view.orderId));
+      if (view.token) {
+        url.searchParams.set('token', view.token);
+      } else {
+        url.searchParams.delete('token');
+      }
       url.searchParams.delete('restaurant');
     } else if (view.type === 'restaurant') {
       url.searchParams.set('restaurant', view.slug);
       url.searchParams.delete('order');
+      url.searchParams.delete('token');
     } else {
       url.searchParams.delete('order');
+      url.searchParams.delete('token');
       url.searchParams.delete('restaurant');
     }
     window.history.replaceState({}, '', url.toString());
@@ -412,7 +426,7 @@ function MarketplaceApp() {
       const pageDesc = activeRestaurant
         ? lang === 'bn'
           ? `${activeRestaurant.nameBn} (${activeRestaurant.area}) থেকে অনলাইনে ${activeRestaurant.cuisine} অর্ডার করুন। দ্রুত ডেলিভারি ও বিকাশ/নগদ পেমেন্ট।`
-          : `Order ${activeRestaurant.cuisine} online from ${activeRestaurant.name} in ${activeRestaurant.area}, Dhaka. Fast delivery with bKash, Nagad & COD.`
+          : `Order ${activeRestaurant.cuisine} online from ${activeRestaurant.name} in ${activeRestaurant.area}, Bangladesh. Fast delivery with bKash, Nagad & COD.`
         : lang === 'bn'
         ? sc.seoDescriptionBn
         : sc.seoDescriptionEn;
@@ -506,7 +520,7 @@ function MarketplaceApp() {
                     '@type': 'PostalAddress',
                     streetAddress: activeRestaurant.address,
                     addressLocality: activeRestaurant.area,
-                    addressRegion: 'Dhaka',
+                    addressRegion: activeRestaurant.area || 'Bangladesh',
                     addressCountry: 'BD',
                   },
                   aggregateRating: {
@@ -525,7 +539,7 @@ function MarketplaceApp() {
                 address: {
                   '@type': 'PostalAddress',
                   addressLocality: r.area,
-                  addressRegion: 'Dhaka',
+                  addressRegion: r.area || 'Bangladesh',
                   addressCountry: 'BD',
                 },
                 aggregateRating: {
@@ -634,8 +648,8 @@ function MarketplaceApp() {
             `/api/free/reverse-geocode?lat=${lat}&lng=${lng}`
           );
           setSelectedArea({
-            name: res.areaName || 'Dhaka',
-            nameBn: res.areaName || 'ঢাকা',
+            name: res.areaName || 'Bangladesh',
+            nameBn: res.areaName || 'বাংলাদেশ',
             lat,
             lng,
           });
@@ -955,12 +969,15 @@ function MarketplaceApp() {
             </button>
             <button
               type="button"
-              onClick={() => handleSwitchWorkspace('rider', { type: 'rider' })}
+              onClick={() => {
+                setView({ type: 'rider', onboarding: true });
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
               className="px-3 sm:px-4 py-1 rounded-lg border border-white/80 hover:bg-white/15 font-bold text-[10px] sm:text-[11px] uppercase tracking-wide inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
             >
               <Bike className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t(lang, 'riderCta')}</span>
-              <span className="sm:hidden">Rider</span>
+              <span className="sm:hidden">Rider Job</span>
             </button>
             <button
               type="button"
@@ -1013,7 +1030,7 @@ function MarketplaceApp() {
             >
               <MapPin className="w-4 h-4 text-[#E21B70] shrink-0" />
               <span className="truncate">
-                {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}, Dhaka
+                {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}, BD
               </span>
               <ChevronDown className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
             </button>
@@ -1103,6 +1120,24 @@ function MarketplaceApp() {
                 <span>{lang === 'bn' ? 'লগইন / সাইন আপ' : 'Login / Sign Up'}</span>
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={() => {
+                setTrackLookupError(null);
+                if (!trackEmailInput && user && !user.isSandbox && user.email) {
+                  setTrackEmailInput(user.email);
+                }
+                setEmailTrackModalOpen(true);
+              }}
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg border border-neutral-300 hover:border-[#E21B70] text-xs font-bold text-[#2E3138] whitespace-nowrap shrink-0 transition-colors"
+            >
+              <Mail className="w-3.5 h-3.5 text-[#E21B70]" />
+              <span className="hidden md:inline">
+                {lang === 'bn' ? 'ইমেইল অর্ডার ট্র্যাক' : 'Track by Email'}
+              </span>
+              <span className="md:hidden">{lang === 'bn' ? 'ট্র্যাক' : 'Track'}</span>
+            </button>
 
             <button
               type="button"
@@ -1438,6 +1473,7 @@ function MarketplaceApp() {
         ) : view.type === 'tracking' ? (
           <OrderTrackingView
             orderId={view.orderId}
+            initialToken={view.token}
             lang={lang}
             mapsApiKey={mapsApiKey}
             onBack={() => setView({ type: 'home' })}
@@ -1453,7 +1489,7 @@ function MarketplaceApp() {
             onSelectRestaurant={openRestaurant}
             onTrackOrder={(orderId) => setView({ type: 'tracking', orderId })}
             onSelectDefaultAddress={(areaName, lat, lng) => {
-              const found = DHAKA_AREAS.find((a) => a.name === areaName);
+              const found = BANGLADESH_AREAS.find((a) => a.name === areaName);
               setSelectedArea({
                 name: areaName,
                 nameBn: found?.nameBn || areaName,
@@ -1475,11 +1511,12 @@ function MarketplaceApp() {
             onMenuMutated={loadStorefront}
             onBack={() => setView({ type: 'home' })}
           />
-        ) : view.type === 'rider' && user ? (
+        ) : view.type === 'rider' ? (
           <RiderDashboard
             user={user}
             lang={lang}
             mapsApiKey={mapsApiKey}
+            initialOnboarding={view.onboarding}
             onRefreshUser={refreshUser}
             onTrackOrder={(orderId) => setView({ type: 'tracking', orderId })}
             onBack={() => setView({ type: 'home' })}
@@ -1488,6 +1525,7 @@ function MarketplaceApp() {
           isPrivilegedAdmin && user ? (
             <AdminDashboard
               lang={lang}
+              mapsApiKey={mapsApiKey}
               currentUser={user}
               onRestaurantsMutated={loadStorefront}
               onOpenVendorStore={(restaurantId) => {
@@ -1718,7 +1756,7 @@ function MarketplaceApp() {
                   >
                     <MapPin className="w-4 h-4 text-[#E21B70] shrink-0" />
                     <span className="truncate">
-                      {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}, Dhaka
+                      {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}, BD
                     </span>
                   </button>
                   <button
@@ -1827,8 +1865,8 @@ function MarketplaceApp() {
                     </h2>
                     <p className="text-xs text-neutral-500 mt-0.5">
                       {lang === 'bn'
-                        ? 'ঢাকার সেরা রেস্টুরেন্টের তাজা খাবার সরাসরি কার্টে যোগ করে অর্ডার করুন'
-                        : 'Fresh signature dishes across Dhaka — tap + Order to add straight to your cart'}
+                        ? 'ঢাকা ও বাংলাদেশের যেকোনো শহরের সেরা রেস্টুরেন্টের তাজা খাবার সরাসরি কার্টে যোগ করুন'
+                        : 'Fresh signature dishes across Bangladesh — tap + Add to order straight from any city'}
                     </p>
                   </div>
                   {filteredProducts.length > 8 && (
@@ -2020,7 +2058,7 @@ function MarketplaceApp() {
                   <div className="lg:col-span-5 relative h-48 sm:h-56 lg:h-auto min-h-[220px] bg-[#FAD8E6]">
                     <img
                       src={sc.heroImageUrl}
-                      alt="Dhaka Feast"
+                      alt="Bangladesh Feast"
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"
                     />
@@ -2346,15 +2384,15 @@ function MarketplaceApp() {
 
             <div className="space-y-1.5">
               <p className="font-bold text-[#2E3138] text-sm">
-                {lang === 'bn' ? 'ঢাকা ডেলিভারি জোন' : 'Dhaka Delivery Zones'}
+                {lang === 'bn' ? 'সারাদেশে ডেলিভারি জোন' : 'All Bangladesh Delivery Zones'}
               </p>
-              <p>{sc.footerZonesLine1}</p>
-              <p>{sc.footerZonesLine2}</p>
+              <p>Dhaka, Chattogram, Sylhet, Rajshahi, Khulna</p>
+              <p>Barishal, Rangpur, Mymensingh &amp; All 64 Districts</p>
             </div>
 
             <div className="space-y-1.5">
               <p className="font-bold text-[#2E3138] text-sm">
-                {lang === 'bn' ? 'মার্কেটপ্লেস পোর্টাল' : 'Partner Portals'}
+                {lang === 'bn' ? 'মার্কেটপ্লেস পোর্টাল' : 'Partner & Job Portals'}
               </p>
               <button
                 type="button"
@@ -2365,10 +2403,23 @@ function MarketplaceApp() {
               </button>
               <button
                 type="button"
-                onClick={() => handleSwitchWorkspace('rider', { type: 'rider' })}
+                onClick={() => {
+                  setView({ type: 'rider', onboarding: true });
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
                 className="block hover:text-[#E21B70]"
               >
                 {t(lang, 'riderCta')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTrackLookupError(null);
+                  setEmailTrackModalOpen(true);
+                }}
+                className="block hover:text-[#E21B70]"
+              >
+                {lang === 'bn' ? 'ইমেইলে অর্ডার ট্র্যাক করুন' : 'Track Order by Email'}
               </button>
               <button
                 type="button"
@@ -2404,13 +2455,14 @@ function MarketplaceApp() {
         mapsApiKey={mapsApiKey}
         selectedArea={selectedArea}
         customerName={user?.fullName || 'Rahim Uddin'}
+        customerEmail={user?.isSandbox ? '' : user?.email || ''}
         paymentGateways={publicGateways}
         onUpdateQty={handleUpdateQty}
         onRemoveItem={handleRemoveCartItem}
         onClearCart={handleClearCart}
-        onOrderCreated={(orderId) => {
+        onOrderCreated={(orderId, trackingToken) => {
           setCartOpen(false);
-          setView({ type: 'tracking', orderId });
+          setView({ type: 'tracking', orderId, token: trackingToken });
           loadUserSignals();
         }}
       />
@@ -2473,8 +2525,8 @@ function MarketplaceApp() {
                   onChange={(e) => setOsmQuery(e.target.value)}
                   placeholder={
                     lang === 'bn'
-                      ? 'ঢাকার রাস্তার নাম বা এলাকা লিখুন (যেমন: Banani Road 11)...'
-                      : 'Search Dhaka street, area, or landmark...'
+                      ? 'বাংলাদেশের যেকোনো শহর, জেলা বা এলাকার নাম খুঁজুন...'
+                      : 'Search any street, city, or district in Bangladesh (e.g. Sylhet, Chattogram)...'
                   }
                   className="w-full pl-9 pr-3 py-2 rounded-xl border border-neutral-200 text-xs focus:outline-none focus:border-[#E21B70]"
                 />
@@ -2496,6 +2548,39 @@ function MarketplaceApp() {
                 <span>{locatingGps ? '...' : lang === 'bn' ? 'GPS অবস্থান' : 'Use GPS'}</span>
               </button>
             </form>
+
+            {/* Quick Custom Area Input (Any Thana / District in BD) */}
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={customAreaInput}
+                onChange={(e) => setCustomAreaInput(e.target.value)}
+                placeholder={
+                  lang === 'bn'
+                    ? 'অথবা সরাসরি আপনার এলাকা/থানার নাম লিখুন...'
+                    : 'Or enter custom area/thana anywhere in Bangladesh...'
+                }
+                className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-neutral-200 text-xs focus:outline-none focus:border-[#E21B70]"
+              />
+              <button
+                type="button"
+                disabled={!customAreaInput.trim()}
+                onClick={() => {
+                  const name = customAreaInput.trim();
+                  if (!name) return;
+                  setSelectedArea({
+                    name,
+                    nameBn: name,
+                    lat: selectedArea.lat,
+                    lng: selectedArea.lng,
+                  });
+                  setCustomAreaInput('');
+                }}
+                className="px-3 py-2 rounded-xl bg-[#2E3138] text-white text-xs font-semibold disabled:opacity-40 shrink-0"
+              >
+                {lang === 'bn' ? 'সেট করুন' : 'Set Area'}
+              </button>
+            </div>
 
             {osmPlaces.length > 0 && (
               <div className="rounded-xl border border-neutral-200 divide-y divide-neutral-100 max-h-36 overflow-y-auto bg-[#FAFAFB]">
@@ -2521,8 +2606,8 @@ function MarketplaceApp() {
               </div>
             )}
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {DHAKA_AREAS.map((a) => (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-40 overflow-y-auto pr-1">
+              {BANGLADESH_AREAS.map((a) => (
                 <button
                   key={a.name}
                   type="button"
@@ -2533,7 +2618,8 @@ function MarketplaceApp() {
                       : 'border-neutral-200 text-neutral-700 hover:border-neutral-300'
                   }`}
                 >
-                  {lang === 'bn' ? a.nameBn : a.name}
+                  <span className="block truncate">{lang === 'bn' ? a.nameBn : a.name}</span>
+                  <span className="block text-[10px] text-neutral-400 font-normal">{a.division}</span>
                 </button>
               ))}
             </div>
@@ -2544,9 +2630,9 @@ function MarketplaceApp() {
               center={{ lat: selectedArea.lat, lng: selectedArea.lng }}
               markerLabel={selectedArea.name}
               interactive
-              heightClass="h-[260px]"
+              heightClass="h-[250px]"
               onSelectLocation={(c) => {
-                const found = DHAKA_AREAS.find((a) => a.name === c.areaName);
+                const found = BANGLADESH_AREAS.find((a) => a.name === c.areaName);
                 setSelectedArea({
                   name: c.areaName || selectedArea.name,
                   nameBn: found?.nameBn || c.areaName || selectedArea.nameBn,
@@ -3357,6 +3443,126 @@ function MarketplaceApp() {
               className="w-full py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold disabled:opacity-50"
             >
               {supaRecoverySaving ? 'Saving...' : 'Save New Password'}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Email Order Tracking Lookup Modal */}
+      {emailTrackModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setTrackLookupLoading(true);
+              setTrackLookupError(null);
+              try {
+                const params = new URLSearchParams({
+                  email: trackEmailInput.trim(),
+                });
+                if (trackOrderNumInput.trim()) {
+                  params.set('orderNumber', trackOrderNumInput.trim());
+                }
+                const res = await apiFetch<{
+                  order: { id: number; orderNumber: string; trackingToken?: string };
+                }>(`/api/orders/track-by-email?${params.toString()}`);
+                setEmailTrackModalOpen(false);
+                setView({
+                  type: 'tracking',
+                  orderId: res.order.id,
+                  token: res.order.trackingToken,
+                });
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              } catch (err: unknown) {
+                setTrackLookupError(
+                  err instanceof Error
+                    ? err.message
+                    : lang === 'bn'
+                    ? 'এই ইমেইলে কোনো অর্ডার পাওয়া যায়নি'
+                    : 'No matching order found for this email'
+                );
+              } finally {
+                setTrackLookupLoading(false);
+              }
+            }}
+            className="bg-white rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-9 h-9 rounded-xl bg-[#FFF0F6] text-[#E21B70] flex items-center justify-center">
+                  <Mail className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-[#2E3138]">
+                    {lang === 'bn' ? 'ইমেইলে অর্ডার ট্র্যাক করুন' : 'Track Order by Email'}
+                  </h3>
+                  <p className="text-[11px] text-neutral-500">
+                    {lang === 'bn'
+                      ? 'অর্ডার করার সময় দেওয়া ইমেইল দিয়ে লাইভ ম্যাপ ও ইমেইল আপডেট দেখুন'
+                      : 'Enter checkout email to open live GPS tracking & email log'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEmailTrackModalOpen(false)}
+                aria-label="Close Track Order modal"
+                className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {trackLookupError && (
+              <div
+                role="alert"
+                className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700"
+              >
+                {trackLookupError}
+              </div>
+            )}
+
+            <div className="space-y-3 text-xs">
+              <label className="block">
+                <span className="font-semibold text-neutral-700">
+                  {lang === 'bn' ? 'গ্রাহকের ইমেইল *' : 'Customer Email *'}
+                </span>
+                <input
+                  type="email"
+                  required
+                  value={trackEmailInput}
+                  onChange={(e) => setTrackEmailInput(e.target.value)}
+                  placeholder="customer@example.com"
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-neutral-300 text-sm focus:outline-none focus:border-[#E21B70]"
+                />
+              </label>
+
+              <label className="block">
+                <span className="font-semibold text-neutral-700">
+                  {lang === 'bn' ? 'অর্ডার নম্বর (ঐচ্ছিক)' : 'Order Number (Optional)'}
+                </span>
+                <input
+                  type="text"
+                  value={trackOrderNumInput}
+                  onChange={(e) => setTrackOrderNumInput(e.target.value)}
+                  placeholder="e.g. FD-2026-1001"
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-neutral-300 text-sm focus:outline-none focus:border-[#E21B70]"
+                />
+              </label>
+            </div>
+
+            <button
+              type="submit"
+              disabled={trackLookupLoading}
+              className="w-full py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold disabled:opacity-50"
+            >
+              {trackLookupLoading
+                ? lang === 'bn'
+                  ? 'খুঁজছি...'
+                  : 'Looking up order...'
+                : lang === 'bn'
+                ? 'লাইভ অর্ডার ট্র্যাক করুন'
+                : 'Find & Track Order Live'}
             </button>
           </form>
         </div>

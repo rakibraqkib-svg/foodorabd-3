@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Heart, MapPin, Package, Plus, Star, User } from 'lucide-react';
 import { apiFetch } from '../lib/api';
-import { DHAKA_AREAS } from '../lib/i18n';
+import { BANGLADESH_AREAS } from '../lib/i18n';
 import { formatBdt } from '../lib/marketplace-logic';
 import { DhakaMapPicker } from './DhakaMapPicker';
+import { SelectWithCustom } from './SelectWithCustom';
 import type {
   AppUser,
   CustomerAddress,
@@ -44,10 +45,10 @@ export function CustomerDashboard({
 
   const [showAddressForm, setShowAddressForm] = useState(false);
   const [label, setLabel] = useState('Home');
-  const [area, setArea] = useState(DHAKA_AREAS[0].name);
+  const [area, setArea] = useState(BANGLADESH_AREAS[0].name);
   const [addressLine, setAddressLine] = useState('');
   const [instructions, setInstructions] = useState('');
-  const [coords, setCoords] = useState({ lat: DHAKA_AREAS[0].lat, lng: DHAKA_AREAS[0].lng });
+  const [coords, setCoords] = useState({ lat: BANGLADESH_AREAS[0].lat, lng: BANGLADESH_AREAS[0].lng });
   const [savingAddr, setSavingAddr] = useState(false);
 
   const loadData = useCallback(async () => {
@@ -262,23 +263,34 @@ export function CustomerDashboard({
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                    {lang === 'bn' ? 'ঢাকা জোন' : 'Dhaka Zone'}
+                    {lang === 'bn' ? 'শহর / এলাকা (সারা বাংলাদেশ)' : 'City / Area (All Bangladesh)'}
                   </label>
-                  <select
+                  <SelectWithCustom
+                    required
+                    lang={lang}
                     value={area}
-                    onChange={(e) => {
-                      const found = DHAKA_AREAS.find((a) => a.name === e.target.value);
-                      setArea(e.target.value);
+                    onChange={setArea}
+                    storageKey="bd_areas"
+                    ariaLabel="Customer delivery area"
+                    placeholder={
+                      lang === 'bn'
+                        ? 'কাস্টম এলাকার নাম লিখুন (যেমন: বগুড়া সদর)'
+                        : 'Type custom area (e.g. Rampura, Dhaka or Bogura)'
+                    }
+                    customOptionLabel={
+                      lang === 'bn'
+                        ? '+ কাস্টম এলাকা যোগ করুন...'
+                        : '+ Add Custom Area in Bangladesh...'
+                    }
+                    presets={BANGLADESH_AREAS.map((a) => ({
+                      value: a.name,
+                      label: `${a.name} — ${a.division} (${a.nameBn})`,
+                    }))}
+                    onSelectPreset={(val) => {
+                      const found = BANGLADESH_AREAS.find((a) => a.name === val);
                       if (found) setCoords({ lat: found.lat, lng: found.lng });
                     }}
-                    className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
-                  >
-                    {DHAKA_AREAS.map((a) => (
-                      <option key={a.name} value={a.name}>
-                        {a.name} ({a.nameBn})
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </div>
               </div>
 

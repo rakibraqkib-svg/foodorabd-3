@@ -1294,35 +1294,65 @@ app.get('/api/customer/orders', requireAuth, async (req: AuthRequest, res) => {
 app.get('/api/orders/track-by-email', async (req, res) => {
   const email = String(req.query.email || '').trim().toLowerCase();
   const orderNumber = String(req.query.orderNumber || '').trim().toUpperCase();
-  if (!email || !email.includes('@') || !orderNumber) {
-    return res.status(400).json({ error: 'Please provide both your email address and order number.' });
+  if (!email || !email.includes('@')) {
+    return res.status(400).json({ error: 'Please provide a valid email address.' });
   }
 
   try {
-    const matched = await db
-      .select()
-      .from(orders)
-      .where(sql`upper(${orders.orderNumber}) = ${orderNumber}`)
-      .limit(1);
+    let matched: Array<typeof orders.$inferSelect> = [];
+    if (orderNumber) {
+      matched = await db
+        .select()
+        .from(orders)
+        .where(sql`upper(${orders.orderNumber}) = ${orderNumber}`)
+        .limit(1);
 
-    if (matched.length === 0) {
-      return res.status(404).json({ error: `Order ${orderNumber} was not found.` });
-    }
-    const ord = matched[0];
-    let matches = doesEmailMatchOrder(ord.customerEmail, email);
-    if (!matches && ord.customerUid) {
-      const custUsers = await db.select().from(users).where(eq(users.uid, ord.customerUid)).limit(1);
-      if (custUsers[0] && doesEmailMatchOrder(custUsers[0].email, email)) {
-        matches = true;
+      if (matched.length === 0) {
+        return res.status(404).json({ error: `Order ${orderNumber} was not found.` });
+      }
+      const ord = matched[0];
+      let matches = doesEmailMatchOrder(ord.customerEmail, email);
+      if (!matches && ord.customerUid) {
+        const custUsers = await db.select().from(users).where(eq(users.uid, ord.customerUid)).limit(1);
+        if (custUsers[0] && doesEmailMatchOrder(custUsers[0].email, email)) {
+          matches = true;
+        }
+      }
+      if (!matches) {
+        return res.status(403).json({
+          error: 'The email address does not match the tracking email on this order.',
+        });
+      }
+    } else {
+      matched = await db
+        .select()
+        .from(orders)
+        .where(sql`lower(${orders.customerEmail}) = ${email}`)
+        .orderBy(desc(orders.createdAt))
+        .limit(1);
+
+      if (matched.length === 0) {
+        const custUsers = await db
+          .select()
+          .from(users)
+          .where(sql`lower(${users.email}) = ${email}`)
+          .limit(1);
+        if (custUsers[0]) {
+          matched = await db
+            .select()
+            .from(orders)
+            .where(eq(orders.customerUid, custUsers[0].uid))
+            .orderBy(desc(orders.createdAt))
+            .limit(1);
+        }
+      }
+
+      if (matched.length === 0) {
+        return res.status(404).json({ error: `No orders found for ${email}.` });
       }
     }
-    if (!matches) {
-      return res.status(403).json({
-        error: 'The email address does not match the tracking email on this order.',
-      });
-    }
 
-    const detail = await getOrderById(ord.id);
+    const detail = await getOrderById(matched[0].id);
     if (!detail) return res.status(404).json({ error: 'Order not found' });
     return res.json(detail);
   } catch (error: any) {
@@ -1943,7 +1973,7 @@ app.post('/api/restaurants/register', requireAuth, async (req: AuthRequest, res)
     description: z.string().min(5),
     tradeLicense: z.string().min(3),
     nidNumber: z.string().min(5),
-    payoutMethod: z.enum(['bkash', 'nagad', 'bank']),
+    payoutMethod: z.string().trim().min(2).max(40),
     payoutAccount: z.string().min(5),
     logoUrl: z.string().optional().default(''),
     coverUrl: z.string().optional().default(''),
@@ -2580,6 +2610,10 @@ app.patch(
       logoUrl: z.string().optional(),
       coverUrl: z.string().optional(),
       description: z.string().optional(),
+      area: z.string().min(2).optional(),
+      address: z.string().min(3).optional(),
+      lat: z.number().optional(),
+      lng: z.number().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Invalid restaurant settings' });
@@ -2604,6 +2638,10 @@ app.patch(
           deliveryFee: parsed.data.deliveryFee ?? rows[0].deliveryFee,
           minOrder: parsed.data.minOrder ?? rows[0].minOrder,
           deliveryMode: parsed.data.deliveryMode ?? rows[0].deliveryMode,
+          area: parsed.data.area !== undefined ? parsed.data.area.trim() : rows[0].area,
+          address: parsed.data.address !== undefined ? parsed.data.address.trim() : rows[0].address,
+          lat: parsed.data.lat !== undefined ? parsed.data.lat : rows[0].lat,
+          lng: parsed.data.lng !== undefined ? parsed.data.lng : rows[0].lng,
           logoUrl:
             parsed.data.logoUrl !== undefined ? parsed.data.logoUrl.trim() : rows[0].logoUrl,
           coverUrl:

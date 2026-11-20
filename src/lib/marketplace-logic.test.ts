@@ -28,6 +28,13 @@ import {
   partitionOwnedVsPartnerRestaurants,
   buildRobotsTxt,
   buildSitemapXml,
+  isWithinBangladesh,
+  resolveNearestAreaFromList,
+  buildOrderTrackingUrl,
+  doesEmailMatchOrder,
+  buildOrderTrackingEmailPayload,
+  normalizeCustomOptionValue,
+  mergeCustomSelectOptions,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 
@@ -516,8 +523,91 @@ test('buildRobotsTxt and buildSitemapXml emit valid SEO crawl files with escaped
   assert.equal(xml.match(/sultans-dine/g)?.length, 1);
 });
 
+test('isWithinBangladesh and resolveNearestAreaFromList support nationwide BD cities', () => {
+  // Dhaka, Sylhet, Chattogram, Cox's Bazar
+  assert.equal(isWithinBangladesh(23.7949, 90.4144), true);
+  assert.equal(isWithinBangladesh(24.8949, 91.8687), true);
+  assert.equal(isWithinBangladesh(22.3569, 91.7832), true);
+  assert.equal(isWithinBangladesh(21.4272, 92.0058), true);
 
+  // Outside Bangladesh bounds (London / Singapore / NaN)
+  assert.equal(isWithinBangladesh(51.5074, -0.1278), false);
+  assert.equal(isWithinBangladesh(1.3521, 103.8198), false);
+  assert.equal(isWithinBangladesh(Number.NaN, 90.4), false);
 
+  const bdCities = [
+    { name: 'Gulshan 2', lat: 23.7949, lng: 90.4144 },
+    { name: 'Sylhet (Zindabazar)', lat: 24.8949, lng: 91.8687 },
+    { name: 'Chattogram (GEC / Agrabad)', lat: 22.3569, lng: 91.7832 },
+  ];
+  const nearSylhet = resolveNearestAreaFromList(24.901, 91.872, bdCities);
+  assert.equal(nearSylhet.area?.name, 'Sylhet (Zindabazar)');
+  assert.equal(nearSylhet.label, 'Sylhet (Zindabazar)');
 
+  // Far rural coordinate (>18km away from nearest preset) appends coordinate precision
+  const farRural = resolveNearestAreaFromList(24.25, 91.4, bdCities);
+  assert.ok(farRural.distanceKm > 18);
+  assert.ok(farRural.label.includes('('));
+});
 
+test('buildOrderTrackingUrl and doesEmailMatchOrder handle tokens and case-insensitive email lookup', () => {
+  assert.equal(
+    buildOrderTrackingUrl('https://foodorabd1.vercel.app/', 42, 'tok_abc123'),
+    'https://foodorabd1.vercel.app/?order=42&token=tok_abc123'
+  );
+  assert.equal(
+    buildOrderTrackingUrl('https://foodorabd1.vercel.app', 42, null),
+    'https://foodorabd1.vercel.app/?order=42'
+  );
 
+  assert.equal(doesEmailMatchOrder('Customer@Example.com ', 'customer@example.com'), true);
+  assert.equal(doesEmailMatchOrder('a@b.com', 'c@b.com'), false);
+  assert.equal(doesEmailMatchOrder('', 'c@b.com'), false);
+});
+
+test('buildOrderTrackingEmailPayload formats tracking URL, escaped customer text, and rider info', () => {
+  const payload = buildOrderTrackingEmailPayload({
+    origin: 'https://foodorabd1.vercel.app/',
+    orderId: 99,
+    orderNumber: 'FD-2026-9900',
+    trackingToken: 'sec_tok_99',
+    customerName: 'Nadia <Rahman>',
+    customerEmail: 'nadia@example.com',
+    restaurantName: 'Panshi & Sons',
+    deliveryArea: 'Sylhet (Zindabazar)',
+    totalAmount: 780,
+    paymentMethod: 'bkash',
+    status: 'on_the_way',
+    statusNote: 'Rider departed kitchen',
+    riderName: 'Kamrul Rider',
+  });
+
+  assert.equal(payload.subject, 'Foodora BD Order FD-2026-9900 — ON THE WAY');
+  assert.equal(payload.trackingUrl, 'https://foodorabd1.vercel.app/?order=99&token=sec_tok_99');
+  assert.ok(payload.html.includes('Nadia &lt;Rahman&gt;'));
+  assert.ok(payload.html.includes('Panshi &amp; Sons'));
+  assert.ok(payload.html.includes('Kamrul Rider'));
+  assert.ok(payload.html.includes('https://foodorabd1.vercel.app/?order=99&amp;token=sec_tok_99'));
+  assert.ok(payload.text.includes('Sylhet (Zindabazar)'));
+});
+
+test('mergeCustomSelectOptions deduplicates case-insensitively and appends saved custom options', () => {
+  assert.equal(normalizeCustomOptionValue('  Rampura   Dhaka  '), 'Rampura Dhaka');
+
+  const merged = mergeCustomSelectOptions(
+    [
+      { value: 'Gulshan 2', label: 'Gulshan 2 — Dhaka' },
+      { value: 'Banani', label: 'Banani — Dhaka' },
+    ],
+    ['  gulshan 2 ', 'Banasree Block C', 'Rampura   Dhaka', 'Banasree Block C'],
+    'Khilgaon Taltola'
+  );
+
+  assert.equal(merged.length, 5);
+  assert.equal(merged[0].value, 'Gulshan 2');
+  assert.equal(merged[1].value, 'Banani');
+  assert.equal(merged[2].value, 'Banasree Block C');
+  assert.equal(merged[2].label, 'Banasree Block C (Custom)');
+  assert.equal(merged[3].value, 'Rampura Dhaka');
+  assert.equal(merged[4].value, 'Khilgaon Taltola');
+});

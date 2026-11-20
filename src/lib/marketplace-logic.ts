@@ -1119,6 +1119,84 @@ ${input.riderName ? `Rider: ${input.riderName}\n` : ''}${input.statusNote ? `Upd
   return { subject, trackingUrl, html, text };
 }
 
+export const CUISINE_PRESET_OPTIONS: readonly string[] = [
+  'Bangladeshi',
+  'Biriyani',
+  'Burger',
+  'Pizza',
+  'Kabab',
+  'Chinese',
+  'Bakery',
+  'Drinks',
+  'Seafood',
+  'Fast Food',
+  'Sweets & Desserts',
+];
 
+export const FOOD_CATEGORY_PRESET_OPTIONS: readonly string[] = [
+  'Main Course',
+  'Biriyani & Kacchi',
+  'Burgers',
+  'Pizza',
+  'Kabab & Grill',
+  'Bangladeshi',
+  'Chinese & Momos',
+  'Snacks & Appetizers',
+  'Desserts & Bakery',
+  'Drinks & Coffee',
+  'Combo Meals',
+];
 
+export const VEHICLE_TYPE_PRESET_OPTIONS: readonly string[] = [
+  'Motorbike',
+  'Bicycle',
+  'Scooter',
+  'E-Bike / Van',
+  'CNG / Auto',
+  'Pickup Van',
+];
 
+export interface SelectOptionItem {
+  value: string;
+  label: string;
+}
+
+export function normalizeCustomOptionValue(raw: string): string {
+  return String(raw || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+export function mergeCustomSelectOptions(
+  presets: readonly SelectOptionItem[],
+  customValues: readonly string[],
+  currentValue?: string
+): SelectOptionItem[] {
+  const seen = new Set<string>();
+  const out: SelectOptionItem[] = [];
+
+  for (const item of presets) {
+    const cleanVal = normalizeCustomOptionValue(item.value);
+    if (!cleanVal) continue;
+    const key = cleanVal.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ value: cleanVal, label: item.label || cleanVal });
+  }
+
+  for (const rawCustom of customValues) {
+    const clean = normalizeCustomOptionValue(rawCustom);
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ value: clean, label: `${clean} (Custom)` });
+  }
+
+  const cleanCurrent = normalizeCustomOptionValue(currentValue || '');
+  if (cleanCurrent && !seen.has(cleanCurrent.toLowerCase())) {
+    out.push({ value: cleanCurrent, label: cleanCurrent });
+  }
+
+  return out;
+}

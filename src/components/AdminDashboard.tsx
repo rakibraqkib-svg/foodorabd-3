@@ -3,6 +3,7 @@ import {
   Activity,
   ArrowLeft,
   Bell,
+  Bike,
   Check,
   CheckCircle2,
   Copy,
@@ -15,6 +16,8 @@ import {
   Globe,
   KeyRound,
   LayoutTemplate,
+  LocateFixed,
+  MapPin,
   Package,
   Pencil,
   Plus,
@@ -34,15 +37,20 @@ import {
   X,
 } from 'lucide-react';
 import { apiFetch, getAuthToken } from '../lib/api';
-import { DHAKA_AREAS } from '../lib/i18n';
+import { BANGLADESH_AREAS } from '../lib/i18n';
+import { DhakaMapPicker } from './DhakaMapPicker';
+import { SelectWithCustom } from './SelectWithCustom';
 import {
   ADMIN_PIN_DEFAULT_EMAIL,
   canActorModifyUserAccount,
+  CUISINE_PRESET_OPTIONS,
+  FOOD_CATEGORY_PRESET_OPTIONS,
   formatBdt,
   isOwnerRestaurant,
   isProtectedSuperAdminEmail,
   OrderStatus,
   PRIMARY_SUPER_ADMIN_EMAIL,
+  VEHICLE_TYPE_PRESET_OPTIONS,
 } from '../lib/marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from '../lib/storefront-config';
 import type {
@@ -73,6 +81,7 @@ interface AdminUserRow {
 
 interface AdminDashboardProps {
   lang: Lang;
+  mapsApiKey?: string;
   currentUser: AppUser;
   onRestaurantsMutated: () => Promise<void>;
   onOpenVendorStore?: (restaurantId: number) => void;
@@ -102,6 +111,8 @@ interface RestaurantFormState {
   cuisine: string;
   area: string;
   address: string;
+  lat: number;
+  lng: number;
   description: string;
   logoUrl: string;
   coverUrl: string;
@@ -147,6 +158,7 @@ const ORDER_STATUS_OPTIONS: OrderStatus[] = [
 
 export function AdminDashboard({
   lang,
+  mapsApiKey = '',
   currentUser,
   onRestaurantsMutated,
   onOpenVendorStore,
@@ -245,6 +257,14 @@ export function AdminDashboard({
   const [couponType, setCouponType] = useState<'percentage' | 'fixed' | 'free_delivery'>('fixed');
   const [value, setValue] = useState('100');
   const [minOrder, setMinOrder] = useState('350');
+
+  // Admin Live Rider Fleet Control state
+  const [selectedRiderId, setSelectedRiderId] = useState<number | null>(null);
+  const [riderEditZones, setRiderEditZones] = useState<Record<number, string>>({});
+  const [riderEditVehicles, setRiderEditVehicles] = useState<Record<number, string>>({});
+  const [customRiderMoveArea, setCustomRiderMoveArea] = useState('');
+  const [showCustomRiderMove, setShowCustomRiderMove] = useState(false);
+  const [dispatchOrderByRider, setDispatchOrderByRider] = useState<Record<number, string>>({});
 
   const loadBackendStatus = useCallback(async () => {
     setLoadingBackend(true);
@@ -879,8 +899,10 @@ export function AdminDashboard({
       name: '',
       nameBn: '',
       cuisine: 'Bangladeshi',
-      area: DHAKA_AREAS[0].name,
+      area: BANGLADESH_AREAS[0].name,
       address: '',
+      lat: BANGLADESH_AREAS[0].lat,
+      lng: BANGLADESH_AREAS[0].lng,
       description: '',
       logoUrl: '',
       coverUrl: '',
@@ -905,6 +927,8 @@ export function AdminDashboard({
       cuisine: r.cuisine,
       area: r.area,
       address: r.address,
+      lat: Number(r.lat) || BANGLADESH_AREAS[0].lat,
+      lng: Number(r.lng) || BANGLADESH_AREAS[0].lng,
       description: r.description,
       logoUrl: r.logoUrl || '',
       coverUrl: r.coverUrl,
@@ -932,6 +956,8 @@ export function AdminDashboard({
         cuisine: restaurantModal.cuisine.trim(),
         area: restaurantModal.area.trim(),
         address: restaurantModal.address.trim(),
+        lat: restaurantModal.lat,
+        lng: restaurantModal.lng,
         description: restaurantModal.description.trim(),
         logoUrl: restaurantModal.logoUrl.trim(),
         coverUrl: restaurantModal.coverUrl.trim(),
@@ -1087,7 +1113,14 @@ export function AdminDashboard({
 
   const handleUpdateRider = async (
     r: RiderRecord,
-    patch: Partial<{ status: string; isAvailable: boolean }>
+    patch: Partial<{
+      status: string;
+      isAvailable: boolean;
+      zone: string;
+      vehicleType: string;
+      currentLat: number;
+      currentLng: number;
+    }>
   ) => {
     setErrorMsg(null);
     try {
@@ -1101,6 +1134,11 @@ export function AdminDashboard({
       setErrorMsg(err instanceof Error ? err.message : 'Failed to update rider');
     }
   };
+
+  const selectedRider = riders.find((r) => r.id === selectedRiderId) || riders[0] || null;
+  const assignableOrders = orders.filter(
+    (o) => o.status !== 'delivered' && o.status !== 'cancelled'
+  );
 
   const gmv = orders
     .filter((o) => o.status !== 'cancelled')
@@ -1303,6 +1341,14 @@ export function AdminDashboard({
                   <span>{lang === 'bn' ? 'আমার নিজস্ব রেস্টুরেন্ট চালু করুন' : 'Launch My Own Restaurant'}</span>
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => setTab('users')}
+                className="px-3.5 py-2 rounded-xl border border-neutral-300 bg-white hover:border-[#E21B70] text-xs font-semibold text-[#2E3138] inline-flex items-center gap-1.5"
+              >
+                <Bike className="w-3.5 h-3.5 text-[#E21B70]" />
+                <span>{lang === 'bn' ? 'লাইভ রাইডার GPS কন্ট্রোল' : 'Live Rider GPS Control'}</span>
+              </button>
               <button
                 type="button"
                 onClick={() => setTab('backend')}
@@ -3368,54 +3414,311 @@ export function AdminDashboard({
               })}
             </div>
 
-            <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
-              <h2 className="font-bold text-sm text-[#2E3138]">
-                Registered Riders & Live GPS ({riders.length})
-              </h2>
-              {riders.map((r) => (
-                <div
-                  key={r.id}
-                  className="flex flex-wrap items-center justify-between gap-2 text-xs border-b border-neutral-100 pb-2.5"
+            <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                    <LocateFixed className="w-4 h-4 text-[#E21B70]" />
+                    <span>
+                      {lang === 'bn'
+                        ? `লাইভ রাইডার ফ্লিট ও GPS কন্ট্রোল (${riders.length})`
+                        : `Live Rider Fleet Map & GPS Control (${riders.length})`}
+                    </span>
+                  </h2>
+                  <p className="text-[11px] text-neutral-500 mt-0.5">
+                    {lang === 'bn'
+                      ? 'যেকোনো রাইডার সিলেক্ট করে ম্যাপে ক্লিক করলে রাইডারের লাইভ GPS অবস্থান পরিবর্তন হবে।'
+                      : 'Select any rider below or tap a pin, then click anywhere on the Bangladesh map to update their live GPS location.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadAdmin()}
+                  className="px-3 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-neutral-700 inline-flex items-center gap-1.5"
                 >
-                  <div>
-                    <p className="font-semibold text-[#2E3138]">
-                      {r.fullName} · {r.vehicleType}
-                    </p>
-                    <p className="text-neutral-500">
-                      {r.zone} · {r.phone} · {r.totalDeliveries} trips ({formatBdt(r.totalEarnings, lang)})
-                    </p>
-                    <p className="text-[11px] font-mono-nums text-emerald-700 mt-0.5">
-                      GPS: {Number(r.currentLat).toFixed(4)}, {Number(r.currentLng).toFixed(4)}
-                      {r.locationUpdatedAt
-                        ? ` · ${new Date(r.locationUpdatedAt).toLocaleTimeString()}`
-                        : ''}
-                    </p>
+                  <RefreshCw className="w-3.5 h-3.5 text-[#E21B70]" />
+                  <span>{lang === 'bn' ? 'রিফ্রেশ GPS' : 'Refresh Live GPS'}</span>
+                </button>
+              </div>
+
+              {riders.length > 0 && selectedRider && (
+                <div className="space-y-3">
+                  <div className="p-3 rounded-xl bg-[#FFF0F6]/70 border border-[#E21B70]/25 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div>
+                      <span className="font-bold text-[#E21B70]">
+                        {lang === 'bn' ? 'নিয়ন্ত্রিত রাইডার:' : 'Controlling Rider:'}{' '}
+                        {selectedRider.fullName}
+                      </span>
+                      <span className="text-neutral-600 ml-2 font-mono-nums">
+                        ({Number(selectedRider.currentLat).toFixed(4)},{' '}
+                        {Number(selectedRider.currentLng).toFixed(4)} · {selectedRider.zone})
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={showCustomRiderMove ? '__custom__' : ''}
+                        aria-label="Move selected rider GPS to Bangladesh hub"
+                        onChange={(e) => {
+                          if (e.target.value === '__custom__') {
+                            setShowCustomRiderMove(true);
+                            return;
+                          }
+                          setShowCustomRiderMove(false);
+                          const found = BANGLADESH_AREAS.find((a) => a.name === e.target.value);
+                          if (found) {
+                            handleUpdateRider(selectedRider, {
+                              currentLat: found.lat,
+                              currentLng: found.lng,
+                              zone: found.name,
+                            });
+                          }
+                        }}
+                        className="px-2.5 py-1 rounded-lg border border-neutral-200 bg-white text-xs font-semibold"
+                      >
+                        <option value="">
+                          {lang === 'bn' ? 'হাব অনুযায়ী GPS সরান...' : 'Move GPS to BD Hub...'}
+                        </option>
+                        {BANGLADESH_AREAS.map((a) => (
+                          <option key={a.name} value={a.name}>
+                            {a.name} ({a.division})
+                          </option>
+                        ))}
+                        <option value="__custom__">
+                          {lang === 'bn' ? '+ কাস্টম এলাকা লিখুন...' : '+ Custom Area in BD...'}
+                        </option>
+                      </select>
+                      {showCustomRiderMove && (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            value={customRiderMoveArea}
+                            onChange={(e) => setCustomRiderMoveArea(e.target.value)}
+                            placeholder={lang === 'bn' ? 'এলাকার নাম...' : 'e.g. Rampura, Dhaka'}
+                            className="px-2.5 py-1 rounded-lg border border-[#E21B70]/40 bg-white text-xs w-40"
+                          />
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const q = customRiderMoveArea.trim();
+                              if (!q) return;
+                              try {
+                                const geo = await apiFetch<{
+                                  results: Array<{ lat: number; lng: number; shortName: string }>;
+                                }>(`/api/free/geocode?q=${encodeURIComponent(q)}`);
+                                const first = geo.results?.[0];
+                                await handleUpdateRider(selectedRider, {
+                                  zone: first?.shortName || q,
+                                  ...(first ? { currentLat: first.lat, currentLng: first.lng } : {}),
+                                });
+                              } catch {
+                                await handleUpdateRider(selectedRider, { zone: q });
+                              }
+                              setCustomRiderMoveArea('');
+                              setShowCustomRiderMove(false);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-[#E21B70] text-white text-xs font-semibold"
+                          >
+                            {lang === 'bn' ? 'সেট' : 'Move'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={r.status}
-                      aria-label={`Status for rider ${r.fullName}`}
-                      onChange={(e) => handleUpdateRider(r, { status: e.target.value })}
-                      className="px-2 py-1 border border-neutral-200 rounded bg-white font-semibold"
-                    >
-                      <option value="approved">approved</option>
-                      <option value="pending">pending</option>
-                      <option value="suspended">suspended</option>
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => handleUpdateRider(r, { isAvailable: !r.isAvailable })}
-                      className={`px-2.5 py-1 rounded font-semibold ${
-                        r.isAvailable
-                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                          : 'bg-neutral-100 text-neutral-600 border border-neutral-200'
+
+                  <DhakaMapPicker
+                    mapsApiKey={mapsApiKey}
+                    lang={lang}
+                    center={{
+                      lat: Number(selectedRider.currentLat) || BANGLADESH_AREAS[0].lat,
+                      lng: Number(selectedRider.currentLng) || BANGLADESH_AREAS[0].lng,
+                    }}
+                    markerLabel={`Selected: ${selectedRider.fullName}`}
+                    extraRiders={riders.map((r) => ({
+                      id: r.id,
+                      label: `${r.fullName} (${r.zone})`,
+                      lat: Number(r.currentLat) || BANGLADESH_AREAS[0].lat,
+                      lng: Number(r.currentLng) || BANGLADESH_AREAS[0].lng,
+                      isAvailable: r.isAvailable,
+                      selected: r.id === selectedRider.id,
+                    }))}
+                    onSelectRiderPin={(id) => setSelectedRiderId(id)}
+                    interactive
+                    heightClass="h-[250px]"
+                    onSelectLocation={(c) => {
+                      handleUpdateRider(selectedRider, {
+                        currentLat: c.lat,
+                        currentLng: c.lng,
+                        ...(c.areaName ? { zone: c.areaName } : {}),
+                      });
+                    }}
+                  />
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {riders.map((r) => {
+                  const isSelected = selectedRider?.id === r.id;
+                  const draftZone = riderEditZones[r.id] ?? r.zone;
+                  const draftVehicle = riderEditVehicles[r.id] ?? r.vehicleType;
+                  return (
+                    <div
+                      key={r.id}
+                      className={`rounded-xl border p-3.5 space-y-2.5 text-xs transition-colors ${
+                        isSelected
+                          ? 'border-[#E21B70] bg-[#FFF9FB]'
+                          : 'border-neutral-200 bg-white'
                       }`}
                     >
-                      {r.isAvailable ? 'Online' : 'Offline'}
-                    </button>
-                  </div>
-                </div>
-              ))}
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedRiderId(r.id)}
+                          className="text-left group"
+                        >
+                          <p className="font-bold text-[#2E3138] group-hover:text-[#E21B70] inline-flex items-center gap-1.5">
+                            <Bike className="w-3.5 h-3.5 text-[#E21B70]" />
+                            <span>
+                              {r.fullName} · {r.vehicleType}
+                            </span>
+                            {isSelected && (
+                              <span className="px-1.5 py-0.5 rounded bg-[#E21B70] text-white text-[10px]">
+                                Map Focus
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-neutral-500 mt-0.5">
+                            {r.zone} · {r.phone} · {r.totalDeliveries} trips (
+                            {formatBdt(r.totalEarnings, lang)})
+                          </p>
+                          <p className="text-[11px] font-mono-nums text-emerald-700 mt-0.5">
+                            GPS: {Number(r.currentLat).toFixed(4)}, {Number(r.currentLng).toFixed(4)}
+                            {r.locationUpdatedAt
+                              ? ` · ${new Date(r.locationUpdatedAt).toLocaleTimeString()}`
+                              : ''}
+                          </p>
+                        </button>
+                        <div className="flex items-center gap-2">
+                          <select
+                            value={r.status}
+                            aria-label={`Status for rider ${r.fullName}`}
+                            onChange={(e) => handleUpdateRider(r, { status: e.target.value })}
+                            className="px-2 py-1 border border-neutral-200 rounded bg-white font-semibold"
+                          >
+                            <option value="approved">approved</option>
+                            <option value="pending">pending</option>
+                            <option value="suspended">suspended</option>
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => handleUpdateRider(r, { isAvailable: !r.isAvailable })}
+                            className={`px-2.5 py-1 rounded font-semibold ${
+                              r.isAvailable
+                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                : 'bg-neutral-100 text-neutral-600 border border-neutral-200'
+                            }`}
+                          >
+                            {r.isAvailable ? 'Online' : 'Offline'}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-neutral-100">
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            value={draftZone}
+                            onChange={(e) =>
+                              setRiderEditZones((prev) => ({ ...prev, [r.id]: e.target.value }))
+                            }
+                            aria-label={`Zone for rider ${r.fullName}`}
+                            placeholder="Any BD City / Zone"
+                            className="flex-1 min-w-0 px-2 py-1 border border-neutral-200 rounded bg-white text-[11px]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleUpdateRider(r, {
+                                zone: draftZone.trim() || r.zone,
+                                vehicleType: draftVehicle,
+                              })
+                            }
+                            className="px-2 py-1 rounded bg-[#2E3138] text-white text-[11px] font-semibold shrink-0"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <SelectWithCustom
+                          lang={lang}
+                          value={draftVehicle}
+                          onChange={(nextVeh) => {
+                            setRiderEditVehicles((prev) => ({ ...prev, [r.id]: nextVeh }));
+                            if (
+                              VEHICLE_TYPE_PRESET_OPTIONS.some(
+                                (v) => v.toLowerCase() === nextVeh.trim().toLowerCase()
+                              )
+                            ) {
+                              handleUpdateRider(r, { vehicleType: nextVeh });
+                            }
+                          }}
+                          storageKey="rider_vehicles"
+                          ariaLabel={`Vehicle for rider ${r.fullName}`}
+                          placeholder={lang === 'bn' ? 'কাস্টম গাড়ি...' : 'Custom vehicle...'}
+                          customOptionLabel={
+                            lang === 'bn' ? '+ কাস্টম যানবাহন...' : '+ Custom Vehicle...'
+                          }
+                          selectClassName="w-full px-2 py-1 border border-neutral-200 rounded bg-white text-[11px] font-semibold"
+                          inputClassName="flex-1 min-w-0 px-2 py-1 border border-[#E21B70]/40 bg-[#FFF9FB] rounded text-[11px]"
+                          presets={VEHICLE_TYPE_PRESET_OPTIONS.map((v) => ({ value: v, label: v }))}
+                          onAddCustom={(val) => {
+                            setRiderEditVehicles((prev) => ({ ...prev, [r.id]: val }));
+                            handleUpdateRider(r, { vehicleType: val });
+                          }}
+                        />
+                        <div className="flex items-center gap-1">
+                          <select
+                            value={dispatchOrderByRider[r.id] || ''}
+                            aria-label={`Assign order to rider ${r.fullName}`}
+                            onChange={(e) =>
+                              setDispatchOrderByRider((prev) => ({
+                                ...prev,
+                                [r.id]: e.target.value,
+                              }))
+                            }
+                            className="flex-1 min-w-0 px-2 py-1 border border-neutral-200 rounded bg-white text-[11px]"
+                          >
+                            <option value="">
+                              {assignableOrders.length === 0
+                                ? 'No active orders'
+                                : 'Assign order...'}
+                            </option>
+                            {assignableOrders.map((ord) => (
+                              <option key={ord.id} value={String(ord.id)}>
+                                {ord.orderNumber} ({ord.deliveryArea})
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            disabled={!dispatchOrderByRider[r.id]}
+                            onClick={async () => {
+                              const oid = Number(dispatchOrderByRider[r.id]);
+                              if (!oid) return;
+                              await handleOrderOverride(oid, {
+                                status: 'rider_assigned',
+                                riderUid: r.uid,
+                              });
+                              setDispatchOrderByRider((prev) => ({ ...prev, [r.id]: '' }));
+                            }}
+                            className="px-2 py-1 rounded bg-[#E21B70] text-white text-[11px] font-semibold disabled:opacity-40 shrink-0"
+                          >
+                            Dispatch
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
@@ -3467,12 +3770,18 @@ export function AdminDashboard({
               </div>
               <div>
                 <label className="block font-semibold text-neutral-700 mb-1">Category</label>
-                <input
+                <SelectWithCustom
                   required
+                  lang={lang}
                   value={productModal.category}
-                  onChange={(e) => setProductModal({ ...productModal, category: e.target.value })}
-                  placeholder="e.g. Biriyani, Burgers, Drinks"
-                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                  onChange={(val) => setProductModal({ ...productModal, category: val })}
+                  storageKey="food_categories"
+                  ariaLabel="Product category"
+                  placeholder="e.g. Biriyani, Iftar, Seafood"
+                  customOptionLabel={
+                    lang === 'bn' ? '+ কাস্টম ক্যাটাগরি যোগ...' : '+ Add Custom Category...'
+                  }
+                  presets={FOOD_CATEGORY_PRESET_OPTIONS.map((cat) => ({ value: cat, label: cat }))}
                 />
               </div>
               <div>
@@ -3685,28 +3994,64 @@ export function AdminDashboard({
               </div>
               <div>
                 <label className="block font-semibold text-neutral-700 mb-1">Cuisine</label>
-                <input
+                <SelectWithCustom
                   required
+                  lang={lang}
                   value={restaurantModal.cuisine}
-                  onChange={(e) =>
-                    setRestaurantModal({ ...restaurantModal, cuisine: e.target.value })
+                  onChange={(val) => setRestaurantModal({ ...restaurantModal, cuisine: val })}
+                  storageKey="cuisines"
+                  ariaLabel="Restaurant cuisine"
+                  placeholder={
+                    lang === 'bn'
+                      ? 'কাস্টম কুইজিন লিখুন (যেমন: মেজবানি)'
+                      : 'Custom cuisine (e.g. Seafood, Mezbani)'
                   }
-                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                  customOptionLabel={
+                    lang === 'bn' ? '+ কাস্টম কুইজিন যোগ...' : '+ Add Custom Cuisine...'
+                  }
+                  presets={CUISINE_PRESET_OPTIONS.map((c) => ({ value: c, label: c }))}
                 />
               </div>
               <div>
-                <label className="block font-semibold text-neutral-700 mb-1">Dhaka Area</label>
-                <select
+                <label className="block font-semibold text-neutral-700 mb-1">
+                  {lang === 'bn'
+                    ? 'শহর / এলাকা (ঢাকা বা সারা বাংলাদেশ + কাস্টম)'
+                    : 'City / Area (All Bangladesh + Custom)'}
+                </label>
+                <SelectWithCustom
+                  required
+                  lang={lang}
                   value={restaurantModal.area}
-                  onChange={(e) => setRestaurantModal({ ...restaurantModal, area: e.target.value })}
-                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
-                >
-                  {DHAKA_AREAS.map((a) => (
-                    <option key={a.name} value={a.name}>
-                      {a.name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(val) => setRestaurantModal({ ...restaurantModal, area: val })}
+                  storageKey="bd_areas"
+                  ariaLabel="Restaurant city or area"
+                  placeholder={
+                    lang === 'bn'
+                      ? 'কাস্টম এলাকা লিখুন (যেমন: রামপুরা, ঢাকা)'
+                      : 'Custom area (e.g. Rampura, Dhaka or Bogura Sadar)'
+                  }
+                  customOptionLabel={
+                    lang === 'bn'
+                      ? '+ কাস্টম এলাকা যোগ করুন (ঢাকা/সারা দেশ)...'
+                      : '+ Add Custom Area (Dhaka / Bangladesh)...'
+                  }
+                  presets={BANGLADESH_AREAS.map((a) => ({
+                    value: a.name,
+                    label: `${a.name} — ${a.division} (${a.nameBn})`,
+                  }))}
+                  onSelectPreset={(val) => {
+                    const found = BANGLADESH_AREAS.find((a) => a.name === val);
+                    setRestaurantModal((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            area: val,
+                            ...(found ? { lat: found.lat, lng: found.lng } : {}),
+                          }
+                        : null
+                    );
+                  }}
+                />
               </div>
               <div className="sm:col-span-2">
                 <label className="block font-semibold text-neutral-700 mb-1">Address</label>
@@ -3716,7 +4061,40 @@ export function AdminDashboard({
                   onChange={(e) =>
                     setRestaurantModal({ ...restaurantModal, address: e.target.value })
                   }
+                  placeholder={`House/Road, ${restaurantModal.area}, Bangladesh`}
                   className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block font-semibold text-neutral-700 mb-1">
+                  <span className="inline-flex items-center gap-1">
+                    <MapPin className="w-3.5 h-3.5 text-[#E21B70]" />
+                    <span>
+                      {lang === 'bn'
+                        ? 'রেস্টুরেন্ট পিন অবস্থান (সারা বাংলাদেশ)'
+                        : 'Restaurant Map Pin (Anywhere in Bangladesh)'}
+                    </span>
+                  </span>
+                </label>
+                <DhakaMapPicker
+                  mapsApiKey={mapsApiKey}
+                  lang={lang}
+                  center={{ lat: restaurantModal.lat, lng: restaurantModal.lng }}
+                  markerLabel={restaurantModal.name || restaurantModal.area}
+                  interactive
+                  heightClass="h-[190px]"
+                  onSelectLocation={(c) =>
+                    setRestaurantModal((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            lat: c.lat,
+                            lng: c.lng,
+                            area: c.areaName || prev.area,
+                          }
+                        : null
+                    )
+                  }
                 />
               </div>
               <div>

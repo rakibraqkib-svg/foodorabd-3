@@ -36,9 +36,16 @@ import {
   YAxis,
 } from 'recharts';
 import { apiFetch } from '../lib/api';
-import { DHAKA_AREAS } from '../lib/i18n';
-import { buildVendorAnalytics, DeliveryMode, formatBdt } from '../lib/marketplace-logic';
+import { BANGLADESH_AREAS } from '../lib/i18n';
+import {
+  buildVendorAnalytics,
+  CUISINE_PRESET_OPTIONS,
+  DeliveryMode,
+  FOOD_CATEGORY_PRESET_OPTIONS,
+  formatBdt,
+} from '../lib/marketplace-logic';
 import { DhakaMapPicker } from './DhakaMapPicker';
+import { SelectWithCustom } from './SelectWithCustom';
 import type {
   AppUser,
   FoodItem,
@@ -92,15 +99,15 @@ export function VendorDashboard({
   const [restName, setRestName] = useState('');
   const [restNameBn, setRestNameBn] = useState('');
   const [cuisine, setCuisine] = useState('Bangladeshi');
-  const [area, setArea] = useState(DHAKA_AREAS[0].name);
+  const [area, setArea] = useState(BANGLADESH_AREAS[0].name);
   const [address, setAddress] = useState('');
-  const [coords, setCoords] = useState({ lat: DHAKA_AREAS[0].lat, lng: DHAKA_AREAS[0].lng });
+  const [coords, setCoords] = useState({ lat: BANGLADESH_AREAS[0].lat, lng: BANGLADESH_AREAS[0].lng });
   const [phone, setPhone] = useState('+8801712345678');
   const [email, setEmail] = useState(user.email || 'partner@restaurant.bd');
   const [description, setDescription] = useState('');
   const [tradeLicense, setTradeLicense] = useState('TRAD/DSCC/2026-8841');
   const [nidNumber, setNidNumber] = useState('1991269123456');
-  const [payoutMethod, setPayoutMethod] = useState<'bkash' | 'nagad' | 'bank'>('bkash');
+  const [payoutMethod, setPayoutMethod] = useState<string>('bkash');
   const [payoutAccount, setPayoutAccount] = useState('01712345678');
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>('platform');
   const [regLogoUrl, setRegLogoUrl] = useState('');
@@ -141,6 +148,12 @@ export function VendorDashboard({
   const [editMinOrder, setEditMinOrder] = useState('150');
   const [editHours, setEditHours] = useState('10:00 AM - 11:30 PM');
   const [editMode, setEditMode] = useState<DeliveryMode>('platform');
+  const [editArea, setEditArea] = useState(BANGLADESH_AREAS[0].name);
+  const [editAddress, setEditAddress] = useState('');
+  const [editCoords, setEditCoords] = useState({
+    lat: BANGLADESH_AREAS[0].lat,
+    lng: BANGLADESH_AREAS[0].lng,
+  });
   const [editLogoUrl, setEditLogoUrl] = useState('');
   const [editCoverUrl, setEditCoverUrl] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
@@ -216,6 +229,12 @@ export function VendorDashboard({
           setEditMinOrder(String(res.restaurant.minOrder));
           setEditHours(res.restaurant.openingHours);
           setEditMode(res.restaurant.deliveryMode);
+          setEditArea(res.restaurant.area || BANGLADESH_AREAS[0].name);
+          setEditAddress(res.restaurant.address || '');
+          setEditCoords({
+            lat: Number(res.restaurant.lat) || BANGLADESH_AREAS[0].lat,
+            lng: Number(res.restaurant.lng) || BANGLADESH_AREAS[0].lng,
+          });
           setEditLogoUrl(res.restaurant.logoUrl || '');
           setEditCoverUrl(res.restaurant.coverUrl || '');
           try {
@@ -273,7 +292,7 @@ export function VendorDashboard({
           lng: coords.lng,
           phone,
           email,
-          description: description || `${restName} — Authentic kitchen in ${area}, Dhaka.`,
+          description: description || `${restName} — Authentic kitchen in ${area}, Bangladesh.`,
           tradeLicense,
           nidNumber,
           payoutMethod,
@@ -541,12 +560,17 @@ export function VendorDashboard({
           deliveryFee: Number(editFee) || 0,
           minOrder: Number(editMinOrder) || 0,
           deliveryMode: editMode,
+          area: editArea.trim() || restaurant.area,
+          address: editAddress.trim() || restaurant.address,
+          lat: editCoords.lat,
+          lng: editCoords.lng,
           logoUrl: editLogoUrl.trim(),
           coverUrl: editCoverUrl.trim(),
         }),
       });
       setFeedback(lang === 'bn' ? 'স্টোর সেটিংস ও লোগো আপডেট হয়েছে।' : 'Store settings and branding updated.');
       await loadWorkspace();
+      await onMenuMutated?.();
     } catch (err: unknown) {
       setFeedback(err instanceof Error ? err.message : 'Failed to save store settings');
     } finally {
@@ -702,19 +726,23 @@ export function VendorDashboard({
                     <label className="block text-xs font-semibold text-neutral-700 mb-1">
                       {lang === 'bn' ? 'কুইজিন ধরন' : 'Primary Cuisine'}
                     </label>
-                    <select
+                    <SelectWithCustom
+                      required
+                      lang={lang}
                       value={cuisine}
-                      onChange={(e) => setCuisine(e.target.value)}
-                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
-                    >
-                      {['Bangladeshi', 'Biriyani', 'Burger', 'Pizza', 'Kabab', 'Chinese', 'Bakery', 'Drinks'].map(
-                        (c) => (
-                          <option key={c} value={c}>
-                            {c}
-                          </option>
-                        )
-                      )}
-                    </select>
+                      onChange={setCuisine}
+                      storageKey="cuisines"
+                      ariaLabel="Primary Cuisine"
+                      placeholder={
+                        lang === 'bn'
+                          ? 'কাস্টম কুইজিন লিখুন (যেমন: সি-ফুড, মেজবানি)'
+                          : 'Custom cuisine (e.g. Seafood, Mezbani, Thai)'
+                      }
+                      customOptionLabel={
+                        lang === 'bn' ? '+ কাস্টম কুইজিন যোগ...' : '+ Add Custom Cuisine...'
+                      }
+                      presets={CUISINE_PRESET_OPTIONS.map((c) => ({ value: c, label: c }))}
+                    />
                   </div>
                 </div>
 
@@ -846,27 +874,40 @@ export function VendorDashboard({
             {step === 2 && (
               <div className="space-y-3">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
+                  <div className="sm:col-span-2">
                     <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                      {lang === 'bn' ? 'ঢাকা এলাকা' : 'Dhaka Zone'}
+                      {lang === 'bn'
+                        ? 'শহর / এলাকা নির্বাচন (সারা বাংলাদেশ + কাস্টম এলাকা)'
+                        : 'City / Area (All Bangladesh + Custom Area)'}
                     </label>
-                    <select
+                    <SelectWithCustom
+                      required
+                      lang={lang}
                       value={area}
-                      onChange={(e) => {
-                        const found = DHAKA_AREAS.find((a) => a.name === e.target.value);
-                        setArea(e.target.value);
+                      onChange={setArea}
+                      storageKey="bd_areas"
+                      ariaLabel="Restaurant city or area"
+                      placeholder={
+                        lang === 'bn'
+                          ? 'কাস্টম এলাকা লিখুন (যেমন: রামপুরা, ঢাকা বা সিলেট জিন্দাবাজার)'
+                          : 'Type custom area (e.g. Rampura, Dhaka or Zindabazar, Sylhet)'
+                      }
+                      customOptionLabel={
+                        lang === 'bn'
+                          ? '+ কাস্টম এলাকা যোগ করুন (ঢাকা/বাংলাদেশ)...'
+                          : '+ Add Custom Area (Dhaka / All Bangladesh)...'
+                      }
+                      presets={BANGLADESH_AREAS.map((a) => ({
+                        value: a.name,
+                        label: `${a.name} — ${a.division} (${a.nameBn})`,
+                      }))}
+                      onSelectPreset={(val) => {
+                        const found = BANGLADESH_AREAS.find((a) => a.name === val);
                         if (found) setCoords({ lat: found.lat, lng: found.lng });
                       }}
-                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
-                    >
-                      {DHAKA_AREAS.map((a) => (
-                        <option key={a.name} value={a.name}>
-                          {a.name} ({a.nameBn})
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </div>
-                  <div>
+                  <div className="sm:col-span-2">
                     <label className="block text-xs font-semibold text-neutral-700 mb-1">
                       {lang === 'bn' ? 'ডেলিভারি মডেল' : 'Delivery Fulfillment Mode'}
                     </label>
@@ -890,7 +931,7 @@ export function VendorDashboard({
                     required
                     value={address}
                     onChange={(e) => setAddress(e.target.value)}
-                    placeholder={`Road 12, House 8, ${area}, Dhaka`}
+                    placeholder={`Road 12, House 8, ${area}, Bangladesh`}
                     className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
                   />
                 </div>
@@ -985,15 +1026,28 @@ export function VendorDashboard({
                     <label className="block text-xs font-semibold text-neutral-700 mb-1">
                       {lang === 'bn' ? 'পেআউট মাধ্যম' : 'Payout Method'}
                     </label>
-                    <select
+                    <SelectWithCustom
+                      required
+                      lang={lang}
                       value={payoutMethod}
-                      onChange={(e) => setPayoutMethod(e.target.value as 'bkash' | 'nagad' | 'bank')}
-                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
-                    >
-                      <option value="bkash">bKash Merchant / Personal</option>
-                      <option value="nagad">Nagad Merchant</option>
-                      <option value="bank">Bank Account (BEFTN)</option>
-                    </select>
+                      onChange={setPayoutMethod}
+                      storageKey="payout_methods"
+                      ariaLabel="Payout method"
+                      placeholder={
+                        lang === 'bn'
+                          ? 'কাস্টম পেআউট মাধ্যম (যেমন: Rocket / Upay / Dutch-Bangla)'
+                          : 'Custom payout method (e.g. Upay / Cellfin)'
+                      }
+                      customOptionLabel={
+                        lang === 'bn' ? '+ কাস্টম পেআউট মাধ্যম যোগ...' : '+ Add Custom Payout Method...'
+                      }
+                      presets={[
+                        { value: 'bkash', label: 'bKash Merchant / Personal' },
+                        { value: 'nagad', label: 'Nagad Merchant' },
+                        { value: 'rocket', label: 'Rocket Mobile Banking' },
+                        { value: 'bank', label: 'Bank Account (BEFTN)' },
+                      ]}
+                    />
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-neutral-700 mb-1">
@@ -1611,11 +1665,22 @@ export function VendorDashboard({
 
                 <div>
                   <label className="block text-xs font-semibold text-neutral-700 mb-1">Category</label>
-                  <input
+                  <SelectWithCustom
                     required
+                    lang={lang}
                     value={newCategory}
-                    onChange={(e) => setNewCategory(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                    onChange={setNewCategory}
+                    storageKey="food_categories"
+                    ariaLabel="Dish category"
+                    placeholder={
+                      lang === 'bn'
+                        ? 'কাস্টম ক্যাটাগরি লিখুন (যেমন: ইফতার প্ল্যাটার)'
+                        : 'Custom category (e.g. Iftar Platter, Seafood)'
+                    }
+                    customOptionLabel={
+                      lang === 'bn' ? '+ কাস্টম ক্যাটাগরি যোগ...' : '+ Add Custom Category...'
+                    }
+                    presets={FOOD_CATEGORY_PRESET_OPTIONS.map((cat) => ({ value: cat, label: cat }))}
                   />
                 </div>
                 <div>
@@ -2157,6 +2222,64 @@ export function VendorDashboard({
                   </select>
                 </div>
                 <div>
+                  <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                    {lang === 'bn'
+                      ? 'ব্যবসার শহর / এলাকা (সারা বাংলাদেশ + কাস্টম)'
+                      : 'Business Area / City (All Bangladesh + Custom)'}
+                  </label>
+                  <SelectWithCustom
+                    required
+                    lang={lang}
+                    value={editArea}
+                    onChange={setEditArea}
+                    storageKey="bd_areas"
+                    ariaLabel="Store business area"
+                    placeholder={
+                      lang === 'bn'
+                        ? 'কাস্টম এলাকার নাম লিখুন (যেমন: মিরপুর ডিওএইচএস)'
+                        : 'Type any city, district or thana in Bangladesh'
+                    }
+                    customOptionLabel={
+                      lang === 'bn'
+                        ? '+ কাস্টম এলাকা যোগ করুন...'
+                        : '+ Add Custom Area in Bangladesh...'
+                    }
+                    presets={BANGLADESH_AREAS.map((a) => ({
+                      value: a.name,
+                      label: `${a.name} — ${a.division} (${a.nameBn})`,
+                    }))}
+                    onSelectPreset={(val) => {
+                      const found = BANGLADESH_AREAS.find((a) => a.name === val);
+                      if (found) setEditCoords({ lat: found.lat, lng: found.lng });
+                    }}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                    {lang === 'bn' ? 'স্টোর ঠিকানা' : 'Store Street Address'}
+                  </label>
+                  <input
+                    value={editAddress}
+                    onChange={(e) => setEditAddress(e.target.value)}
+                    placeholder={`Full address in ${editArea}, Bangladesh`}
+                    className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <DhakaMapPicker
+                    mapsApiKey={mapsApiKey}
+                    lang={lang}
+                    center={editCoords}
+                    markerLabel={restaurant.name}
+                    interactive
+                    heightClass="h-[190px]"
+                    onSelectLocation={(c) => {
+                      setEditCoords({ lat: c.lat, lng: c.lng });
+                      if (c.areaName) setEditArea(c.areaName);
+                    }}
+                  />
+                </div>
+                <div>
                   <label className="block text-xs font-semibold text-neutral-700 mb-1">Delivery Fee (BDT ৳)</label>
                   <input
                     type="number"
@@ -2213,11 +2336,17 @@ export function VendorDashboard({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-neutral-700 mb-1">Category</label>
-                    <input
+                    <SelectWithCustom
                       required
+                      lang={lang}
                       value={editingItem.category}
-                      onChange={(e) => setEditingItem({ ...editingItem, category: e.target.value })}
-                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                      onChange={(val) => setEditingItem({ ...editingItem, category: val })}
+                      storageKey="food_categories"
+                      ariaLabel="Edit dish category"
+                      customOptionLabel={
+                        lang === 'bn' ? '+ কাস্টম ক্যাটাগরি যোগ...' : '+ Add Custom Category...'
+                      }
+                      presets={FOOD_CATEGORY_PRESET_OPTIONS.map((cat) => ({ value: cat, label: cat }))}
                     />
                   </div>
                   <div>

@@ -16,6 +16,7 @@ import {
 } from '../lib/marketplace-logic';
 import { BANGLADESH_AREAS } from '../lib/i18n';
 import { DhakaMapPicker } from './DhakaMapPicker';
+import { SelectWithCustom } from './SelectWithCustom';
 import type { Lang, PublicPaymentGateway, Restaurant } from '../types/marketplace';
 
 interface CartCheckoutDrawerProps {
@@ -186,8 +187,6 @@ export function CartCheckoutDrawer({
     commissionRate: Number(restaurant?.commissionRate ?? 15),
     fixedCommission: restaurant?.fixedCommission ?? 0,
   });
-
-  const isPresetArea = BANGLADESH_AREAS.some((a) => a.name === area);
 
   const handleApplyCoupon = async () => {
     if (!restaurant || !couponInput.trim()) return;
@@ -515,41 +514,32 @@ export function CartCheckoutDrawer({
                 <label className="block text-xs font-semibold text-neutral-700 mb-1">
                   {lang === 'bn' ? 'বাংলাদেশের ডেলিভারি শহর / এলাকা' : 'Delivery City / Area (All Bangladesh)'}
                 </label>
-                <select
-                  value={isPresetArea ? area : '__custom__'}
-                  onChange={(e) => {
-                    if (e.target.value === '__custom__') {
-                      if (isPresetArea) setArea('');
-                      return;
-                    }
-                    const found = BANGLADESH_AREAS.find((a) => a.name === e.target.value);
-                    setArea(e.target.value);
+                <SelectWithCustom
+                  required
+                  lang={lang}
+                  value={area}
+                  onChange={setArea}
+                  storageKey="bd_areas"
+                  ariaLabel="Checkout delivery city or area"
+                  placeholder={
+                    lang === 'bn'
+                      ? 'আপনার এলাকা বা জেলার নাম লিখুন (যেমন: বগুড়া সদর)'
+                      : 'Enter your area, thana or district (e.g. Rampura, Dhaka)'
+                  }
+                  customOptionLabel={
+                    lang === 'bn'
+                      ? '+ কাস্টম এলাকা / উপজেলা যোগ করুন...'
+                      : '+ Add Custom Area in Bangladesh...'
+                  }
+                  presets={BANGLADESH_AREAS.map((a) => ({
+                    value: a.name,
+                    label: `${a.name} (${a.division}) — ${a.nameBn}`,
+                  }))}
+                  onSelectPreset={(val) => {
+                    const found = BANGLADESH_AREAS.find((a) => a.name === val);
                     if (found) setCoords({ lat: found.lat, lng: found.lng });
                   }}
-                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white"
-                >
-                  {BANGLADESH_AREAS.map((a) => (
-                    <option key={a.name} value={a.name}>
-                      {a.name} ({a.division}) — {a.nameBn}
-                    </option>
-                  ))}
-                  <option value="__custom__">
-                    {lang === 'bn' ? 'অন্য যেকোনো এলাকা / উপজেলা লিখুন...' : 'Custom / Any Area in Bangladesh...'}
-                  </option>
-                </select>
-                {!isPresetArea && (
-                  <input
-                    required
-                    value={area}
-                    onChange={(e) => setArea(e.target.value)}
-                    placeholder={
-                      lang === 'bn'
-                        ? 'আপনার এলাকা বা জেলার নাম লিখুন (যেমন: বগুড়া সদর)'
-                        : 'Enter your area, thana or district (e.g. Bogura Sadar)'
-                    }
-                    className="w-full mt-2 px-3 py-2 text-sm border border-neutral-200 rounded-lg"
-                  />
-                )}
+                />
               </div>
 
               <div>
