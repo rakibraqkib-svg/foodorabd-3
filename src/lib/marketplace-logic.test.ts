@@ -35,6 +35,8 @@ import {
   buildOrderTrackingEmailPayload,
   normalizeCustomOptionValue,
   mergeCustomSelectOptions,
+  pickNearestStandbyRider,
+  computeOrderEtaSummary,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 
@@ -611,3 +613,99 @@ test('mergeCustomSelectOptions deduplicates case-insensitively and appends saved
   assert.equal(merged[3].value, 'Rampura Dhaka');
   assert.equal(merged[4].value, 'Khilgaon Taltola');
 });
+
+test('pickNearestStandbyRider prefers nearest online approved rider and falls back safely', () => {
+  const riders = [
+    {
+      uid: 'r-far-online',
+      fullName: 'Far Rider',
+      phone: '01711000001',
+      vehicleType: 'Motorbike',
+      zone: 'Uttara',
+      isAvailable: true,
+      lat: 23.8759,
+      lng: 90.3795,
+      locationUpdatedAt: '2026-11-20T09:00:00Z',
+    },
+    {
+      uid: 'r-near-offline',
+      fullName: 'Offline Rider',
+      phone: '01711000002',
+      vehicleType: 'Bicycle',
+      zone: 'Gulshan 2',
+      isAvailable: false,
+      lat: 23.7950,
+      lng: 90.4140,
+      locationUpdatedAt: '2026-11-20T09:00:00Z',
+    },
+    {
+      uid: 'r-near-online',
+      fullName: 'Banani Rider',
+      phone: '01711000003',
+      vehicleType: 'Motorbike',
+      zone: 'Banani',
+      isAvailable: true,
+      lat: 23.7937,
+      lng: 90.4066,
+      locationUpdatedAt: '2026-11-20T09:00:00Z',
+    },
+  ];
+
+  const picked = pickNearestStandbyRider(riders, 23.7949, 90.4144);
+  assert.ok(picked);
+  assert.equal(picked?.rider.uid, 'r-near-online');
+  assert.ok((picked?.distanceKm ?? 99) < 2);
+  assert.equal(pickNearestStandbyRider([], 23.7949, 90.4144), null);
+});
+
+test('computeOrderEtaSummary provides phase-aware ETA and distance across order lifecycle', () => {
+  const awaiting = computeOrderEtaSummary({
+    status: 'confirmed',
+    estimatedMinutes: 28,
+    restaurantLat: 23.7949,
+    restaurantLng: 90.4144,
+    deliveryLat: 23.7808,
+    deliveryLng: 90.4193,
+    standbyRiderLat: 23.7937,
+    standbyRiderLng: 90.4066,
+  });
+  assert.equal(awaiting.phase, 'awaiting_dispatch');
+  assert.ok(awaiting.etaMinutes >= 6);
+  assert.ok(awaiting.remainingKm > 1);
+
+  const headingToRest = computeOrderEtaSummary({
+    status: 'rider_assigned',
+    estimatedMinutes: 25,
+    restaurantLat: 23.7949,
+    restaurantLng: 90.4144,
+    deliveryLat: 23.7808,
+    deliveryLng: 90.4193,
+    riderLat: 23.7937,
+    riderLng: 90.4066,
+  });
+  assert.equal(headingToRest.phase, 'heading_to_restaurant');
+  assert.ok(headingToRest.etaMinutes > 5);
+
+  const onTheWay = computeOrderEtaSummary({
+    status: 'on_the_way',
+    estimatedMinutes: 25,
+    restaurantLat: 23.7949,
+    restaurantLng: 90.4144,
+    deliveryLat: 23.7808,
+    deliveryLng: 90.4193,
+    riderLat: 23.785,
+    riderLng: 90.417,
+  });
+  assert.equal(onTheWay.phase, 'heading_to_customer');
+  assert.ok(onTheWay.etaMinutes >= 2 && onTheWay.etaMinutes < 15);
+
+  const delivered = computeOrderEtaSummary({
+    status: 'delivered',
+    estimatedMinutes: 25,
+    deliveryLat: 23.7808,
+    deliveryLng: 90.4193,
+  });
+  assert.equal(delivered.phase, 'delivered');
+  assert.equal(delivered.etaMinutes, 0);
+});
+

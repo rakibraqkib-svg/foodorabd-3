@@ -181,6 +181,7 @@ export interface RiderLiveLocation {
   lat: number;
   lng: number;
   locationUpdatedAt: string;
+  distanceToRestaurantKm?: number;
 }
 
 export interface LedgerEntry {

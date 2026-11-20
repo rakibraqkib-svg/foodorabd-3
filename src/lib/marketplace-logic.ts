@@ -1200,3 +1200,164 @@ export function mergeCustomSelectOptions(
 
   return out;
 }
+
+export interface RiderCandidatePoint {
+  uid: string;
+  fullName: string;
+  phone: string;
+  vehicleType: string;
+  zone: string;
+  isAvailable: boolean;
+  lat: number;
+  lng: number;
+  locationUpdatedAt: Date | string;
+}
+
+export interface StandbyRiderResult<T extends RiderCandidatePoint> {
+  rider: T;
+  distanceKm: number;
+}
+
+export function pickNearestStandbyRider<T extends RiderCandidatePoint>(
+  candidates: readonly T[],
+  targetLat: number,
+  targetLng: number
+): StandbyRiderResult<T> | null {
+  if (!candidates || candidates.length === 0) return null;
+  if (!Number.isFinite(targetLat) || !Number.isFinite(targetLng)) return null;
+
+  const online = candidates.filter((c) => c.isAvailable && Number.isFinite(c.lat) && Number.isFinite(c.lng));
+  const pool =
+    online.length > 0
+      ? online
+      : candidates.filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lng));
+  if (pool.length === 0) return null;
+
+  let best = pool[0];
+  let bestDist = haversineDistanceKm(best.lat, best.lng, targetLat, targetLng);
+  for (let i = 1; i < pool.length; i += 1) {
+    const d = haversineDistanceKm(pool[i].lat, pool[i].lng, targetLat, targetLng);
+    if (d < bestDist) {
+      best = pool[i];
+      bestDist = d;
+    }
+  }
+  return { rider: best, distanceKm: bestDist };
+}
+
+export interface OrderEtaSummaryInput {
+  status: string;
+  estimatedMinutes: number;
+  restaurantLat?: number | null;
+  restaurantLng?: number | null;
+  deliveryLat: number;
+  deliveryLng: number;
+  riderLat?: number | null;
+  riderLng?: number | null;
+  standbyRiderLat?: number | null;
+  standbyRiderLng?: number | null;
+}
+
+export interface OrderEtaSummary {
+  etaMinutes: number;
+  remainingKm: number;
+  phase: 'awaiting_dispatch' | 'heading_to_restaurant' | 'heading_to_customer' | 'delivered' | 'cancelled';
+}
+
+export function computeOrderEtaSummary(input: OrderEtaSummaryInput): OrderEtaSummary {
+  if (input.status === 'delivered') {
+    return { etaMinutes: 0, remainingKm: 0, phase: 'delivered' };
+  }
+  if (input.status === 'cancelled') {
+    return { etaMinutes: 0, remainingKm: 0, phase: 'cancelled' };
+  }
+
+  const hasRest =
+    typeof input.restaurantLat === 'number' &&
+    Number.isFinite(input.restaurantLat) &&
+    typeof input.restaurantLng === 'number' &&
+    Number.isFinite(input.restaurantLng);
+  const hasRider =
+    typeof input.riderLat === 'number' &&
+    Number.isFinite(input.riderLat) &&
+    typeof input.riderLng === 'number' &&
+    Number.isFinite(input.riderLng);
+  const hasStandby =
+    typeof input.standbyRiderLat === 'number' &&
+    Number.isFinite(input.standbyRiderLat) &&
+    typeof input.standbyRiderLng === 'number' &&
+    Number.isFinite(input.standbyRiderLng);
+
+  const restToCustomerKm = hasRest
+    ? haversineDistanceKm(
+        input.restaurantLat as number,
+        input.restaurantLng as number,
+        input.deliveryLat,
+        input.deliveryLng
+      )
+    : 2.5;
+
+  if (hasRider) {
+    if (input.status === 'rider_assigned' && hasRest) {
+      const toRest = calculateLiveRiderEta(
+        input.riderLat as number,
+        input.riderLng as number,
+        input.restaurantLat as number,
+        input.restaurantLng as number,
+        'rider_assigned'
+      );
+      const restDriveMin = Math.max(4, Math.round((restToCustomerKm / 22) * 60 + 2));
+      return {
+        etaMinutes: toRest.etaMinutes + restDriveMin,
+        remainingKm: Math.round((toRest.remainingKm + restToCustomerKm) * 100) / 100,
+        phase: 'heading_to_restaurant',
+      };
+    }
+
+    const toDest = calculateLiveRiderEta(
+      input.riderLat as number,
+      input.riderLng as number,
+      input.deliveryLat,
+      input.deliveryLng,
+      input.status
+    );
+    return {
+      etaMinutes: toDest.etaMinutes,
+      remainingKm: toDest.remainingKm,
+      phase: 'heading_to_customer',
+    };
+  }
+
+  const standbyToRestKm =
+    hasStandby && hasRest
+      ? haversineDistanceKm(
+          input.standbyRiderLat as number,
+          input.standbyRiderLng as number,
+          input.restaurantLat as number,
+          input.restaurantLng as number
+        )
+      : 0;
+
+  const prepBuffer =
+    input.status === 'ready'
+      ? 4
+      : input.status === 'preparing'
+      ? 9
+      : input.status === 'accepted'
+      ? 12
+      : 14;
+  const routeBasedEta = Math.max(8, Math.round(prepBuffer + (restToCustomerKm / 22) * 60));
+  const reasonableStoredEta =
+    input.estimatedMinutes > 0 && input.estimatedMinutes <= 180
+      ? input.estimatedMinutes
+      : routeBasedEta;
+  const etaMinutes = Math.max(6, Math.min(reasonableStoredEta, routeBasedEta + 6));
+  const remainingKm = Math.round((standbyToRestKm + restToCustomerKm) * 100) / 100;
+
+  return {
+    etaMinutes,
+    remainingKm,
+    phase: 'awaiting_dispatch',
+  };
+}
+

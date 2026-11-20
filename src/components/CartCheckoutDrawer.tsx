@@ -33,7 +33,11 @@ interface CartCheckoutDrawerProps {
   onUpdateQty: (idx: number, delta: number) => void;
   onRemoveItem: (idx: number) => void;
   onClearCart: () => void;
-  onOrderCreated: (orderId: number, trackingToken?: string) => void;
+  onOrderCreated: (
+    orderId: number,
+    trackingToken?: string,
+    meta?: { orderNumber?: string; restaurantName?: string; estimatedMinutes?: number }
+  ) => void;
 }
 
 export function CartCheckoutDrawer({
@@ -229,7 +233,15 @@ export function CartCheckoutDrawer({
     setSubmitError(null);
 
     try {
-      const res = await apiFetch<{ order: { id: number; trackingToken?: string } }>('/api/orders', {
+      const res = await apiFetch<{
+        order: {
+          id: number;
+          trackingToken?: string;
+          orderNumber?: string;
+          restaurantName?: string;
+          estimatedMinutes?: number;
+        };
+      }>('/api/orders', {
         method: 'POST',
         body: JSON.stringify({
           restaurantId: restaurant.id,
@@ -255,7 +267,11 @@ export function CartCheckoutDrawer({
       });
       onClearCart();
       setStep('cart');
-      onOrderCreated(res.order.id, res.order.trackingToken);
+      onOrderCreated(res.order.id, res.order.trackingToken, {
+        orderNumber: res.order.orderNumber,
+        restaurantName: res.order.restaurantName || restaurant.name,
+        estimatedMinutes: res.order.estimatedMinutes ?? quoteEta,
+      });
     } catch (err: unknown) {
       setSubmitError(err instanceof Error ? err.message : 'Order submission failed');
     } finally {
@@ -264,8 +280,14 @@ export function CartCheckoutDrawer({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/45">
-      <div className="bg-white w-full max-w-md h-full flex flex-col shadow-2xl">
+    <div
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex justify-end bg-black/45"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white w-full max-w-md h-full flex flex-col shadow-2xl"
+      >
         <div className="p-4 border-b border-neutral-200 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ShoppingBag className="w-5 h-5 text-[#E21B70]" />

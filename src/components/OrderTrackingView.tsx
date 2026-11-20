@@ -20,6 +20,7 @@ import { apiFetch } from '../lib/api';
 import {
   buildOrderTrackingUrl,
   calculateLiveRiderEta,
+  computeOrderEtaSummary,
   formatBdt,
 } from '../lib/marketplace-logic';
 import { DhakaMapPicker } from './DhakaMapPicker';
@@ -59,6 +60,7 @@ export function OrderTrackingView({
   const [order, setOrder] = useState<OrderRecord | null>(null);
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [riderLocation, setRiderLocation] = useState<RiderLiveLocation | null>(null);
+  const [nearestRider, setNearestRider] = useState<RiderLiveLocation | null>(null);
   const [emailLogs, setEmailLogs] = useState<OrderEmailLog[]>([]);
   const [history, setHistory] = useState<
     Array<{ id: number; status: string; note: string; createdAt: string }>
@@ -89,12 +91,14 @@ export function OrderTrackingView({
         order: OrderRecord;
         restaurant: Restaurant | null;
         riderLocation?: RiderLiveLocation | null;
+        nearestRider?: RiderLiveLocation | null;
         emailLogs?: OrderEmailLog[];
         history: Array<{ id: number; status: string; note: string; createdAt: string }>;
       }>(`/api/orders/${orderId}${qs}`);
       setOrder(res.order);
       setRestaurant(res.restaurant);
       setRiderLocation(res.riderLocation ?? null);
+      setNearestRider(res.nearestRider ?? null);
       setEmailLogs(res.emailLogs ?? []);
       setHistory(res.history);
       if (res.order.customerEmail && !trackEmailInput) {
@@ -202,6 +206,18 @@ export function OrderTrackingView({
 
   const currentIdx = STEPS.findIndex((s) => s.key === order.status);
   const isCancelled = order.status === 'cancelled';
+  const etaSummary = computeOrderEtaSummary({
+    status: order.status,
+    estimatedMinutes: order.estimatedMinutes,
+    restaurantLat: restaurant?.lat ?? order.restaurantLat ?? null,
+    restaurantLng: restaurant?.lng ?? order.restaurantLng ?? null,
+    deliveryLat: order.deliveryLat,
+    deliveryLng: order.deliveryLng,
+    riderLat: riderLocation?.lat ?? null,
+    riderLng: riderLocation?.lng ?? null,
+    standbyRiderLat: nearestRider?.lat ?? null,
+    standbyRiderLng: nearestRider?.lng ?? null,
+  });
   const shareUrl =
     typeof window !== 'undefined'
       ? buildOrderTrackingUrl(
@@ -296,6 +312,99 @@ export function OrderTrackingView({
           </div>
         )}
 
+        {/* Always-Visible Live Rider Location & Estimated Delivery Time Banner */}
+        {!isCancelled && (
+          <div
+            data-testid="live-eta-banner"
+            className={`mt-5 p-4 rounded-xl border flex flex-wrap items-center justify-between gap-4 ${
+              order.status === 'delivered'
+                ? 'bg-emerald-50 border-emerald-200'
+                : 'bg-gradient-to-r from-[#FFF0F6] via-white to-emerald-50/70 border-[#E21B70]/25'
+            }`}
+          >
+            <div className="flex items-start sm:items-center gap-3 min-w-0 flex-1">
+              <div
+                className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 text-white shadow-xs ${
+                  order.status === 'delivered'
+                    ? 'bg-emerald-600'
+                    : riderLocation
+                    ? 'bg-emerald-600'
+                    : 'bg-[#E21B70]'
+                }`}
+              >
+                <Bike className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 space-y-0.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="text-xs font-extrabold uppercase tracking-wider text-[#E21B70]">
+                    {order.status === 'delivered'
+                      ? lang === 'bn'
+                        ? 'ডেলিভারি সম্পন্ন হয়েছে'
+                        : 'Order Delivered'
+                      : riderLocation
+                      ? lang === 'bn'
+                        ? 'লাইভ রাইডার লোকেশন'
+                        : 'Live Rider Location'
+                      : nearestRider
+                      ? lang === 'bn'
+                        ? 'রাইডার অ্যাসাইনমেন্ট প্রস্তুত'
+                        : 'Rider Standby Near Kitchen'
+                      : lang === 'bn'
+                      ? 'ডেলিভারি রুট ও সময়'
+                      : 'Delivery Dispatch & ETA'}
+                  </p>
+                  {riderLocation && order.status !== 'delivered' && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
+                      LIVE GPS
+                    </span>
+                  )}
+                </div>
+
+                <p className="text-sm font-bold text-[#2E3138]">
+                  {order.status === 'delivered'
+                    ? lang === 'bn'
+                      ? `${order.deliveryArea}-এ আপনার খাবার পৌঁছে দেওয়া হয়েছে`
+                      : `Delivered safely to ${order.deliveryArea}`
+                    : riderLocation
+                    ? lang === 'bn'
+                      ? `${riderLocation.fullName} (${riderLocation.zone}) · আপনার অবস্থান থেকে ${etaSummary.remainingKm.toFixed(1)} কিমি দূরে`
+                      : `${riderLocation.fullName} (${riderLocation.vehicleType}) is in ${riderLocation.zone} · ${etaSummary.remainingKm.toFixed(1)} km away`
+                    : nearestRider
+                    ? lang === 'bn'
+                      ? `নিকটতম রাইডার (${nearestRider.zone}) কিচেন থেকে ${typeof nearestRider.distanceToRestaurantKm === 'number' ? nearestRider.distanceToRestaurantKm.toFixed(1) : '1.0'} কিমি দূরে প্রস্তুত`
+                      : `Nearest Foodora rider (${nearestRider.fullName}) is ${typeof nearestRider.distanceToRestaurantKm === 'number' ? nearestRider.distanceToRestaurantKm.toFixed(1) : '1.0'} km from kitchen in ${nearestRider.zone}`
+                    : lang === 'bn'
+                    ? `${order.restaurantName} (${restaurant?.area || order.deliveryArea}) থেকে ডেলিভারি প্রস্তুত হচ্ছে`
+                    : `Preparing at ${order.restaurantName} (${restaurant?.area || order.deliveryArea}) · ${order.deliveryProvider}`}
+                </p>
+
+                <p className="text-[11px] text-neutral-500 font-mono-nums">
+                  {riderLocation
+                    ? `${lang === 'bn' ? 'রাইডার GPS:' : 'Rider GPS:'} ${riderLocation.lat.toFixed(4)}, ${riderLocation.lng.toFixed(4)} · ${lang === 'bn' ? 'মোট দূরত্ব' : 'Route'}: ${etaSummary.remainingKm.toFixed(1)} km`
+                    : nearestRider
+                    ? `${lang === 'bn' ? 'স্ট্যান্ডবাই GPS:' : 'Standby Rider GPS:'} ${nearestRider.lat.toFixed(4)}, ${nearestRider.lng.toFixed(4)} · ${lang === 'bn' ? 'ডেলিভারি দূরত্ব' : 'Total route'}: ${etaSummary.remainingKm.toFixed(1)} km`
+                    : `${lang === 'bn' ? 'রুট দূরত্ব:' : 'Route distance:'} ${etaSummary.remainingKm.toFixed(1)} km`}
+                </p>
+              </div>
+            </div>
+
+            {order.status !== 'delivered' && (
+              <div
+                data-testid="live-eta-minutes"
+                className="px-4 py-2.5 rounded-xl bg-white border border-neutral-200 shadow-xs text-right shrink-0 tabular-nums"
+              >
+                <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">
+                  {lang === 'bn' ? 'আনুমানিক সময়' : 'Estimated Arrival'}
+                </p>
+                <p className="text-xl font-extrabold text-[#E21B70]">
+                  ~{etaSummary.etaMinutes} {lang === 'bn' ? 'মিনিট' : 'mins'}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Status Timeline */}
         {isCancelled ? (
           <div className="mt-6 p-4 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700 font-medium">
@@ -370,6 +479,12 @@ export function OrderTrackingView({
                     lat: riderLocation.lat,
                     lng: riderLocation.lng,
                     label: `${riderLocation.fullName} (Live)`,
+                  }
+                : nearestRider
+                ? {
+                    lat: nearestRider.lat,
+                    lng: nearestRider.lng,
+                    label: `${nearestRider.fullName} (${lang === 'bn' ? 'স্ট্যান্ডবাই' : 'Standby Rider'})`,
                   }
                 : undefined
             }
@@ -459,9 +574,38 @@ export function OrderTrackingView({
               <Truck className="w-4 h-4 text-[#E21B70] shrink-0" />
               <span>
                 {lang === 'bn'
-                  ? `Pathao Courier দ্বারা ডেলিভারি চলছে (${order.consignmentId || order.orderNumber})।`
-                  : `Tracked via ${order.deliveryProvider} (${order.consignmentId || order.orderNumber}).`}
+                  ? `Pathao Courier দ্বারা ডেলিভারি চলছে (${order.consignmentId || order.orderNumber}) · আনুমানিক ${etaSummary.etaMinutes} মিনিট।`
+                  : `Tracked via ${order.deliveryProvider} (${order.consignmentId || order.orderNumber}) · ~${etaSummary.etaMinutes} min ETA.`}
               </span>
+            </div>
+          ) : nearestRider && !isTerminal ? (
+            <div
+              data-testid="standby-rider-card"
+              className="p-4 rounded-xl border border-[#E21B70]/25 bg-[#FFF0F6]/50 flex flex-wrap items-center justify-between gap-3"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-[#E21B70] text-white flex items-center justify-center shrink-0">
+                  <Bike className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="font-bold text-sm text-[#2E3138]">
+                    {nearestRider.fullName} ({nearestRider.vehicleType} · {nearestRider.zone})
+                  </p>
+                  <p className="text-xs text-neutral-600 font-mono-nums">
+                    {lang === 'bn'
+                      ? `কিচেন থেকে ${typeof nearestRider.distanceToRestaurantKm === 'number' ? nearestRider.distanceToRestaurantKm.toFixed(1) : '1.0'} কিমি দূরে স্ট্যান্ডবাই · GPS ${nearestRider.lat.toFixed(4)}, ${nearestRider.lng.toFixed(4)}`
+                      : `Standby ${typeof nearestRider.distanceToRestaurantKm === 'number' ? nearestRider.distanceToRestaurantKm.toFixed(1) : '1.0'} km from restaurant · GPS ${nearestRider.lat.toFixed(4)}, ${nearestRider.lng.toFixed(4)}`}
+                  </p>
+                </div>
+              </div>
+              <div className="text-right tabular-nums">
+                <p className="text-xs font-bold text-[#E21B70]">
+                  ~{etaSummary.etaMinutes} {lang === 'bn' ? 'মিনিট' : 'mins ETA'}
+                </p>
+                <p className="text-[11px] text-neutral-500">
+                  {lang === 'bn' ? 'রাইডার অ্যাসাইনমেন্ট প্রক্রিয়াধীন' : 'Auto-dispatching rider'}
+                </p>
+              </div>
             </div>
           ) : null}
 

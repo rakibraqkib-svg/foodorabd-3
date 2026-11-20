@@ -23,6 +23,7 @@ import {
 import {
   DEFAULT_PAYMENT_GATEWAYS,
   partitionOwnedVsPartnerRestaurants,
+  pickNearestStandbyRider,
   PROTECTED_SUPER_ADMIN_EMAILS,
 } from '../lib/marketplace-logic.ts';
 
@@ -209,6 +210,50 @@ export async function getOrderById(orderId: number) {
       }
     }
 
+    let nearestRider: {
+      uid: string;
+      fullName: string;
+      phone: string;
+      vehicleType: string;
+      zone: string;
+      isAvailable: boolean;
+      lat: number;
+      lng: number;
+      locationUpdatedAt: Date;
+      distanceToRestaurantKm: number;
+    } | null = null;
+
+    if (!riderLocation && order.deliveryMode === 'platform' && order.status !== 'delivered' && order.status !== 'cancelled') {
+      const rest = restRows[0];
+      const targetLat = rest ? rest.lat : order.deliveryLat;
+      const targetLng = rest ? rest.lng : order.deliveryLng;
+      const approvedRiders = await db
+        .select()
+        .from(riders)
+        .where(eq(riders.status, 'approved'));
+      const picked = pickNearestStandbyRider(
+        approvedRiders.map((r) => ({
+          uid: r.uid,
+          fullName: r.fullName,
+          phone: r.phone,
+          vehicleType: r.vehicleType,
+          zone: r.zone,
+          isAvailable: r.isAvailable,
+          lat: r.currentLat,
+          lng: r.currentLng,
+          locationUpdatedAt: r.locationUpdatedAt,
+        })),
+        targetLat,
+        targetLng
+      );
+      if (picked) {
+        nearestRider = {
+          ...picked.rider,
+          distanceToRestaurantKm: picked.distanceKm,
+        };
+      }
+    }
+
     const emailLogs = await db
       .select()
       .from(orderEmailLogs)
@@ -220,6 +265,7 @@ export async function getOrderById(orderId: number) {
       history,
       restaurant: restRows[0] ?? null,
       riderLocation,
+      nearestRider,
       emailLogs,
     };
   } catch (error) {

@@ -30,6 +30,7 @@ __export(schema_exports, {
   foodItems: () => foodItems,
   localCredentials: () => localCredentials,
   notifications: () => notifications,
+  orderEmailLogs: () => orderEmailLogs,
   orderStatusHistory: () => orderStatusHistory,
   orders: () => orders,
   partnerApiKeys: () => partnerApiKeys,
@@ -201,6 +202,8 @@ var orders = pgTable("orders", {
   customerUid: text("customer_uid").notNull(),
   customerName: text("customer_name").notNull(),
   customerPhone: text("customer_phone").notNull(),
+  customerEmail: text("customer_email").notNull().default(""),
+  trackingToken: text("tracking_token").notNull().default(""),
   restaurantId: integer("restaurant_id").references(() => restaurants.id).notNull(),
   restaurantName: text("restaurant_name").notNull(),
   deliveryAddress: text("delivery_address").notNull(),
@@ -244,6 +247,19 @@ var orderStatusHistory = pgTable("order_status_history", {
   note: text("note").default(""),
   actorUid: text("actor_uid").default("system"),
   createdAt: timestamp("created_at").defaultNow().notNull()
+});
+var orderEmailLogs = pgTable("order_email_logs", {
+  id: serial("id").primaryKey(),
+  orderId: integer("order_id").references(() => orders.id, { onDelete: "cascade" }).notNull(),
+  orderNumber: text("order_number").notNull(),
+  recipientEmail: text("recipient_email").notNull(),
+  subject: text("subject").notNull(),
+  trackingUrl: text("tracking_url").notNull(),
+  statusEvent: text("status_event").notNull(),
+  deliveryProvider: text("delivery_provider").notNull().default("in_app_email_log"),
+  providerStatus: text("provider_status").notNull().default("recorded"),
+  htmlPreview: text("html_preview").notNull().default(""),
+  sentAt: timestamp("sent_at").defaultNow().notNull()
 });
 var commissionLedger = pgTable("commission_ledger", {
   id: serial("id").primaryKey(),
@@ -412,6 +428,7 @@ var EXPECTED_TABLES = [
   "coupons",
   "orders",
   "order_status_history",
+  "order_email_logs",
   "commission_ledger",
   "restaurant_payouts",
   "riders",
@@ -441,6 +458,13 @@ async function runCreateTablesIfMissing() {
       await db.execute(sql`
         ALTER TABLE food_items
         ADD COLUMN IF NOT EXISTS is_visible_on_storefront BOOLEAN NOT NULL DEFAULT TRUE;
+      `);
+    }
+    if (existingSet.has("orders")) {
+      await db.execute(sql`
+        ALTER TABLE orders
+        ADD COLUMN IF NOT EXISTS customer_email TEXT NOT NULL DEFAULT '',
+        ADD COLUMN IF NOT EXISTS tracking_token TEXT NOT NULL DEFAULT '';
       `);
     }
   } catch (err) {
@@ -627,6 +651,8 @@ async function createMissingTables(existingSet) {
         customer_uid TEXT NOT NULL,
         customer_name TEXT NOT NULL,
         customer_phone TEXT NOT NULL,
+        customer_email TEXT NOT NULL DEFAULT '',
+        tracking_token TEXT NOT NULL DEFAULT '',
         restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
         restaurant_name TEXT NOT NULL,
         delivery_address TEXT NOT NULL,
@@ -670,6 +696,23 @@ async function createMissingTables(existingSet) {
         note TEXT DEFAULT '',
         actor_uid TEXT DEFAULT 'system',
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+  if (!existingSet.has("order_email_logs")) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS order_email_logs (
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        order_number TEXT NOT NULL,
+        recipient_email TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        tracking_url TEXT NOT NULL,
+        status_event TEXT NOT NULL,
+        delivery_provider TEXT NOT NULL DEFAULT 'in_app_email_log',
+        provider_status TEXT NOT NULL DEFAULT 'recorded',
+        html_preview TEXT NOT NULL DEFAULT '',
+        sent_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
     `);
   }
@@ -2289,6 +2332,67 @@ ${urlNodes}
 </urlset>
 `;
 }
+function buildOrderTrackingUrl(origin, orderId, trackingToken) {
+  const cleanOrigin = origin.replace(/\/+$/, "");
+  const base = `${cleanOrigin}/?order=${encodeURIComponent(String(orderId))}`;
+  const tok = String(trackingToken || "").trim();
+  return tok ? `${base}&token=${encodeURIComponent(tok)}` : base;
+}
+function doesEmailMatchOrder(orderEmail, queryEmail) {
+  const a = String(orderEmail || "").trim().toLowerCase();
+  const b = String(queryEmail || "").trim().toLowerCase();
+  return Boolean(a && b && a === b);
+}
+function buildOrderTrackingEmailPayload(input) {
+  const trackingUrl = buildOrderTrackingUrl(input.origin, input.orderId, input.trackingToken);
+  const niceStatus = input.status.replace(/_/g, " ").toUpperCase();
+  const subject = `Foodora BD Order ${input.orderNumber} \u2014 ${niceStatus}`;
+  const riderLine = input.riderName ? `<p><strong>Assigned Rider:</strong> ${escapeXml(input.riderName)}</p>` : "";
+  const noteLine = input.statusNote ? `<p><strong>Update:</strong> ${escapeXml(input.statusNote)}</p>` : "";
+  const html = `<!doctype html>
+<html>
+  <body style="font-family:Arial,sans-serif;background:#f7f7f7;padding:24px;color:#2E3138;">
+    <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;padding:24px;border:1px solid #e5e7eb;">
+      <h2 style="margin:0 0 8px;color:#E21B70;">Foodora BD \u2014 Live Order Tracking</h2>
+      <p style="margin:0 0 16px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
+      <p style="margin:0 0 12px;font-size:14px;">Your order <strong>${escapeXml(input.orderNumber)}</strong> from <strong>${escapeXml(input.restaurantName)}</strong> is now <strong>${escapeXml(niceStatus)}</strong>.</p>
+      <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
+        <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
+        <p style="margin:4px 0;"><strong>Total Payable:</strong> \u09F3${input.totalAmount} (${escapeXml(input.paymentMethod.toUpperCase())})</p>
+        ${riderLine}
+        ${noteLine}
+      </div>
+      <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Track Order Live on Map</a>
+      <p style="margin:16px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Or open: ${escapeXml(trackingUrl)}</p>
+    </div>
+  </body>
+</html>`;
+  const text2 = `Foodora BD \u2014 Order ${input.orderNumber} (${niceStatus})
+Restaurant: ${input.restaurantName}
+Delivery Area: ${input.deliveryArea}
+Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()})
+${input.riderName ? `Rider: ${input.riderName}
+` : ""}${input.statusNote ? `Update: ${input.statusNote}
+` : ""}Track live: ${trackingUrl}`;
+  return { subject, trackingUrl, html, text: text2 };
+}
+function pickNearestStandbyRider(candidates, targetLat, targetLng) {
+  if (!candidates || candidates.length === 0) return null;
+  if (!Number.isFinite(targetLat) || !Number.isFinite(targetLng)) return null;
+  const online = candidates.filter((c) => c.isAvailable && Number.isFinite(c.lat) && Number.isFinite(c.lng));
+  const pool2 = online.length > 0 ? online : candidates.filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lng));
+  if (pool2.length === 0) return null;
+  let best = pool2[0];
+  let bestDist = haversineDistanceKm(best.lat, best.lng, targetLat, targetLng);
+  for (let i = 1; i < pool2.length; i += 1) {
+    const d = haversineDistanceKm(pool2[i].lat, pool2[i].lng, targetLat, targetLng);
+    if (d < bestDist) {
+      best = pool2[i];
+      bestDist = d;
+    }
+  }
+  return { rider: best, distanceKm: bestDist };
+}
 
 // src/db/queries.ts
 async function getApprovedRestaurants() {
@@ -2410,11 +2514,42 @@ async function getOrderById(orderId) {
         };
       }
     }
+    let nearestRider = null;
+    if (!riderLocation && order.deliveryMode === "platform" && order.status !== "delivered" && order.status !== "cancelled") {
+      const rest = restRows[0];
+      const targetLat = rest ? rest.lat : order.deliveryLat;
+      const targetLng = rest ? rest.lng : order.deliveryLng;
+      const approvedRiders = await db.select().from(riders).where(eq(riders.status, "approved"));
+      const picked = pickNearestStandbyRider(
+        approvedRiders.map((r) => ({
+          uid: r.uid,
+          fullName: r.fullName,
+          phone: r.phone,
+          vehicleType: r.vehicleType,
+          zone: r.zone,
+          isAvailable: r.isAvailable,
+          lat: r.currentLat,
+          lng: r.currentLng,
+          locationUpdatedAt: r.locationUpdatedAt
+        })),
+        targetLat,
+        targetLng
+      );
+      if (picked) {
+        nearestRider = {
+          ...picked.rider,
+          distanceToRestaurantKm: picked.distanceKm
+        };
+      }
+    }
+    const emailLogs = await db.select().from(orderEmailLogs).where(eq(orderEmailLogs.orderId, orderId)).orderBy(desc(orderEmailLogs.sentAt));
     return {
       order,
       history,
       restaurant: restRows[0] ?? null,
-      riderLocation
+      riderLocation,
+      nearestRider,
+      emailLogs
     };
   } catch (error) {
     console.error("Failed to fetch order detail:", error);
@@ -3010,9 +3145,10 @@ async function searchOsmPlaces(query) {
   const cached = getCached(key);
   if (cached) return cached;
   try {
+    const queryWithCountry = q.toLowerCase().includes("bangladesh") ? q : `${q}, Bangladesh`;
     const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
-      `${q}, Dhaka, Bangladesh`
-    )}&format=json&countrycodes=bd&limit=5`;
+      queryWithCountry
+    )}&format=json&countrycodes=bd&limit=6`;
     const res = await fetch(url, {
       headers: { "User-Agent": "FoodoraBD-Marketplace/1.0" },
       signal: AbortSignal.timeout(3500)
@@ -3042,13 +3178,13 @@ async function reverseOsmGeocode(lat, lng) {
     });
     if (!res.ok) throw new Error(`Nominatim reverse HTTP ${res.status}`);
     const data = await res.json();
-    const areaName = data.address?.suburb || data.address?.neighbourhood || data.address?.city_district || "Dhaka";
-    const displayName = data.display_name || `${areaName}, Dhaka`;
+    const areaName = data.address?.suburb || data.address?.neighbourhood || data.address?.town || data.address?.city || data.address?.city_district || data.address?.county || data.address?.state_district || data.address?.state || "Bangladesh";
+    const displayName = data.display_name || `${areaName}, Bangladesh`;
     return setCached(key, { displayName, areaName, source: "OpenStreetMap" }, 10 * 60 * 1e3);
   } catch {
     return {
-      displayName: `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}, Dhaka`,
-      areaName: "Dhaka",
+      displayName: `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}, Bangladesh`,
+      areaName: "Bangladesh",
       source: "Fallback"
     };
   }
@@ -3132,6 +3268,78 @@ async function searchMealDbDishes(query) {
     return setCached(key, meals, 30 * 60 * 1e3);
   } catch {
     return [];
+  }
+}
+
+// src/services/order-email.ts
+async function sendAndLogOrderTrackingEmail(params) {
+  const emailLower = String(params.customerEmail || "").trim().toLowerCase();
+  if (!emailLower || !emailLower.includes("@")) {
+    return null;
+  }
+  const payload = buildOrderTrackingEmailPayload({
+    origin: params.origin,
+    orderId: params.orderId,
+    orderNumber: params.orderNumber,
+    trackingToken: params.trackingToken,
+    customerName: params.customerName,
+    customerEmail: emailLower,
+    restaurantName: params.restaurantName,
+    deliveryArea: params.deliveryArea,
+    totalAmount: params.totalAmount,
+    paymentMethod: params.paymentMethod,
+    status: params.status,
+    statusNote: params.statusNote,
+    riderName: params.riderName
+  });
+  let deliveryProvider = "in_app_email_log";
+  let providerStatus = "recorded";
+  const resendKey = (process.env.RESEND_API_KEY || process.env.EMAIL_PROVIDER_API_KEY || "").trim();
+  if (resendKey) {
+    try {
+      const mailRes = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${resendKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          from: process.env.RESEND_FROM_EMAIL || "Foodora BD <orders@foodora.bd>",
+          to: [emailLower],
+          subject: payload.subject,
+          html: payload.html,
+          text: payload.text
+        }),
+        signal: AbortSignal.timeout(4e3)
+      });
+      if (mailRes.ok) {
+        deliveryProvider = "resend";
+        providerStatus = "sent";
+      } else {
+        deliveryProvider = "resend";
+        providerStatus = `fallback_recorded_http_${mailRes.status}`;
+      }
+    } catch {
+      deliveryProvider = "in_app_email_log";
+      providerStatus = "recorded_offline_fallback";
+    }
+  }
+  try {
+    const inserted = await db.insert(orderEmailLogs).values({
+      orderId: params.orderId,
+      orderNumber: params.orderNumber,
+      recipientEmail: emailLower,
+      subject: payload.subject,
+      trackingUrl: payload.trackingUrl,
+      statusEvent: params.statusEvent || params.status,
+      deliveryProvider,
+      providerStatus,
+      htmlPreview: payload.html
+    }).returning();
+    return inserted[0] ?? null;
+  } catch (err) {
+    console.warn("Order email log insert skipped:", err);
+    return null;
   }
 }
 
@@ -4198,6 +4406,51 @@ app.get("/api/customer/orders", requireAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+app.get("/api/orders/track-by-email", async (req, res) => {
+  const email = String(req.query.email || "").trim().toLowerCase();
+  const orderNumber = String(req.query.orderNumber || "").trim().toUpperCase();
+  if (!email || !email.includes("@")) {
+    return res.status(400).json({ error: "Please provide a valid email address." });
+  }
+  try {
+    let matched = [];
+    if (orderNumber) {
+      matched = await db.select().from(orders).where(sql3`upper(${orders.orderNumber}) = ${orderNumber}`).limit(1);
+      if (matched.length === 0) {
+        return res.status(404).json({ error: `Order ${orderNumber} was not found.` });
+      }
+      const ord = matched[0];
+      let matches = doesEmailMatchOrder(ord.customerEmail, email);
+      if (!matches && ord.customerUid) {
+        const custUsers = await db.select().from(users).where(eq3(users.uid, ord.customerUid)).limit(1);
+        if (custUsers[0] && doesEmailMatchOrder(custUsers[0].email, email)) {
+          matches = true;
+        }
+      }
+      if (!matches) {
+        return res.status(403).json({
+          error: "The email address does not match the tracking email on this order."
+        });
+      }
+    } else {
+      matched = await db.select().from(orders).where(sql3`lower(${orders.customerEmail}) = ${email}`).orderBy(desc2(orders.createdAt)).limit(1);
+      if (matched.length === 0) {
+        const custUsers = await db.select().from(users).where(sql3`lower(${users.email}) = ${email}`).limit(1);
+        if (custUsers[0]) {
+          matched = await db.select().from(orders).where(eq3(orders.customerUid, custUsers[0].uid)).orderBy(desc2(orders.createdAt)).limit(1);
+        }
+      }
+      if (matched.length === 0) {
+        return res.status(404).json({ error: `No orders found for ${email}.` });
+      }
+    }
+    const detail = await getOrderById(matched[0].id);
+    if (!detail) return res.status(404).json({ error: "Order not found" });
+    return res.json(detail);
+  } catch (error) {
+    return res.status(500).json({ error: error.message || "Failed to look up order by email" });
+  }
+});
 app.get("/api/orders/:id", optionalAuth, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
@@ -4206,9 +4459,85 @@ app.get("/api/orders/:id", optionalAuth, async (req, res) => {
   try {
     const detail = await getOrderById(id);
     if (!detail) return res.status(404).json({ error: "Order not found" });
+    const providedToken = String(req.query.token || "").trim();
+    const isAdmin = req.user?.role === "super_admin" || req.user?.role === "admin";
+    const isOwner = Boolean(req.user?.uid && req.user.uid === detail.order.customerUid);
+    const hasTokenAccess = Boolean(
+      providedToken && detail.order.trackingToken && providedToken === detail.order.trackingToken
+    );
+    if (!isAdmin && !isOwner && !hasTokenAccess) {
+      return res.json({
+        ...detail,
+        order: {
+          ...detail.order,
+          trackingToken: ""
+        },
+        emailLogs: []
+      });
+    }
     res.json(detail);
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+app.post("/api/orders/:id/send-tracking-email", optionalAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ error: "Invalid order ID" });
+  }
+  const schema = z.object({
+    email: z.string().trim().email().optional(),
+    token: z.string().optional()
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Please enter a valid email address." });
+  }
+  try {
+    const orderRows = await db.select().from(orders).where(eq3(orders.id, id)).limit(1);
+    if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
+    let order = orderRows[0];
+    const isAdmin = req.user?.role === "super_admin" || req.user?.role === "admin";
+    const isOwner = Boolean(req.user?.uid && req.user.uid === order.customerUid);
+    const hasToken = Boolean(
+      parsed.data.token && order.trackingToken && parsed.data.token.trim() === order.trackingToken
+    );
+    if (!isAdmin && !isOwner && !hasToken) {
+      return res.status(403).json({ error: "Sign in or use your order tracking token to email updates." });
+    }
+    const targetEmail = (parsed.data.email || order.customerEmail || req.user?.email || "").trim().toLowerCase();
+    if (!targetEmail || !targetEmail.includes("@")) {
+      return res.status(400).json({ error: "Please provide an email address for tracking updates." });
+    }
+    const nextToken = order.trackingToken || crypto3.randomBytes(12).toString("hex");
+    if (targetEmail !== order.customerEmail || nextToken !== order.trackingToken) {
+      const upd = await db.update(orders).set({ customerEmail: targetEmail, trackingToken: nextToken, updatedAt: /* @__PURE__ */ new Date() }).where(eq3(orders.id, order.id)).returning();
+      order = upd[0] || order;
+    }
+    const emailLog = await sendAndLogOrderTrackingEmail({
+      origin: getRequestOrigin(req),
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      trackingToken: nextToken,
+      customerName: order.customerName,
+      customerEmail: targetEmail,
+      restaurantName: order.restaurantName,
+      deliveryArea: order.deliveryArea,
+      totalAmount: order.totalAmount,
+      paymentMethod: order.paymentMethod,
+      status: order.status,
+      statusEvent: order.status,
+      statusNote: `Live tracking update requested (${order.status.replace(/_/g, " ")})`,
+      riderName: order.riderName
+    });
+    return res.json({
+      ok: true,
+      customerEmail: targetEmail,
+      emailLog,
+      trackingUrl: emailLog?.trackingUrl || ""
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || "Failed to send tracking email" });
   }
 });
 app.post("/api/orders", requireAuth, async (req, res) => {
@@ -4216,6 +4545,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
     restaurantId: z.number().int().positive(),
     customerName: z.string().min(2),
     customerPhone: z.string().min(6),
+    customerEmail: z.string().trim().email().optional().or(z.literal("")),
     deliveryAddress: z.string().min(5),
     deliveryArea: z.string().min(2),
     deliveryLat: z.number(),
@@ -4239,6 +4569,8 @@ app.post("/api/orders", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Invalid order payload", details: parsed.error.flatten() });
   }
   const input = parsed.data;
+  const resolvedCustomerEmail = (input.customerEmail?.trim() || (req.user.email && req.user.email.includes("@") ? req.user.email : "")).trim().toLowerCase();
+  const trackingToken = crypto3.randomBytes(12).toString("hex");
   const normalizedMethod = normalizeGatewayCode(input.paymentMethod);
   try {
     const gatewayRows = await ensureDefaultPaymentGateways();
@@ -4382,6 +4714,8 @@ app.post("/api/orders", requireAuth, async (req, res) => {
         customerUid: req.user.uid,
         customerName: input.customerName,
         customerPhone: input.customerPhone,
+        customerEmail: resolvedCustomerEmail,
+        trackingToken,
         restaurantId: rest.id,
         restaurantName: rest.name,
         deliveryAddress: input.deliveryAddress,
@@ -4436,7 +4770,22 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       ]);
       return { order: newOrder, paymentSession: paymentInit, deliveryDispatch };
     });
-    res.status(201).json(created);
+    const emailLog = resolvedCustomerEmail ? await sendAndLogOrderTrackingEmail({
+      origin: getRequestOrigin(req),
+      orderId: created.order.id,
+      orderNumber: created.order.orderNumber,
+      trackingToken: created.order.trackingToken,
+      customerName: created.order.customerName,
+      customerEmail: resolvedCustomerEmail,
+      restaurantName: created.order.restaurantName,
+      deliveryArea: created.order.deliveryArea,
+      totalAmount: created.order.totalAmount,
+      paymentMethod: created.order.paymentMethod,
+      status: created.order.status,
+      statusEvent: "confirmed",
+      statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`
+    }) : null;
+    res.status(201).json({ ...created, emailLog });
   } catch (error) {
     console.error("Order creation failed:", error);
     res.status(400).json({ error: error.message || "Could not place order" });
@@ -4575,7 +4924,7 @@ app.post("/api/restaurants/register", requireAuth, async (req, res) => {
     description: z.string().min(5),
     tradeLicense: z.string().min(3),
     nidNumber: z.string().min(5),
-    payoutMethod: z.enum(["bkash", "nagad", "bank"]),
+    payoutMethod: z.string().trim().min(2).max(40),
     payoutAccount: z.string().min(5),
     logoUrl: z.string().optional().default(""),
     coverUrl: z.string().optional().default(""),
@@ -5043,7 +5392,11 @@ app.patch(
       deliveryMode: z.enum(["platform", "restaurant", "third_party"]).optional(),
       logoUrl: z.string().optional(),
       coverUrl: z.string().optional(),
-      description: z.string().optional()
+      description: z.string().optional(),
+      area: z.string().min(2).optional(),
+      address: z.string().min(3).optional(),
+      lat: z.number().optional(),
+      lng: z.number().optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid restaurant settings" });
@@ -5060,6 +5413,10 @@ app.patch(
         deliveryFee: parsed.data.deliveryFee ?? rows[0].deliveryFee,
         minOrder: parsed.data.minOrder ?? rows[0].minOrder,
         deliveryMode: parsed.data.deliveryMode ?? rows[0].deliveryMode,
+        area: parsed.data.area !== void 0 ? parsed.data.area.trim() : rows[0].area,
+        address: parsed.data.address !== void 0 ? parsed.data.address.trim() : rows[0].address,
+        lat: parsed.data.lat !== void 0 ? parsed.data.lat : rows[0].lat,
+        lng: parsed.data.lng !== void 0 ? parsed.data.lng : rows[0].lng,
         logoUrl: parsed.data.logoUrl !== void 0 ? parsed.data.logoUrl.trim() : rows[0].logoUrl,
         coverUrl: parsed.data.coverUrl !== void 0 && parsed.data.coverUrl.trim() ? parsed.data.coverUrl.trim() : rows[0].coverUrl,
         description: parsed.data.description !== void 0 ? parsed.data.description.trim() : rows[0].description,
@@ -5121,6 +5478,24 @@ app.patch(
         type: "order",
         relatedOrderId: order.id
       });
+      if (updated[0].customerEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: updated[0].id,
+          orderNumber: updated[0].orderNumber,
+          trackingToken: updated[0].trackingToken,
+          customerName: updated[0].customerName,
+          customerEmail: updated[0].customerEmail,
+          restaurantName: updated[0].restaurantName,
+          deliveryArea: updated[0].deliveryArea,
+          totalAmount: updated[0].totalAmount,
+          paymentMethod: updated[0].paymentMethod,
+          status: updated[0].status,
+          statusEvent: parsed.data.status,
+          statusNote: parsed.data.note || `${order.restaurantName} updated order status`,
+          riderName: updated[0].riderName
+        });
+      }
       res.json({ order: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5160,26 +5535,155 @@ app.post(
     }
   }
 );
+app.post("/api/riders/apply", async (req, res) => {
+  const schema = z.object({
+    fullName: z.string().trim().min(2).max(100),
+    phone: z.string().trim().min(6).max(30),
+    email: z.string().trim().email(),
+    password: z.string().min(6).max(128).optional().or(z.literal("")),
+    vehicleType: z.string().trim().min(2).max(40).default("Motorbike"),
+    zone: z.string().trim().min(2).max(120),
+    nidNumber: z.string().trim().min(4).max(50),
+    lat: z.number().min(-90).max(90).optional(),
+    lng: z.number().min(-180).max(180).optional()
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Please complete all rider job application fields." });
+  }
+  const emailLower = parsed.data.email.trim().toLowerCase();
+  if (isProtectedSuperAdminEmail(emailLower)) {
+    return res.status(409).json({
+      error: "This email belongs to a Super Admin account. Please use a rider email."
+    });
+  }
+  try {
+    const existingUsers = await db.select().from(users).where(sql3`lower(${users.email}) = ${emailLower}`).limit(1);
+    let uid = existingUsers[0]?.uid || "";
+    if (existingUsers[0]) {
+      if (existingUsers[0].status === "suspended") {
+        return res.status(403).json({ error: "This account has been suspended by an administrator." });
+      }
+      if (["admin", "super_admin"].includes(existingUsers[0].role)) {
+        return res.status(409).json({
+          error: "This email belongs to an Admin account. Please use a separate rider email."
+        });
+      }
+      const credRows = await db.select().from(localCredentials).where(eq3(localCredentials.email, emailLower)).limit(1);
+      if (credRows.length > 0 && parsed.data.password) {
+        if (!verifyPasswordScrypt(parsed.data.password, credRows[0].passwordHash)) {
+          return res.status(401).json({
+            error: "An account with this email already exists. Enter your matching password or leave password blank if applying with Google/existing session."
+          });
+        }
+      }
+      await db.update(users).set({
+        fullName: parsed.data.fullName,
+        phone: parsed.data.phone,
+        role: existingUsers[0].role === "restaurant_owner" ? "rider" : "rider",
+        updatedAt: /* @__PURE__ */ new Date()
+      }).where(eq3(users.uid, uid));
+    } else {
+      uid = `rdr-${crypto3.randomBytes(8).toString("hex")}`;
+      await db.insert(users).values({
+        uid,
+        email: emailLower,
+        fullName: parsed.data.fullName,
+        phone: parsed.data.phone,
+        role: "rider"
+      });
+      if (parsed.data.password && parsed.data.password.length >= 6) {
+        await db.insert(localCredentials).values({
+          email: emailLower,
+          uid,
+          passwordHash: hashPasswordScrypt(parsed.data.password)
+        }).onConflictDoNothing();
+      }
+    }
+    const startLat = Number.isFinite(parsed.data.lat) ? Math.round(parsed.data.lat * 1e6) / 1e6 : 23.7949;
+    const startLng = Number.isFinite(parsed.data.lng) ? Math.round(parsed.data.lng * 1e6) / 1e6 : 90.4144;
+    const inserted = await db.insert(riders).values({
+      uid,
+      fullName: parsed.data.fullName,
+      phone: parsed.data.phone,
+      email: emailLower,
+      vehicleType: parsed.data.vehicleType,
+      zone: parsed.data.zone,
+      nidNumber: parsed.data.nidNumber,
+      currentLat: startLat,
+      currentLng: startLng,
+      locationUpdatedAt: /* @__PURE__ */ new Date(),
+      isAvailable: true,
+      status: "approved"
+    }).onConflictDoUpdate({
+      target: riders.uid,
+      set: {
+        fullName: parsed.data.fullName,
+        phone: parsed.data.phone,
+        email: emailLower,
+        vehicleType: parsed.data.vehicleType,
+        zone: parsed.data.zone,
+        nidNumber: parsed.data.nidNumber,
+        currentLat: startLat,
+        currentLng: startLng,
+        locationUpdatedAt: /* @__PURE__ */ new Date(),
+        isAvailable: true,
+        status: "approved"
+      }
+    }).returning();
+    await db.insert(notifications).values({
+      recipientUid: "demo-admin-uid",
+      roleTarget: "super_admin",
+      title: "New Delivery Rider Joined",
+      message: `${parsed.data.fullName} (${parsed.data.vehicleType}) joined for ${parsed.data.zone}, Bangladesh.`,
+      type: "system"
+    });
+    const userPayload = {
+      uid,
+      email: emailLower,
+      fullName: parsed.data.fullName,
+      role: "rider",
+      isSandbox: false
+    };
+    const token = signSandboxToken(userPayload);
+    return res.status(201).json({
+      token,
+      user: userPayload,
+      rider: inserted[0]
+    });
+  } catch (error) {
+    console.error("Rider application failed:", error);
+    return res.status(500).json({ error: error.message || "Could not submit rider application" });
+  }
+});
 app.post("/api/riders/register", requireAuth, async (req, res) => {
   const schema = z.object({
-    fullName: z.string().min(2),
-    phone: z.string().min(6),
-    email: z.string().email(),
-    vehicleType: z.enum(["Motorbike", "Bicycle", "Scooter"]),
-    zone: z.string().min(2),
-    nidNumber: z.string().min(5)
+    fullName: z.string().trim().min(2).max(100),
+    phone: z.string().trim().min(6).max(30),
+    email: z.string().trim().email(),
+    vehicleType: z.string().trim().min(2).max(40),
+    zone: z.string().trim().min(2).max(120),
+    nidNumber: z.string().trim().min(4).max(50),
+    lat: z.number().min(-90).max(90).optional(),
+    lng: z.number().min(-180).max(180).optional()
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid rider registration data" });
   try {
+    const startLat = Number.isFinite(parsed.data.lat) ? Math.round(parsed.data.lat * 1e6) / 1e6 : 23.7949;
+    const startLng = Number.isFinite(parsed.data.lng) ? Math.round(parsed.data.lng * 1e6) / 1e6 : 90.4144;
     const inserted = await db.insert(riders).values({
       uid: req.user.uid,
       fullName: parsed.data.fullName,
       phone: parsed.data.phone,
-      email: parsed.data.email,
+      email: parsed.data.email.trim().toLowerCase(),
       vehicleType: parsed.data.vehicleType,
       zone: parsed.data.zone,
       nidNumber: parsed.data.nidNumber,
+      currentLat: startLat,
+      currentLng: startLng,
+      locationUpdatedAt: /* @__PURE__ */ new Date(),
+      isAvailable: true,
       status: "approved"
     }).onConflictDoUpdate({
       target: riders.uid,
@@ -5187,13 +5691,26 @@ app.post("/api/riders/register", requireAuth, async (req, res) => {
         fullName: parsed.data.fullName,
         phone: parsed.data.phone,
         vehicleType: parsed.data.vehicleType,
-        zone: parsed.data.zone
+        zone: parsed.data.zone,
+        nidNumber: parsed.data.nidNumber,
+        currentLat: startLat,
+        currentLng: startLng,
+        locationUpdatedAt: /* @__PURE__ */ new Date()
       }
     }).returning();
+    let nextUser = req.user;
     if (req.user.role === "customer") {
-      await db.update(users).set({ role: "rider" }).where(eq3(users.uid, req.user.uid));
+      await db.update(users).set({ role: "rider", fullName: parsed.data.fullName }).where(eq3(users.uid, req.user.uid));
+      nextUser = { ...req.user, role: "rider", fullName: parsed.data.fullName };
     }
-    res.status(201).json({ rider: inserted[0] });
+    const freshToken = signSandboxToken({
+      uid: nextUser.uid,
+      email: nextUser.email,
+      fullName: nextUser.fullName,
+      role: nextUser.role,
+      isSandbox: nextUser.isSandbox
+    });
+    res.status(201).json({ rider: inserted[0], token: freshToken, user: nextUser });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -5287,6 +5804,24 @@ app.post(
         type: "order",
         relatedOrderId: existingOrder.id
       });
+      if (updated[0].customerEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: updated[0].id,
+          orderNumber: updated[0].orderNumber,
+          trackingToken: updated[0].trackingToken,
+          customerName: updated[0].customerName,
+          customerEmail: updated[0].customerEmail,
+          restaurantName: updated[0].restaurantName,
+          deliveryArea: updated[0].deliveryArea,
+          totalAmount: updated[0].totalAmount,
+          paymentMethod: updated[0].paymentMethod,
+          status: updated[0].status,
+          statusEvent: "rider_assigned",
+          statusNote: `Rider ${riderName} accepted delivery assignment`,
+          riderName
+        });
+      }
       res.json({ order: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5349,6 +5884,24 @@ app.patch(
             totalEarnings: sql3`${riders.totalEarnings} + ${Math.max(40, order.deliveryFee)}`
           }).where(eq3(riders.uid, order.riderUid));
         }
+      }
+      if (updated[0].customerEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: updated[0].id,
+          orderNumber: updated[0].orderNumber,
+          trackingToken: updated[0].trackingToken,
+          customerName: updated[0].customerName,
+          customerEmail: updated[0].customerEmail,
+          restaurantName: updated[0].restaurantName,
+          deliveryArea: updated[0].deliveryArea,
+          totalAmount: updated[0].totalAmount,
+          paymentMethod: updated[0].paymentMethod,
+          status: updated[0].status,
+          statusEvent: parsed.data.status,
+          statusNote: statusLabels[parsed.data.status] || "Delivery Update",
+          riderName: updated[0].riderName
+        });
       }
       res.json({ order: updated[0] });
     } catch (error) {
@@ -5417,6 +5970,8 @@ app.post(
       cuisine: z.string().min(2),
       area: z.string().min(2),
       address: z.string().min(3),
+      lat: z.number().min(-90).max(90).optional(),
+      lng: z.number().min(-180).max(180).optional(),
       phone: z.string().default("+8801710000000"),
       email: z.string().email().default("partner@foodora.bd"),
       description: z.string().default(""),
@@ -5443,12 +5998,12 @@ app.post(
         name: parsed.data.name,
         nameBn: parsed.data.nameBn,
         slug,
-        description: parsed.data.description || `${parsed.data.name} in ${parsed.data.area}, Dhaka.`,
+        description: parsed.data.description || `${parsed.data.name} in ${parsed.data.area}, Bangladesh.`,
         cuisine: parsed.data.cuisine,
         area: parsed.data.area,
         address: parsed.data.address,
-        lat: 23.7937,
-        lng: 90.4066,
+        lat: Number.isFinite(parsed.data.lat) ? parsed.data.lat : 23.7937,
+        lng: Number.isFinite(parsed.data.lng) ? parsed.data.lng : 90.4066,
         phone: parsed.data.phone,
         email: parsed.data.email,
         logoUrl: parsed.data.logoUrl?.trim() || "",
@@ -5491,6 +6046,8 @@ app.patch(
       cuisine: z.string().min(2).optional(),
       area: z.string().min(2).optional(),
       address: z.string().min(3).optional(),
+      lat: z.number().min(-90).max(90).optional(),
+      lng: z.number().min(-180).max(180).optional(),
       description: z.string().optional(),
       logoUrl: z.string().optional(),
       coverUrl: z.string().optional(),
@@ -5519,6 +6076,8 @@ app.patch(
         cuisine: parsed.data.cuisine ?? current.cuisine,
         area: parsed.data.area ?? current.area,
         address: parsed.data.address ?? current.address,
+        lat: parsed.data.lat ?? current.lat,
+        lng: parsed.data.lng ?? current.lng,
         description: parsed.data.description ?? current.description,
         logoUrl: parsed.data.logoUrl !== void 0 ? parsed.data.logoUrl.trim() : current.logoUrl,
         coverUrl: parsed.data.coverUrl || current.coverUrl,
@@ -5759,6 +6318,24 @@ app.patch(
         targetId: String(orderId),
         details: JSON.stringify(parsed.data)
       });
+      if (updated[0].customerEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: updated[0].id,
+          orderNumber: updated[0].orderNumber,
+          trackingToken: updated[0].trackingToken,
+          customerName: updated[0].customerName,
+          customerEmail: updated[0].customerEmail,
+          restaurantName: updated[0].restaurantName,
+          deliveryArea: updated[0].deliveryArea,
+          totalAmount: updated[0].totalAmount,
+          paymentMethod: updated[0].paymentMethod,
+          status: updated[0].status,
+          statusEvent: parsed.data.status,
+          statusNote: parsed.data.note || `Order update: ${parsed.data.status.replace(/_/g, " ")}`,
+          riderName: updated[0].riderName
+        });
+      }
       res.json({ order: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -6008,21 +6585,38 @@ app.patch(
   async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid rider ID" });
+    const schema = z.object({
+      status: z.enum(["pending", "approved", "suspended"]).optional(),
+      isAvailable: z.boolean().optional(),
+      zone: z.string().trim().min(2).max(120).optional(),
+      vehicleType: z.string().trim().min(2).max(40).optional(),
+      currentLat: z.number().min(-90).max(90).optional(),
+      currentLng: z.number().min(-180).max(180).optional()
+    });
+    const parsed = schema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid rider update payload" });
+    }
     try {
       const existing = await db.select().from(riders).where(eq3(riders.id, id)).limit(1);
       if (existing.length === 0) return res.status(404).json({ error: "Rider not found" });
       const cur = existing[0];
+      const hasCoords = typeof parsed.data.currentLat === "number" || typeof parsed.data.currentLng === "number";
       const updated = await db.update(riders).set({
-        status: typeof req.body.status === "string" && ["pending", "approved", "suspended"].includes(req.body.status) ? req.body.status : cur.status,
-        isAvailable: typeof req.body.isAvailable === "boolean" ? req.body.isAvailable : cur.isAvailable,
-        zone: typeof req.body.zone === "string" && req.body.zone.trim() ? req.body.zone.trim() : cur.zone
+        status: parsed.data.status ?? cur.status,
+        isAvailable: typeof parsed.data.isAvailable === "boolean" ? parsed.data.isAvailable : cur.isAvailable,
+        zone: parsed.data.zone ? parsed.data.zone : cur.zone,
+        vehicleType: parsed.data.vehicleType ? parsed.data.vehicleType : cur.vehicleType,
+        currentLat: typeof parsed.data.currentLat === "number" ? Math.round(parsed.data.currentLat * 1e6) / 1e6 : cur.currentLat,
+        currentLng: typeof parsed.data.currentLng === "number" ? Math.round(parsed.data.currentLng * 1e6) / 1e6 : cur.currentLng,
+        locationUpdatedAt: hasCoords ? /* @__PURE__ */ new Date() : cur.locationUpdatedAt
       }).where(eq3(riders.id, id)).returning();
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
-        action: "rider_updated",
+        action: hasCoords ? "rider_gps_override" : "rider_updated",
         targetType: "rider",
         targetId: String(id),
-        details: JSON.stringify(req.body)
+        details: JSON.stringify(parsed.data)
       });
       res.json({ rider: updated[0] });
     } catch (error) {

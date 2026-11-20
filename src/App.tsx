@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ArrowLeft,
   Bell,
   Bike,
   Check,
@@ -73,6 +74,15 @@ const STORAGE_CART_KEY = 'foodora_bd_cart_v1';
 const STORAGE_CART_REST_KEY = 'foodora_bd_cart_rest_v1';
 const STORAGE_AREA_KEY = 'foodora_bd_area_v1';
 const STORAGE_LANG_KEY = 'foodora_bd_lang_v1';
+const STORAGE_LAST_ORDER_KEY = 'foodora_bd_last_order_v1';
+
+interface TrackedOrderShortcut {
+  orderId: number;
+  trackingToken?: string;
+  orderNumber?: string;
+  restaurantName?: string;
+  estimatedMinutes?: number;
+}
 
 function MarketplaceApp() {
   const {
@@ -162,6 +172,16 @@ function MarketplaceApp() {
   const [trackOrderNumInput, setTrackOrderNumInput] = useState('');
   const [trackLookupLoading, setTrackLookupLoading] = useState(false);
   const [trackLookupError, setTrackLookupError] = useState<string | null>(null);
+  const [lastTrackedOrder, setLastTrackedOrder] = useState<TrackedOrderShortcut | null>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_LAST_ORDER_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as TrackedOrderShortcut;
+      return parsed && Number.isInteger(parsed.orderId) && parsed.orderId > 0 ? parsed : null;
+    } catch {
+      return null;
+    }
+  });
 
   // Filters
   const [fulfillmentTab, setFulfillmentTab] = useState<'delivery' | 'pickup'>('delivery');
@@ -282,6 +302,46 @@ function MarketplaceApp() {
     }
     document.documentElement.lang = lang;
   }, [lang]);
+
+  useEffect(() => {
+    try {
+      if (lastTrackedOrder) {
+        localStorage.setItem(STORAGE_LAST_ORDER_KEY, JSON.stringify(lastTrackedOrder));
+      } else {
+        localStorage.removeItem(STORAGE_LAST_ORDER_KEY);
+      }
+    } catch {
+      // ignore
+    }
+  }, [lastTrackedOrder]);
+
+  // Global Escape key close for active modals & cart drawer
+  useEffect(() => {
+    const anyModalOpen =
+      locationModalOpen ||
+      emailTrackModalOpen ||
+      authModalOpen ||
+      Boolean(pendingSwitchItem) ||
+      cartOpen;
+    if (!anyModalOpen) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (locationModalOpen) {
+        setLocationModalOpen(false);
+      } else if (emailTrackModalOpen) {
+        setEmailTrackModalOpen(false);
+      } else if (authModalOpen) {
+        setAuthModalOpen(false);
+      } else if (pendingSwitchItem) {
+        setPendingSwitchItem(null);
+      } else if (cartOpen) {
+        setCartOpen(false);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [locationModalOpen, emailTrackModalOpen, authModalOpen, pendingSwitchItem, cartOpen]);
 
   // Sync URL query param for tracking & restaurant deep-link SEO persistence across reload
   useEffect(() => {
@@ -557,16 +617,38 @@ function MarketplaceApp() {
     }
   }, [storefrontProducts, restaurants, sc, lang, view, detailData]);
 
-  // Load favorites & notifications when user session is active
+  // Load favorites, notifications & latest active order when user session is active
   const loadUserSignals = useCallback(async () => {
     if (!user) return;
     try {
-      const [favRes, notifRes] = await Promise.all([
+      const [favRes, notifRes, ordersRes] = await Promise.all([
         apiFetch<{ favorites: Array<{ restaurantId: number }> }>('/api/customer/favorites'),
         apiFetch<{ notifications: NotificationItem[] }>('/api/notifications'),
+        apiFetch<{
+          orders: Array<{
+            id: number;
+            orderNumber: string;
+            trackingToken?: string;
+            restaurantName: string;
+            estimatedMinutes: number;
+            status: string;
+          }>;
+        }>('/api/customer/orders').catch(() => ({ orders: [] })),
       ]);
       setFavoriteIds(favRes.favorites.map((f) => f.restaurantId));
       setNotifications(notifRes.notifications);
+      const activeOrder = ordersRes.orders.find(
+        (o) => o.status !== 'delivered' && o.status !== 'cancelled'
+      );
+      if (activeOrder) {
+        setLastTrackedOrder({
+          orderId: activeOrder.id,
+          trackingToken: activeOrder.trackingToken,
+          orderNumber: activeOrder.orderNumber,
+          restaurantName: activeOrder.restaurantName,
+          estimatedMinutes: activeOrder.estimatedMinutes,
+        });
+      }
     } catch {
       // ignore if guest
     }
@@ -957,11 +1039,11 @@ function MarketplaceApp() {
       {/* Top Accent Partner Bar (Controlled via Admin -> Frontend Control) */}
       {sc.showTopPartnerBar && (
         <div style={{ backgroundColor: sc.accentColor }} className="text-white text-xs">
-          <div className="max-w-[1400px] mx-auto px-3 sm:px-6 h-11 flex items-center justify-center gap-2 sm:gap-3">
+          <div className="max-w-[1400px] mx-auto px-2 sm:px-6 h-10 sm:h-11 flex items-center justify-center gap-1.5 sm:gap-3 overflow-x-auto">
             <button
               type="button"
               onClick={() => handleSwitchWorkspace('restaurant_owner', { type: 'vendor', onboarding: false })}
-              className="px-3 sm:px-4 py-1 rounded-lg border border-white/80 hover:bg-white/15 font-bold text-[10px] sm:text-[11px] uppercase tracking-wide inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+              className="px-2.5 sm:px-4 py-1 rounded-lg border border-white/80 hover:bg-white/15 font-bold text-[10px] sm:text-[11px] uppercase tracking-wide inline-flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 transition-colors"
             >
               <Store className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t(lang, 'partnerCta')}</span>
@@ -973,7 +1055,7 @@ function MarketplaceApp() {
                 setView({ type: 'rider', onboarding: true });
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}
-              className="px-3 sm:px-4 py-1 rounded-lg border border-white/80 hover:bg-white/15 font-bold text-[10px] sm:text-[11px] uppercase tracking-wide inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+              className="px-2.5 sm:px-4 py-1 rounded-lg border border-white/80 hover:bg-white/15 font-bold text-[10px] sm:text-[11px] uppercase tracking-wide inline-flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 transition-colors"
             >
               <Bike className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t(lang, 'riderCta')}</span>
@@ -982,7 +1064,7 @@ function MarketplaceApp() {
             <button
               type="button"
               onClick={openAdminOrPromptSignIn}
-              className="px-3 sm:px-4 py-1 rounded-lg border border-white/80 hover:bg-white/15 font-bold text-[10px] sm:text-[11px] uppercase tracking-wide inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+              className="px-2.5 sm:px-4 py-1 rounded-lg border border-white/80 hover:bg-white/15 font-bold text-[10px] sm:text-[11px] uppercase tracking-wide inline-flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 transition-colors"
             >
               <Shield className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">
@@ -1000,23 +1082,24 @@ function MarketplaceApp() {
 
       {/* Main 2-Tier Clean White Sticky Header */}
       <header className="sticky top-0 z-40 bg-white border-b border-neutral-200 shadow-[0_2px_8px_rgba(0,0,0,0.04)]">
-        {/* Top Row: Brand, Inline Location, Auth, Lang, Orders, Cart */}
-        <div className="max-w-[1400px] mx-auto px-3 sm:px-6 h-16 flex items-center justify-between gap-2 sm:gap-4">
-          <div className="flex items-center gap-3 sm:gap-5 min-w-0">
+        {/* Top Row: Responsive Brand Logo, Inline Location, Auth, Track Rider, Lang, Orders, Cart */}
+        <div className="max-w-[1400px] mx-auto px-2 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-1.5 sm:gap-4">
+          <div className="flex items-center gap-2 sm:gap-5 min-w-0 shrink-0">
             <button
               type="button"
               onClick={() => setView({ type: 'home' })}
-              className="flex items-center gap-2 shrink-0 group whitespace-nowrap"
+              aria-label={`${sc.brandPrefix}${sc.brandSuffix} Home`}
+              className="flex items-center gap-1.5 sm:gap-2 shrink-0 group whitespace-nowrap"
             >
               <span
                 style={{ backgroundColor: sc.accentColor }}
-                className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl text-white flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform"
+                className="w-7 h-7 sm:w-9 sm:h-9 rounded-lg sm:rounded-xl text-white flex items-center justify-center shadow-xs shrink-0 group-hover:scale-105 transition-transform"
               >
-                <UtensilsCrossed className="w-4 h-4 sm:w-5 sm:h-5" />
+                <UtensilsCrossed className="w-3.5 h-3.5 sm:w-5 sm:h-5" />
               </span>
               <span
                 style={{ color: sc.accentColor }}
-                className="text-lg sm:text-[21px] font-extrabold tracking-tight"
+                className="text-sm min-[390px]:text-base sm:text-[21px] font-extrabold tracking-tight leading-none whitespace-nowrap"
               >
                 {sc.brandPrefix}
                 <span className="text-[#2E3138]">{sc.brandSuffix}</span>
@@ -1037,9 +1120,9 @@ function MarketplaceApp() {
           </div>
 
           {/* Right Action Controls */}
-          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+          <div className="flex items-center gap-1 sm:gap-2.5 shrink-0">
             {authLoading ? (
-              <div className="w-9 sm:w-20 h-9 rounded-lg bg-neutral-100" />
+              <div className="w-8 sm:w-20 h-8 sm:h-9 rounded-lg bg-neutral-100" />
             ) : user ? (
               <>
                 {isPrivilegedAdmin && (
@@ -1061,18 +1144,20 @@ function MarketplaceApp() {
                         setView({ type: 'admin' });
                         window.scrollTo({ top: 0, behavior: 'smooth' });
                       }}
-                      className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg bg-[#2E3138] hover:bg-black text-white text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
+                      aria-label="Open Admin Dashboard"
+                      className="inline-flex items-center gap-1 px-1.5 sm:px-2.5 py-1.5 rounded-lg bg-[#2E3138] hover:bg-black text-white text-[11px] sm:text-xs font-bold whitespace-nowrap shrink-0 transition-colors"
                     >
                       <Shield className="w-3.5 h-3.5 text-[#E21B70]" />
                       <span className="hidden sm:inline">
                         {user.role === 'super_admin' ? 'Super Admin' : 'Admin'}
                       </span>
-                      <span className="sm:hidden">Admin</span>
+                      <span className="hidden min-[380px]:inline sm:hidden">Admin</span>
                     </button>
                   </>
                 )}
                 <button
                   type="button"
+                  aria-label="Account and Workspace"
                   onClick={() => {
                     clearError();
                     setAuthModalOpen(true);
@@ -1109,34 +1194,65 @@ function MarketplaceApp() {
             ) : (
               <button
                 type="button"
+                aria-label={lang === 'bn' ? 'লগইন / সাইন আপ' : 'Login or Sign Up'}
                 onClick={() => {
                   clearError();
                   setAuthModalOpen(true);
                 }}
                 style={{ backgroundColor: sc.accentColor }}
-                className="px-2.5 sm:px-3.5 py-1.5 rounded-lg hover:opacity-90 text-white text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-opacity"
+                className="px-2 sm:px-3.5 py-1.5 rounded-lg hover:opacity-90 text-white text-[11px] sm:text-xs font-bold inline-flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 transition-opacity"
               >
                 <LogIn className="w-3.5 h-3.5" />
-                <span>{lang === 'bn' ? 'লগইন / সাইন আপ' : 'Login / Sign Up'}</span>
+                <span className="hidden min-[380px]:inline sm:hidden">
+                  {lang === 'bn' ? 'লগইন' : 'Login'}
+                </span>
+                <span className="hidden sm:inline">
+                  {lang === 'bn' ? 'লগইন / সাইন আপ' : 'Login / Sign Up'}
+                </span>
               </button>
             )}
 
             <button
               type="button"
+              aria-label={lang === 'bn' ? 'রাইডার ট্র্যাক' : 'Track Rider'}
               onClick={() => {
+                if (lastTrackedOrder && view.type !== 'tracking') {
+                  setView({
+                    type: 'tracking',
+                    orderId: lastTrackedOrder.orderId,
+                    token: lastTrackedOrder.trackingToken,
+                  });
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                  return;
+                }
                 setTrackLookupError(null);
                 if (!trackEmailInput && user && !user.isSandbox && user.email) {
                   setTrackEmailInput(user.email);
                 }
                 setEmailTrackModalOpen(true);
               }}
-              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg border border-neutral-300 hover:border-[#E21B70] text-xs font-bold text-[#2E3138] whitespace-nowrap shrink-0 transition-colors"
+              className={`inline-flex items-center gap-1 sm:gap-1.5 px-1.5 sm:px-3 py-1.5 rounded-lg border text-[11px] sm:text-xs font-bold whitespace-nowrap shrink-0 transition-colors ${
+                lastTrackedOrder
+                  ? 'border-emerald-300 bg-emerald-50/70 text-[#2E3138] hover:border-emerald-500'
+                  : 'border-neutral-300 hover:border-[#E21B70] text-[#2E3138]'
+              }`}
             >
-              <Mail className="w-3.5 h-3.5 text-[#E21B70]" />
+              <Bike className="w-3.5 h-3.5 text-[#E21B70] shrink-0" />
+              {lastTrackedOrder && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+              )}
               <span className="hidden md:inline">
-                {lang === 'bn' ? 'ইমেইল অর্ডার ট্র্যাক' : 'Track by Email'}
+                {lastTrackedOrder
+                  ? lang === 'bn'
+                    ? 'লাইভ রাইডার ট্র্যাক'
+                    : 'Track Rider Live'
+                  : lang === 'bn'
+                  ? 'রাইডার / অর্ডার ট্র্যাক'
+                  : 'Track Rider'}
               </span>
-              <span className="md:hidden">{lang === 'bn' ? 'ট্র্যাক' : 'Track'}</span>
+              <span className="hidden min-[430px]:inline md:hidden">
+                {lang === 'bn' ? 'ট্র্যাক' : 'Track'}
+              </span>
             </button>
 
             <button
@@ -1157,7 +1273,7 @@ function MarketplaceApp() {
               <button
                 type="button"
                 onClick={() => setLang('en')}
-                className={`px-1.5 sm:px-2 py-1 rounded-md text-[11px] font-bold whitespace-nowrap shrink-0 transition-colors ${
+                className={`px-1.5 sm:px-2 py-0.5 sm:py-1 rounded-md text-[10px] sm:text-[11px] font-bold whitespace-nowrap shrink-0 transition-colors ${
                   lang === 'en'
                     ? 'bg-[#2E3138] text-white shadow-xs'
                     : 'text-neutral-600 hover:text-[#2E3138]'
@@ -1168,13 +1284,14 @@ function MarketplaceApp() {
               <button
                 type="button"
                 onClick={() => setLang('bn')}
-                className={`px-1.5 sm:px-2 py-1 rounded-md text-[11px] font-bold whitespace-nowrap shrink-0 transition-colors ${
+                className={`px-1.5 sm:px-2 py-0.5 sm:py-1 rounded-md text-[10px] sm:text-[11px] font-bold whitespace-nowrap shrink-0 transition-colors ${
                   lang === 'bn'
                     ? 'bg-[#2E3138] text-white shadow-xs'
                     : 'text-neutral-600 hover:text-[#2E3138]'
                 }`}
               >
-                বাংলা
+                <span className="min-[400px]:hidden">বাং</span>
+                <span className="hidden min-[400px]:inline">বাংলা</span>
               </button>
             </div>
 
@@ -1351,11 +1468,11 @@ function MarketplaceApp() {
               onClick={() => setCartOpen(true)}
               aria-label="Open Cart"
               style={{ backgroundColor: sc.accentColor }}
-              className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-lg hover:opacity-90 text-white text-xs font-bold inline-flex items-center gap-1.5 tabular-nums whitespace-nowrap shrink-0 transition-opacity"
+              className="px-2 sm:px-3.5 py-1.5 sm:py-2 rounded-lg hover:opacity-90 text-white text-[11px] sm:text-xs font-bold inline-flex items-center gap-1 sm:gap-1.5 tabular-nums whitespace-nowrap shrink-0 transition-opacity"
             >
-              <ShoppingBag className="w-4 h-4" />
+              <ShoppingBag className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               <span className="hidden sm:inline">{t(lang, 'cart')}</span>
-              <span className="px-1.5 py-0.5 rounded bg-white/20 text-[11px]">{totalCartItems}</span>
+              <span className="px-1.5 py-0.5 rounded bg-white/20 text-[10px] sm:text-[11px]">{totalCartItems}</span>
             </button>
           </div>
         </div>
@@ -1746,6 +1863,54 @@ function MarketplaceApp() {
 
             {/* Main Storefront Column */}
             <div className="flex-1 min-w-0 space-y-8">
+              {/* Active Order Live Rider Tracking Shortcut Banner */}
+              {lastTrackedOrder && (
+                <div
+                  data-testid="active-rider-shortcut-bar"
+                  className="p-3 sm:px-4 sm:py-3 rounded-2xl bg-gradient-to-r from-[#FFF0F6] via-white to-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-3 shadow-xs"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                      <Bike className="w-4 h-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-[#2E3138] flex items-center gap-1.5 flex-wrap">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                        <span>
+                          {lang === 'bn' ? 'লাইভ অর্ডার চালু আছে' : 'Active Delivery Order'}
+                          {lastTrackedOrder.orderNumber ? ` · ${lastTrackedOrder.orderNumber}` : ''}
+                        </span>
+                      </p>
+                      <p className="text-[11px] text-neutral-600 truncate">
+                        {lastTrackedOrder.restaurantName || 'Foodora Partner'}
+                        {lastTrackedOrder.estimatedMinutes
+                          ? ` · ${
+                              lang === 'bn'
+                                ? `প্রায় ${Math.min(Math.max(lastTrackedOrder.estimatedMinutes, 8), 90)} মিনিট`
+                                : `~${Math.min(Math.max(lastTrackedOrder.estimatedMinutes, 8), 90)} min ETA`
+                            }`
+                          : ''}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setView({
+                        type: 'tracking',
+                        orderId: lastTrackedOrder.orderId,
+                        token: lastTrackedOrder.trackingToken,
+                      });
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="px-3.5 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold inline-flex items-center gap-1.5 shrink-0"
+                  >
+                    <LocateFixed className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'রাইডার অবস্থান ও সময় দেখুন' : 'Track Rider & ETA'}</span>
+                  </button>
+                </div>
+              )}
+
               {/* Mobile Location + Search + Mode Switcher + Weather */}
               <div className="lg:hidden space-y-2.5">
                 <div className="flex items-center gap-2">
@@ -2250,7 +2415,7 @@ function MarketplaceApp() {
                                 src={rest.logoUrl}
                                 alt={`${rest.name} logo`}
                                 referrerPolicy="no-referrer"
-                                className="w-11 h-11 rounded-xl object-cover border-2 border-white shadow-md bg-white absolute bottom-2.5 left-2.5"
+                                className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl object-cover border-2 border-white shadow-md bg-white absolute bottom-2 left-2 sm:bottom-2.5 sm:left-2.5"
                               />
                             )}
 
@@ -2372,10 +2537,18 @@ function MarketplaceApp() {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8 items-start">
             <div className="space-y-2">
-              <p style={{ color: sc.accentColor }} className="text-lg font-extrabold">
-                {sc.brandPrefix}
-                <span className="text-[#2E3138]">{sc.brandSuffix}</span>
-              </p>
+              <div className="inline-flex items-center gap-2">
+                <span
+                  style={{ backgroundColor: sc.accentColor }}
+                  className="w-7 h-7 rounded-lg text-white flex items-center justify-center shrink-0"
+                >
+                  <UtensilsCrossed className="w-3.5 h-3.5" />
+                </span>
+                <p style={{ color: sc.accentColor }} className="text-base sm:text-lg font-extrabold tracking-tight">
+                  {sc.brandPrefix}
+                  <span className="text-[#2E3138]">{sc.brandSuffix}</span>
+                </p>
+              </div>
               <p className="leading-relaxed">
                 {lang === 'bn' ? sc.footerDescBn : sc.footerDescEn}
               </p>
@@ -2460,8 +2633,15 @@ function MarketplaceApp() {
         onUpdateQty={handleUpdateQty}
         onRemoveItem={handleRemoveCartItem}
         onClearCart={handleClearCart}
-        onOrderCreated={(orderId, trackingToken) => {
+        onOrderCreated={(orderId, trackingToken, meta) => {
           setCartOpen(false);
+          setLastTrackedOrder({
+            orderId,
+            trackingToken,
+            orderNumber: meta?.orderNumber,
+            restaurantName: meta?.restaurantName,
+            estimatedMinutes: meta?.estimatedMinutes,
+          });
           setView({ type: 'tracking', orderId, token: trackingToken });
           loadUserSignals();
         }}
@@ -2469,8 +2649,14 @@ function MarketplaceApp() {
 
       {/* Single-Restaurant Cart Conflict Modal */}
       {pendingSwitchItem && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-6 space-y-4 shadow-xl">
+        <div
+          onClick={() => setPendingSwitchItem(null)}
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl max-w-sm w-full p-6 space-y-4 shadow-xl"
+          >
             <h3 className="font-bold text-base text-[#2E3138]">
               {lang === 'bn' ? 'নতুন কার্ট শুরু করবেন?' : 'Replace items in cart?'}
             </h3>
@@ -2501,16 +2687,36 @@ function MarketplaceApp() {
 
       {/* Location Picker Modal */}
       {locationModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-base text-[#2E3138]">
-                {t(lang, 'selectAddress')}
-              </h3>
+        <div
+          data-testid="location-modal-backdrop"
+          onClick={() => setLocationModalOpen(false)}
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-3 sm:p-4"
+        >
+          <div
+            data-testid="location-modal-panel"
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl max-w-2xl w-full max-h-[92vh] overflow-y-auto p-4 sm:p-6 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setLocationModalOpen(false)}
+                  aria-label={lang === 'bn' ? 'ফিরে যান' : 'Back from address map'}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-[#2E3138] shrink-0"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>{lang === 'bn' ? 'ফিরুন' : 'Back'}</span>
+                </button>
+                <h3 className="font-bold text-sm sm:text-base text-[#2E3138] truncate">
+                  {t(lang, 'selectAddress')}
+                </h3>
+              </div>
               <button
                 type="button"
+                aria-label="Close address map"
                 onClick={() => setLocationModalOpen(false)}
-                className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100"
+                className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -2642,11 +2848,18 @@ function MarketplaceApp() {
               }}
             />
 
-            <div className="flex justify-end">
+            <div className="flex items-center justify-between gap-2 pt-1">
               <button
                 type="button"
                 onClick={() => setLocationModalOpen(false)}
-                className="px-5 py-2.5 rounded-xl bg-[#E21B70] text-white text-xs font-semibold"
+                className="px-4 py-2.5 rounded-xl border border-neutral-200 hover:border-neutral-300 text-xs font-semibold text-neutral-700"
+              >
+                {lang === 'bn' ? '← ফিরে যান' : '← Back'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setLocationModalOpen(false)}
+                className="px-5 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold"
               >
                 {lang === 'bn' ? 'এলাকা নিশ্চিত করুন' : 'Confirm Delivery Zone'}
               </button>
@@ -2657,8 +2870,21 @@ function MarketplaceApp() {
 
       {/* Auth & Workspace Role Switcher Modal */}
       {authModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl my-auto">
+        <div
+          onClick={() => {
+            clearError();
+            clearGoogleRedirectUrl();
+            setPendingAdminRedirect(false);
+            setShowAdminPinBox(false);
+            setAdminPinInput('');
+            setAuthModalOpen(false);
+          }}
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl my-auto"
+          >
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-base text-[#2E3138]">
                 {lang === 'bn' ? 'অ্যাকাউন্ট ও রোল পোর্টাল' : 'Account & Role Workspaces'}
@@ -3448,10 +3674,14 @@ function MarketplaceApp() {
         </div>
       )}
 
-      {/* Email Order Tracking Lookup Modal */}
+      {/* Email Order & Rider Tracking Lookup Modal */}
       {emailTrackModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+        <div
+          onClick={() => setEmailTrackModalOpen(false)}
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+        >
           <form
+            onClick={(e) => e.stopPropagation()}
             onSubmit={async (e) => {
               e.preventDefault();
               setTrackLookupLoading(true);
@@ -3464,8 +3694,21 @@ function MarketplaceApp() {
                   params.set('orderNumber', trackOrderNumInput.trim());
                 }
                 const res = await apiFetch<{
-                  order: { id: number; orderNumber: string; trackingToken?: string };
+                  order: {
+                    id: number;
+                    orderNumber: string;
+                    trackingToken?: string;
+                    restaurantName?: string;
+                    estimatedMinutes?: number;
+                  };
                 }>(`/api/orders/track-by-email?${params.toString()}`);
+                setLastTrackedOrder({
+                  orderId: res.order.id,
+                  trackingToken: res.order.trackingToken,
+                  orderNumber: res.order.orderNumber,
+                  restaurantName: res.order.restaurantName,
+                  estimatedMinutes: res.order.estimatedMinutes,
+                });
                 setEmailTrackModalOpen(false);
                 setView({
                   type: 'tracking',
@@ -3485,21 +3728,21 @@ function MarketplaceApp() {
                 setTrackLookupLoading(false);
               }
             }}
-            className="bg-white rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl"
+            className="bg-white rounded-2xl w-full max-w-md max-h-[92vh] overflow-y-auto p-6 space-y-4 shadow-2xl"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <div className="w-9 h-9 rounded-xl bg-[#FFF0F6] text-[#E21B70] flex items-center justify-center">
-                  <Mail className="w-4 h-4" />
+                <div className="w-9 h-9 rounded-xl bg-[#FFF0F6] text-[#E21B70] flex items-center justify-center shrink-0">
+                  <Bike className="w-4 h-4" />
                 </div>
                 <div>
                   <h3 className="font-bold text-base text-[#2E3138]">
-                    {lang === 'bn' ? 'ইমেইলে অর্ডার ট্র্যাক করুন' : 'Track Order by Email'}
+                    {lang === 'bn' ? 'রাইডার ও অর্ডার ট্র্যাক করুন' : 'Track Rider & Order Live'}
                   </h3>
                   <p className="text-[11px] text-neutral-500">
                     {lang === 'bn'
-                      ? 'অর্ডার করার সময় দেওয়া ইমেইল দিয়ে লাইভ ম্যাপ ও ইমেইল আপডেট দেখুন'
-                      : 'Enter checkout email to open live GPS tracking & email log'}
+                      ? 'রাইডার এখন কোথায় আছে ও কতক্ষণ লাগবে দেখতে ইমেইল দিন'
+                      : 'See live rider location & delivery ETA using checkout email'}
                   </p>
                 </div>
               </div>
@@ -3512,6 +3755,34 @@ function MarketplaceApp() {
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {lastTrackedOrder && (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-emerald-900 truncate">
+                    {lastTrackedOrder.orderNumber || `Order #${lastTrackedOrder.orderId}`}
+                  </p>
+                  <p className="text-[11px] text-emerald-700 truncate">
+                    {lastTrackedOrder.restaurantName || 'Active Foodora Order'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEmailTrackModalOpen(false);
+                    setView({
+                      type: 'tracking',
+                      orderId: lastTrackedOrder.orderId,
+                      token: lastTrackedOrder.trackingToken,
+                    });
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shrink-0"
+                >
+                  {lang === 'bn' ? 'লাইভ দেখুন' : 'Track Live'}
+                </button>
+              </div>
+            )}
 
             {trackLookupError && (
               <div
