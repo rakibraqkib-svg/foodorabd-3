@@ -30,6 +30,7 @@ interface DhakaMapPickerProps {
   markerLabel?: string;
   secondaryPoint?: { lat: number; lng: number; label: string };
   riderPoint?: { lat: number; lng: number; label: string };
+  riderTarget?: { lat: number; lng: number };
   extraRiders?: ExtraRiderMapPin[];
   onSelectRiderPin?: (riderId: number) => void;
   interactive?: boolean;
@@ -62,13 +63,19 @@ function isPointInsideDhakaMetro(lat: number, lng: number): boolean {
 function RouteOverlay({
   origin,
   destination,
+  skipFitBounds = false,
 }: {
   origin: { lat: number; lng: number };
   destination: { lat: number; lng: number };
+  skipFitBounds?: boolean;
 }) {
   const map = useMap();
   const routesLib = useMapsLibrary('routes');
   const polylinesRef = useRef<MapPolylineLike[]>([]);
+  const originLat = origin.lat;
+  const originLng = origin.lng;
+  const destLat = destination.lat;
+  const destLng = destination.lng;
 
   useEffect(() => {
     if (!map || !routesLib) return;
@@ -76,8 +83,8 @@ function RouteOverlay({
     polylinesRef.current = [];
 
     const request = {
-      origin,
-      destination,
+      origin: { lat: originLat, lng: originLng },
+      destination: { lat: destLat, lng: destLng },
       travelMode: 'DRIVING',
       fields: ['path', 'viewport'],
     };
@@ -101,7 +108,7 @@ function RouteOverlay({
           });
           polylinesRef.current = lines;
         }
-        if (primary.viewport) {
+        if (primary.viewport && !skipFitBounds) {
           map.fitBounds(primary.viewport);
         }
       })
@@ -113,7 +120,112 @@ function RouteOverlay({
       polylinesRef.current.forEach((p) => p.setMap(null));
       polylinesRef.current = [];
     };
-  }, [map, routesLib, origin, destination]);
+  }, [map, routesLib, originLat, originLng, destLat, destLng, skipFitBounds]);
+
+  return null;
+}
+
+function TrackingBoundsAndRiderVector({
+  center,
+  secondaryPoint,
+  riderPoint,
+  riderTarget,
+}: {
+  center: { lat: number; lng: number };
+  secondaryPoint?: { lat: number; lng: number };
+  riderPoint?: { lat: number; lng: number };
+  riderTarget?: { lat: number; lng: number };
+}) {
+  const map = useMap();
+  const coreLib = useMapsLibrary('core');
+  const mapsLib = useMapsLibrary('maps');
+  const riderLineRef = useRef<MapPolylineLike | null>(null);
+  const fittedKeyRef = useRef<string>('');
+
+  const cLat = center.lat;
+  const cLng = center.lng;
+  const sLat = secondaryPoint?.lat;
+  const sLng = secondaryPoint?.lng;
+  const rLat = riderPoint?.lat;
+  const rLng = riderPoint?.lng;
+  const tLat = riderTarget?.lat ?? cLat;
+  const tLng = riderTarget?.lng ?? cLng;
+
+  useEffect(() => {
+    if (!map || !mapsLib || typeof rLat !== 'number' || typeof rLng !== 'number') {
+      if (riderLineRef.current) {
+        riderLineRef.current.setMap(null);
+        riderLineRef.current = null;
+      }
+      return;
+    }
+
+    const PolylineCtor = (
+      mapsLib as unknown as {
+        Polyline?: new (opts: Record<string, unknown>) => MapPolylineLike;
+      }
+    ).Polyline;
+    if (!PolylineCtor) return;
+
+    const path = [
+      { lat: rLat, lng: rLng },
+      { lat: tLat, lng: tLng },
+    ];
+
+    if (!riderLineRef.current) {
+      riderLineRef.current = new PolylineCtor({
+        path,
+        geodesic: true,
+        strokeColor: '#059669',
+        strokeOpacity: 0.85,
+        strokeWeight: 3.5,
+        map,
+      });
+    } else {
+      riderLineRef.current.setOptions({ path, map });
+    }
+
+    return () => {
+      if (riderLineRef.current) {
+        riderLineRef.current.setMap(null);
+        riderLineRef.current = null;
+      }
+    };
+  }, [map, mapsLib, rLat, rLng, tLat, tLng]);
+
+  useEffect(() => {
+    if (!map || !coreLib || typeof rLat !== 'number' || typeof rLng !== 'number') return;
+
+    const LatLngBoundsCtor = (
+      coreLib as unknown as {
+        LatLngBounds?: new () => {
+          extend: (pt: { lat: number; lng: number }) => void;
+        };
+      }
+    ).LatLngBounds;
+    if (!LatLngBoundsCtor) return;
+
+    const endpointKey = `${cLat.toFixed(4)},${cLng.toFixed(4)}|${sLat?.toFixed(4) ?? ''},${sLng?.toFixed(4) ?? ''}|hasRider`;
+    const currentBounds = map.getBounds();
+    const riderOutsideView =
+      currentBounds && typeof currentBounds.contains === 'function'
+        ? !currentBounds.contains({ lat: rLat, lng: rLng })
+        : false;
+
+    if (fittedKeyRef.current !== endpointKey || riderOutsideView) {
+      const bounds = new LatLngBoundsCtor();
+      bounds.extend({ lat: cLat, lng: cLng });
+      bounds.extend({ lat: rLat, lng: rLng });
+      if (typeof sLat === 'number' && typeof sLng === 'number') {
+        bounds.extend({ lat: sLat, lng: sLng });
+      }
+      (map as unknown as { fitBounds: (b: unknown, padding?: number) => void }).fitBounds(
+        bounds,
+        48
+      );
+      fittedKeyRef.current = endpointKey;
+    }
+  }, [map, coreLib, cLat, cLng, sLat, sLng, rLat, rLng]);
 
   return null;
 }
@@ -159,6 +271,7 @@ function GoogleMapInner({
   markerLabel,
   secondaryPoint,
   riderPoint,
+  riderTarget,
   extraRiders,
   onSelectRiderPin,
   interactive,
@@ -286,8 +399,15 @@ function GoogleMapInner({
           <RouteOverlay
             origin={{ lat: secondaryPoint.lat, lng: secondaryPoint.lng }}
             destination={center}
+            skipFitBounds={Boolean(riderPoint)}
           />
         )}
+        <TrackingBoundsAndRiderVector
+          center={center}
+          secondaryPoint={secondaryPoint}
+          riderPoint={riderPoint}
+          riderTarget={riderTarget}
+        />
       </GoogleMap>
       {interactive && (
         <div className="pointer-events-none absolute bottom-7 left-2.5 bg-white/95 backdrop-blur-xs border border-neutral-200 rounded-lg px-2.5 py-1 text-[11px] font-medium text-neutral-700 shadow-xs">
@@ -570,6 +690,7 @@ export function DhakaMapPicker(props: DhakaMapPickerProps) {
         markerLabel={props.markerLabel}
         secondaryPoint={props.secondaryPoint}
         riderPoint={props.riderPoint}
+        riderTarget={props.riderTarget}
         extraRiders={props.extraRiders}
         onSelectRiderPin={props.onSelectRiderPin}
         interactive={props.interactive}

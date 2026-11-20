@@ -13,6 +13,7 @@ import crypto3 from "node:crypto";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
 import { and as and2, desc as desc2, eq as eq3, or as or2, sql as sql3 } from "drizzle-orm";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { z } from "zod";
 
 // src/db/index.ts
@@ -2393,6 +2394,43 @@ function pickNearestStandbyRider(candidates, targetLat, targetLng) {
   }
   return { rider: best, distanceKm: bestDist };
 }
+function buildRestaurantUnavailableMessage(restaurantName, status, isOpen, lang = "en") {
+  const safeName = restaurantName.trim() || (lang === "bn" ? "\u098F\u0987 \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F\u099F\u09BF" : "This restaurant");
+  if (status !== "approved") {
+    if (lang === "bn") {
+      return `${safeName} \u09AC\u09B0\u09CD\u09A4\u09AE\u09BE\u09A8\u09C7 \u0985\u09CD\u09AF\u09BE\u09A1\u09AE\u09BF\u09A8 \u0985\u09A8\u09C1\u09AE\u09CB\u09A6\u09A8\u09C7\u09B0 (${status}) \u0985\u09AA\u09C7\u0995\u09CD\u09B7\u09BE\u09DF \u0986\u099B\u09C7, \u09A4\u09BE\u0987 \u098F\u0996\u09A8 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09A8\u09C7\u0993\u09DF\u09BE \u09B9\u099A\u09CD\u099B\u09C7 \u09A8\u09BE\u0964`;
+    }
+    return `${safeName} is currently "${status}" and awaiting Admin approval before accepting orders.`;
+  }
+  if (!isOpen) {
+    if (lang === "bn") {
+      return `${safeName} \u09AC\u09B0\u09CD\u09A4\u09AE\u09BE\u09A8\u09C7 \u09AC\u09A8\u09CD\u09A7 (Closed) \u09B0\u09BE\u0996\u09BE \u09B9\u09DF\u09C7\u099B\u09C7\u0964 \u09AA\u09BE\u09B0\u09CD\u099F\u09A8\u09BE\u09B0/\u0985\u09CD\u09AF\u09BE\u09A1\u09AE\u09BF\u09A8 \u09A1\u09CD\u09AF\u09BE\u09B6\u09AC\u09CB\u09B0\u09CD\u09A1 \u09A5\u09C7\u0995\u09C7 Store Open \u099A\u09BE\u09B2\u09C1 \u0995\u09B0\u09C1\u09A8 \u0985\u09A5\u09AC\u09BE \u0985\u09A8\u09CD\u09AF \u0996\u09CB\u09B2\u09BE \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u09A5\u09C7\u0995\u09C7 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09B0\u09C1\u09A8\u0964`;
+    }
+    return `${safeName} is currently closed for orders (Store Open is turned OFF in Partner/Admin Dashboard). Please open another active restaurant or re-open the store.`;
+  }
+  return lang === "bn" ? "\u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F\u099F\u09BF \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09A8\u09BF\u09A4\u09C7 \u09AA\u09CD\u09B0\u09B8\u09CD\u09A4\u09C1\u09A4\u0964" : "Restaurant is open for orders.";
+}
+function buildAiHelpSystemInstruction(params) {
+  const pref = params.langPreference || "auto";
+  const langRule = pref === "bn" ? "Always respond strictly in clear, natural Bengali (\u09AC\u09BE\u0982\u09B2\u09BE script)." : pref === "en" ? "Always respond strictly in clear, helpful English." : "Detect the user language automatically: if they write in Bangla (\u09AC\u09BE\u0982\u09B2\u09BE) or Banglish/Romanized Bengali, respond in clear, helpful Bangla (\u09AC\u09BE\u0982\u09B2\u09BE). If they write in English, respond in English.";
+  const contextNotes = [
+    params.area ? `User selected area: ${params.area}, Bangladesh.` : "",
+    params.viewType ? `Current screen: ${params.viewType}.` : "",
+    params.activeOrderNumber ? `Active order number: ${params.activeOrderNumber}.` : ""
+  ].filter(Boolean).join(" ");
+  return [
+    "You are the official Foodora BD AI Help Assistant for Bangladesh\u2019s multi-vendor food delivery marketplace.",
+    langRule,
+    "Keep answers concise, practical, and easy to scan (2-5 short sentences or bullet steps). Never invent order IDs, prices, or live GPS coordinates.",
+    "Platform knowledge:",
+    '- Ordering: Customers can order directly from the homepage "Order Popular Food Now" dishes or open any restaurant menu, then pay via bKash, Nagad, SSLCommerz, or Cash on Delivery (COD).',
+    '- Why "This restaurant is currently unavailable for orders" appears: It means either the restaurant has "Store Open" switched OFF (isOpen = false) in Vendor/Admin Dashboard, or its status is not "approved" yet (e.g. pending/suspended). Re-enabling "Store Open" in Partner/Admin Dashboard or picking an Open restaurant resolves it immediately.',
+    "- Nationwide Map & Location: Users can search any city/thana across all 64 districts of Bangladesh, enter a custom area, drag/click the interactive Google Map pin, or press Back / click outside the map modal to return.",
+    '- Live Rider Tracking & ETA: Users can click "Track Rider" in the header or look up orders via Checkout Email + Order Number to see live rider GPS coordinates, nearest standby rider, and estimated arrival time (ETA).',
+    "- Partner & Rider Portals: Restaurant owners can register, add custom cuisines/categories/areas, and integrate Partner APIs; Riders anywhere in Bangladesh can apply to join and share live GPS locations.",
+    contextNotes
+  ].filter(Boolean).join("\n");
+}
 
 // src/db/queries.ts
 async function getApprovedRestaurants() {
@@ -4587,7 +4625,9 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       if (restRows.length === 0) throw new Error("Restaurant not found");
       const rest = restRows[0];
       if (rest.status !== "approved" || !rest.isOpen) {
-        throw new Error("This restaurant is currently unavailable for orders");
+        throw new Error(
+          buildRestaurantUnavailableMessage(rest.name, rest.status, rest.isOpen, "en")
+        );
       }
       const dbMenu = await tx.select().from(foodItems).where(eq3(foodItems.restaurantId, rest.id));
       const snapshotItems = [];
@@ -7069,6 +7109,91 @@ app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
     )
   );
   res.json({ ok: true });
+});
+function getGeminiHelpClient() {
+  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+  if (!apiKey) return null;
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        "User-Agent": "aistudio-build"
+      }
+    }
+  });
+}
+var aiHelpRequestSchema = z.object({
+  message: z.string().trim().min(1, "Please enter a question.").max(1500),
+  langPreference: z.enum(["auto", "bn", "en"]).optional().default("auto"),
+  history: z.array(
+    z.object({
+      role: z.enum(["user", "model"]),
+      text: z.string().trim().min(1).max(1500)
+    })
+  ).optional().default([]),
+  context: z.object({
+    area: z.string().trim().max(120).optional(),
+    viewType: z.string().trim().max(60).optional(),
+    activeOrderNumber: z.string().trim().max(60).optional()
+  }).optional()
+});
+app.post("/api/ai/help", optionalAuth, async (req, res) => {
+  try {
+    const parsed = aiHelpRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || "Invalid AI Help request payload."
+      });
+    }
+    const ai = getGeminiHelpClient();
+    if (!ai) {
+      return res.status(503).json({
+        error: "AI Help is unavailable because GEMINI_API_KEY is not configured in Settings > Secrets."
+      });
+    }
+    const { message, langPreference, history, context } = parsed.data;
+    const systemInstruction = buildAiHelpSystemInstruction({
+      langPreference,
+      area: context?.area,
+      viewType: context?.viewType,
+      activeOrderNumber: context?.activeOrderNumber
+    });
+    const contents = [
+      ...history.slice(-8).map((item) => ({
+        role: item.role,
+        parts: [{ text: item.text }]
+      })),
+      {
+        role: "user",
+        parts: [{ text: message }]
+      }
+    ];
+    const response = await ai.models.generateContent({
+      model: "gemini-4-hydrogen",
+      contents,
+      config: {
+        systemInstruction,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
+      }
+    });
+    const reply = (response.text || "").trim();
+    if (!reply) {
+      return res.status(502).json({
+        error: "AI Help returned an empty response. Please try asking again."
+      });
+    }
+    return res.json({
+      reply,
+      model: "gemini-4-hydrogen"
+    });
+  } catch (err) {
+    const status = typeof err?.status === "number" ? err.status : 502;
+    const rawMsg = err instanceof Error ? err.message : "Failed to generate AI Help response.";
+    console.error("POST /api/ai/help error:", rawMsg);
+    return res.status(status >= 400 && status < 600 ? status : 502).json({
+      error: rawMsg
+    });
+  }
 });
 async function startServer() {
   const port = Number(process.env.PORT || 3e3);

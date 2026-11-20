@@ -488,6 +488,11 @@ export function OrderTrackingView({
                   }
                 : undefined
             }
+            riderTarget={
+              order.status === 'rider_assigned' && restaurant
+                ? { lat: restaurant.lat, lng: restaurant.lng }
+                : { lat: order.deliveryLat, lng: order.deliveryLng }
+            }
             heightClass="h-[280px]"
           />
 
