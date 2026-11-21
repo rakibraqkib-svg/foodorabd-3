@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -90,7 +91,16 @@ import {
   searchMealDbDishes,
   searchOsmPlaces,
 } from './src/services/free-apis.ts';
-import { sendAndLogOrderTrackingEmail } from './src/services/order-email.ts';
+import {
+  getEmailTransportStatus,
+  sendAndLogOrderTrackingEmail,
+} from './src/services/order-email.ts';
+import {
+  attachSseRealtimeClient,
+  broadcastNotificationEvent,
+  broadcastOrderEvent,
+  initRealtimeWebSocketServer,
+} from './src/services/realtime.ts';
 import {
   getGatewayAvailability,
   initiatePaymentSession,
@@ -229,11 +239,21 @@ app.get('/api/public-config', async (_req, res) => {
       mapsApiKey: process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '',
       gateways: getGatewayAvailability(),
       paymentGateways: paymentGatewaysList,
+      emailTransport: getEmailTransportStatus(),
       settings,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load public config' });
   }
+});
+
+app.get('/api/realtime/stream', async (req, res) => {
+  const qs = new URLSearchParams();
+  if (typeof req.query.token === 'string') qs.set('token', req.query.token);
+  if (typeof req.query.orderId === 'string') qs.set('orderId', req.query.orderId);
+  if (typeof req.query.trackingToken === 'string') qs.set('trackingToken', req.query.trackingToken);
+  const cleanup = await attachSseRealtimeClient(res, qs);
+  req.on('close', cleanup);
 });
 
 // ---------- Auth & Sandbox Personas ----------
@@ -1133,7 +1153,8 @@ app.get('/api/free/geocode', async (req, res) => {
 app.get('/api/free/reverse-geocode', async (req, res) => {
   const lat = Number(req.query.lat) || 23.7949;
   const lng = Number(req.query.lng) || 90.4144;
-  const result = await reverseOsmGeocode(lat, lng);
+  const lang = req.query.lang === 'bn' ? 'bn' : 'en';
+  const result = await reverseOsmGeocode(lat, lng, lang);
   res.json(result);
 });
 
@@ -1440,6 +1461,13 @@ app.post('/api/orders/:id/send-tracking-email', optionalAuth, async (req: AuthRe
       order = upd[0] || order;
     }
 
+    const [restRows, riderRows] = await Promise.all([
+      db.select({ lat: restaurants.lat, lng: restaurants.lng }).from(restaurants).where(eq(restaurants.id, order.restaurantId)).limit(1),
+      order.riderUid
+        ? db.select({ phone: riders.phone }).from(riders).where(eq(riders.uid, order.riderUid)).limit(1)
+        : Promise.resolve([]),
+    ]);
+
     const emailLog = await sendAndLogOrderTrackingEmail({
       origin: getRequestOrigin(req),
       orderId: order.id,
@@ -1449,12 +1477,17 @@ app.post('/api/orders/:id/send-tracking-email', optionalAuth, async (req: AuthRe
       customerEmail: targetEmail,
       restaurantName: order.restaurantName,
       deliveryArea: order.deliveryArea,
+      deliveryAddress: order.deliveryAddress,
       totalAmount: order.totalAmount,
       paymentMethod: order.paymentMethod,
+      paymentStatus: order.paymentStatus,
       status: order.status,
       statusEvent: order.status,
       statusNote: `Live tracking update requested (${order.status.replace(/_/g, ' ')})`,
       riderName: order.riderName,
+      riderPhone: riderRows[0]?.phone || null,
+      etaMinutes: order.estimatedMinutes,
+      items: order.itemsSnapshotJson,
     });
 
     return res.json({
@@ -1462,6 +1495,7 @@ app.post('/api/orders/:id/send-tracking-email', optionalAuth, async (req: AuthRe
       customerEmail: targetEmail,
       emailLog,
       trackingUrl: emailLog?.trackingUrl || '',
+      restaurantLat: restRows[0]?.lat ?? null,
     });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || 'Failed to send tracking email' });
@@ -1762,7 +1796,7 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
         },
       ]);
 
-      return { order: newOrder, paymentSession: paymentInit, deliveryDispatch };
+      return { order: newOrder, paymentSession: paymentInit, deliveryDispatch, restaurantOwnerUid: rest.ownerUid };
     });
 
     const emailLog = resolvedCustomerEmail
@@ -1775,13 +1809,47 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
           customerEmail: resolvedCustomerEmail,
           restaurantName: created.order.restaurantName,
           deliveryArea: created.order.deliveryArea,
+          deliveryAddress: created.order.deliveryAddress,
           totalAmount: created.order.totalAmount,
           paymentMethod: created.order.paymentMethod,
+          paymentStatus: created.order.paymentStatus,
           status: created.order.status,
           statusEvent: 'confirmed',
           statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`,
+          etaMinutes: created.order.estimatedMinutes,
+          items: created.order.itemsSnapshotJson,
         })
       : null;
+
+    broadcastOrderEvent('order:created', {
+      orderId: created.order.id,
+      orderNumber: created.order.orderNumber,
+      restaurantId: created.order.restaurantId,
+      restaurantName: created.order.restaurantName,
+      restaurantOwnerUid: created.restaurantOwnerUid,
+      customerUid: created.order.customerUid,
+      customerName: created.order.customerName,
+      status: created.order.status,
+      deliveryMode: created.order.deliveryMode,
+      deliveryArea: created.order.deliveryArea,
+      totalAmount: created.order.totalAmount,
+    });
+    broadcastNotificationEvent({
+      recipientUid: created.restaurantOwnerUid,
+      roleTarget: 'restaurant_owner',
+      title: `New Order ${created.order.orderNumber}`,
+      message: `৳${created.order.totalAmount} order from ${created.order.customerName} (${created.order.deliveryArea})`,
+      type: 'order',
+      relatedOrderId: created.order.id,
+    });
+    broadcastNotificationEvent({
+      recipientUid: created.order.customerUid,
+      roleTarget: 'customer',
+      title: `Order ${created.order.orderNumber} Confirmed`,
+      message: `Your order from ${created.order.restaurantName} has been received.`,
+      type: 'order',
+      relatedOrderId: created.order.id,
+    });
 
     res.status(201).json({ ...created, emailLog });
   } catch (error: any) {
@@ -1842,6 +1910,43 @@ app.post('/api/payments/verify', requireAuth, async (req: AuthRequest, res) => {
       status: order.status,
       note: verification.message,
       actorUid: req.user!.uid,
+    });
+
+    if (updated[0].customerEmail) {
+      await sendAndLogOrderTrackingEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        customerName: updated[0].customerName,
+        customerEmail: updated[0].customerEmail,
+        restaurantName: updated[0].restaurantName,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: updated[0].status,
+        statusEvent: 'payment_verified',
+        statusNote: verification.message,
+        riderName: updated[0].riderName,
+        etaMinutes: updated[0].estimatedMinutes,
+        items: updated[0].itemsSnapshotJson,
+      });
+    }
+
+    broadcastOrderEvent('order:updated', {
+      orderId: updated[0].id,
+      orderNumber: updated[0].orderNumber,
+      restaurantId: updated[0].restaurantId,
+      restaurantName: updated[0].restaurantName,
+      customerUid: updated[0].customerUid,
+      riderUid: updated[0].riderUid,
+      riderName: updated[0].riderName,
+      status: updated[0].status,
+      deliveryMode: updated[0].deliveryMode,
+      deliveryArea: updated[0].deliveryArea,
+      totalAmount: updated[0].totalAmount,
     });
 
     res.json({ verified: true, order: updated[0], message: verification.message });
@@ -2746,14 +2851,42 @@ app.patch(
           customerEmail: updated[0].customerEmail,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
+          deliveryAddress: updated[0].deliveryAddress,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
+          paymentStatus: updated[0].paymentStatus,
           status: updated[0].status,
           statusEvent: parsed.data.status,
           statusNote: parsed.data.note || `${order.restaurantName} updated order status`,
           riderName: updated[0].riderName,
+          etaMinutes: updated[0].estimatedMinutes,
+          items: updated[0].itemsSnapshotJson,
         });
       }
+
+      broadcastOrderEvent('order:updated', {
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        restaurantId: updated[0].restaurantId,
+        restaurantName: updated[0].restaurantName,
+        restaurantOwnerUid: restRows[0]?.ownerUid || null,
+        customerUid: updated[0].customerUid,
+        customerName: updated[0].customerName,
+        riderUid: updated[0].riderUid,
+        riderName: updated[0].riderName,
+        status: updated[0].status,
+        deliveryMode: updated[0].deliveryMode,
+        deliveryArea: updated[0].deliveryArea,
+        totalAmount: updated[0].totalAmount,
+      });
+      broadcastNotificationEvent({
+        recipientUid: order.customerUid,
+        roleTarget: 'customer',
+        title: `Order ${order.orderNumber}: ${parsed.data.status.replace('_', ' ')}`,
+        message: parsed.data.note || `${order.restaurantName} updated your order status.`,
+        type: 'order',
+        relatedOrderId: order.id,
+      });
 
       res.json({ order: updated[0] });
     } catch (error: any) {
@@ -3081,6 +3214,35 @@ app.patch(
         .where(eq(riders.uid, riderUid))
         .returning();
 
+      const activeRiderOrders = await db
+        .select({
+          id: orders.id,
+          orderNumber: orders.orderNumber,
+          restaurantId: orders.restaurantId,
+          restaurantName: orders.restaurantName,
+          customerUid: orders.customerUid,
+          status: orders.status,
+        })
+        .from(orders)
+        .where(eq(orders.riderUid, riderUid));
+
+      for (const ord of activeRiderOrders) {
+        if (!['delivered', 'cancelled'].includes(ord.status)) {
+          broadcastOrderEvent('rider:location', {
+            orderId: ord.id,
+            orderNumber: ord.orderNumber,
+            restaurantId: ord.restaurantId,
+            restaurantName: ord.restaurantName,
+            customerUid: ord.customerUid,
+            riderUid,
+            riderName: updated[0].fullName,
+            status: ord.status,
+            lat: updated[0].currentLat,
+            lng: updated[0].currentLng,
+          });
+        }
+      }
+
       res.json({ rider: updated[0] });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -3151,14 +3313,41 @@ app.post(
           customerEmail: updated[0].customerEmail,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
+          deliveryAddress: updated[0].deliveryAddress,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
+          paymentStatus: updated[0].paymentStatus,
           status: updated[0].status,
           statusEvent: 'rider_assigned',
           statusNote: `Rider ${riderName} accepted delivery assignment`,
           riderName,
+          riderPhone: riderRows[0]?.phone || null,
+          etaMinutes: updated[0].estimatedMinutes,
+          items: updated[0].itemsSnapshotJson,
         });
       }
+
+      broadcastOrderEvent('order:updated', {
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        restaurantId: updated[0].restaurantId,
+        restaurantName: updated[0].restaurantName,
+        customerUid: updated[0].customerUid,
+        riderUid: updated[0].riderUid,
+        riderName: updated[0].riderName,
+        status: updated[0].status,
+        deliveryMode: updated[0].deliveryMode,
+        deliveryArea: updated[0].deliveryArea,
+        totalAmount: updated[0].totalAmount,
+      });
+      broadcastNotificationEvent({
+        recipientUid: existingOrder.customerUid,
+        roleTarget: 'customer',
+        title: 'Rider Assigned to Your Order',
+        message: `${riderName} is assigned for ${existingOrder.orderNumber}. Track live rider GPS on your map.`,
+        type: 'order',
+        relatedOrderId: existingOrder.id,
+      });
 
       res.json({ order: updated[0] });
     } catch (error: any) {
@@ -3244,6 +3433,13 @@ app.patch(
       }
 
       if (updated[0].customerEmail) {
+        const assignedRiderRows = updated[0].riderUid
+          ? await db
+              .select({ phone: riders.phone })
+              .from(riders)
+              .where(eq(riders.uid, updated[0].riderUid))
+              .limit(1)
+          : [];
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: updated[0].id,
@@ -3253,14 +3449,41 @@ app.patch(
           customerEmail: updated[0].customerEmail,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
+          deliveryAddress: updated[0].deliveryAddress,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
+          paymentStatus: updated[0].paymentStatus,
           status: updated[0].status,
           statusEvent: parsed.data.status,
           statusNote: statusLabels[parsed.data.status] || 'Delivery Update',
           riderName: updated[0].riderName,
+          riderPhone: assignedRiderRows[0]?.phone || null,
+          etaMinutes: updated[0].estimatedMinutes,
+          items: updated[0].itemsSnapshotJson,
         });
       }
+
+      broadcastOrderEvent('order:updated', {
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        restaurantId: updated[0].restaurantId,
+        restaurantName: updated[0].restaurantName,
+        customerUid: updated[0].customerUid,
+        riderUid: updated[0].riderUid,
+        riderName: updated[0].riderName,
+        status: updated[0].status,
+        deliveryMode: updated[0].deliveryMode,
+        deliveryArea: updated[0].deliveryArea,
+        totalAmount: updated[0].totalAmount,
+      });
+      broadcastNotificationEvent({
+        recipientUid: order.customerUid,
+        roleTarget: 'customer',
+        title: statusLabels[parsed.data.status] || 'Delivery Update',
+        message: `${order.orderNumber} (${order.restaurantName}) is now ${parsed.data.status.replace(/_/g, ' ')}.`,
+        type: 'order',
+        relatedOrderId: order.id,
+      });
 
       res.json({ order: updated[0] });
     } catch (error: any) {
@@ -3772,6 +3995,13 @@ app.patch(
       });
 
       if (updated[0].customerEmail) {
+        const assignedRiderRows = updated[0].riderUid
+          ? await db
+              .select({ phone: riders.phone })
+              .from(riders)
+              .where(eq(riders.uid, updated[0].riderUid))
+              .limit(1)
+          : [];
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: updated[0].id,
@@ -3781,15 +4011,34 @@ app.patch(
           customerEmail: updated[0].customerEmail,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
+          deliveryAddress: updated[0].deliveryAddress,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
+          paymentStatus: updated[0].paymentStatus,
           status: updated[0].status,
           statusEvent: parsed.data.status,
           statusNote:
             parsed.data.note || `Order update: ${parsed.data.status.replace(/_/g, ' ')}`,
           riderName: updated[0].riderName,
+          riderPhone: assignedRiderRows[0]?.phone || null,
+          etaMinutes: updated[0].estimatedMinutes,
+          items: updated[0].itemsSnapshotJson,
         });
       }
+
+      broadcastOrderEvent('order:updated', {
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        restaurantId: updated[0].restaurantId,
+        restaurantName: updated[0].restaurantName,
+        customerUid: updated[0].customerUid,
+        riderUid: updated[0].riderUid,
+        riderName: updated[0].riderName,
+        status: updated[0].status,
+        deliveryMode: updated[0].deliveryMode,
+        deliveryArea: updated[0].deliveryArea,
+        totalAmount: updated[0].totalAmount,
+      });
 
       res.json({ order: updated[0] });
     } catch (error: any) {
@@ -3863,6 +4112,43 @@ app.patch(
         });
 
         return updated[0];
+      });
+
+      if (result.customerEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: result.id,
+          orderNumber: result.orderNumber,
+          trackingToken: result.trackingToken,
+          customerName: result.customerName,
+          customerEmail: result.customerEmail,
+          restaurantName: result.restaurantName,
+          deliveryArea: result.deliveryArea,
+          deliveryAddress: result.deliveryAddress,
+          totalAmount: result.totalAmount,
+          paymentMethod: result.paymentMethod,
+          paymentStatus: result.paymentStatus,
+          status: result.status,
+          statusEvent: 'cancelled',
+          statusNote: result.cancelReason || 'Order cancelled & refunded by Admin',
+          riderName: result.riderName,
+          etaMinutes: result.estimatedMinutes,
+          items: result.itemsSnapshotJson,
+        });
+      }
+
+      broadcastOrderEvent('order:updated', {
+        orderId: result.id,
+        orderNumber: result.orderNumber,
+        restaurantId: result.restaurantId,
+        restaurantName: result.restaurantName,
+        customerUid: result.customerUid,
+        riderUid: result.riderUid,
+        riderName: result.riderName,
+        status: result.status,
+        deliveryMode: result.deliveryMode,
+        deliveryArea: result.deliveryArea,
+        totalAmount: result.totalAmount,
       });
 
       res.json({ order: result });
@@ -4500,6 +4786,14 @@ app.post(
         details: JSON.stringify({ targetRole: validated.targetRole, title: validated.title }),
       });
 
+      broadcastNotificationEvent({
+        recipientUid,
+        roleTarget: validated.targetRole,
+        title: validated.title,
+        message: validated.message,
+        type: validated.type,
+      });
+
       res.status(201).json({ notification: inserted[0] });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to send broadcast' });
@@ -4727,6 +5021,7 @@ function getGeminiHelpClient(): GoogleGenAI | null {
 const aiHelpRequestSchema = z.object({
   message: z.string().trim().min(1, 'Please enter a question.').max(1500),
   langPreference: z.enum(['auto', 'bn', 'en']).optional().default('auto'),
+  uiLang: z.enum(['en', 'bn']).optional().default('en'),
   history: z
     .array(
       z.object({
@@ -4745,6 +5040,55 @@ const aiHelpRequestSchema = z.object({
     .optional(),
 });
 
+function extractReadableGeminiError(err: unknown): { status: number; message: string } {
+  const rawStatus =
+    typeof (err as { status?: unknown })?.status === 'number'
+      ? (err as { status: number }).status
+      : 502;
+  const rawMsg = err instanceof Error ? err.message : 'Failed to generate AI Help response.';
+
+  let parsedMessage = rawMsg;
+  let parsedStatus = rawStatus;
+  if (rawMsg.trim().startsWith('{')) {
+    try {
+      const obj = JSON.parse(rawMsg) as {
+        error?: { code?: number; message?: string; status?: string };
+        message?: string;
+      };
+      if (obj.error?.message) parsedMessage = obj.error.message;
+      else if (obj.message) parsedMessage = obj.message;
+      if (typeof obj.error?.code === 'number') parsedStatus = obj.error.code;
+    } catch {
+      // keep rawMsg
+    }
+  }
+
+  return {
+    status: parsedStatus >= 400 && parsedStatus < 600 ? parsedStatus : 502,
+    message: parsedMessage,
+  };
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error(`${label} timed out after ${Math.round(ms / 1000)}s`);
+      (err as Error & { status?: number }).status = 504;
+      reject(err);
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 app.post('/api/ai/help', optionalAuth, async (req: AuthRequest, res) => {
   try {
     const parsed = aiHelpRequestSchema.safeParse(req.body);
@@ -4762,9 +5106,10 @@ app.post('/api/ai/help', optionalAuth, async (req: AuthRequest, res) => {
       });
     }
 
-    const { message, langPreference, history, context } = parsed.data;
+    const { message, langPreference, uiLang, history, context } = parsed.data;
     const systemInstruction = buildAiHelpSystemInstruction({
       langPreference: langPreference as AiHelpLangPreference,
+      uiLang,
       area: context?.area,
       viewType: context?.viewType,
       activeOrderNumber: context?.activeOrderNumber,
@@ -4781,36 +5126,64 @@ app.post('/api/ai/help', optionalAuth, async (req: AuthRequest, res) => {
       },
     ];
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents,
-      config: {
-        systemInstruction,
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      },
-    });
+    const attempts: Array<{ model: string; thinkingLevel: ThinkingLevel; timeoutMs: number }> = [
+      { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 9000 },
+      { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW, timeoutMs: 9000 },
+      { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 10000 },
+    ];
 
-    const reply = (response.text || '').trim();
-    if (!reply) {
-      return res.status(502).json({
-        error: 'AI Help returned an empty response. Please try asking again.',
-      });
+    let reply = '';
+    let usedModel = attempts[0].model;
+    let lastError: unknown = null;
+
+    for (let i = 0; i < attempts.length; i += 1) {
+      const attempt = attempts[i];
+      try {
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model: attempt.model,
+            contents,
+            config: {
+              systemInstruction,
+              thinkingConfig: { thinkingLevel: attempt.thinkingLevel },
+            },
+          }),
+          attempt.timeoutMs,
+          attempt.model
+        );
+        const text = (response.text || '').trim();
+        if (!text) {
+          const emptyErr = new Error('AI Help returned an empty response.');
+          (emptyErr as Error & { status?: number }).status = 502;
+          throw emptyErr;
+        }
+        reply = text;
+        usedModel = attempt.model;
+        break;
+      } catch (err: unknown) {
+        lastError = err;
+        const { status } = extractReadableGeminiError(err);
+        const isTransient = status === 503 || status === 504 || status === 429 || status === 502;
+        if (!isTransient || i === attempts.length - 1) {
+          throw err;
+        }
+        await new Promise((r) => setTimeout(r, i === 0 ? 400 : 1000));
+      }
+    }
+
+    if (!reply && lastError) {
+      throw lastError;
     }
 
     return res.json({
       reply,
-      model: 'gemini-4-hydrogen',
+      model: usedModel,
     });
   } catch (err: unknown) {
-    const status =
-      typeof (err as { status?: unknown })?.status === 'number'
-        ? (err as { status: number }).status
-        : 502;
-    const rawMsg =
-      err instanceof Error ? err.message : 'Failed to generate AI Help response.';
-    console.error('POST /api/ai/help error:', rawMsg);
-    return res.status(status >= 400 && status < 600 ? status : 502).json({
-      error: rawMsg,
+    const { status, message } = extractReadableGeminiError(err);
+    console.error('POST /api/ai/help error:', message);
+    return res.status(status).json({
+      error: message,
     });
   }
 });
@@ -4838,8 +5211,11 @@ async function startServer() {
     }
   }
 
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`Foodora BD server listening on http://0.0.0.0:${port}`);
+  const httpServer = http.createServer(app);
+  initRealtimeWebSocketServer(httpServer);
+
+  httpServer.listen(port, '0.0.0.0', () => {
+    console.log(`Foodora BD server (HTTP + WS) listening on http://0.0.0.0:${port}`);
   });
 }
 

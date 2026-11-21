@@ -39,6 +39,10 @@ import {
   computeOrderEtaSummary,
   buildRestaurantUnavailableMessage,
   buildAiHelpSystemInstruction,
+  parseOrderSoundPreference,
+  getOrderAlertChimeNotes,
+  isSandboxAuthToken,
+  shouldPersistAuthToken,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 
@@ -579,11 +583,16 @@ test('buildOrderTrackingEmailPayload formats tracking URL, escaped customer text
     customerEmail: 'nadia@example.com',
     restaurantName: 'Panshi & Sons',
     deliveryArea: 'Sylhet (Zindabazar)',
+    deliveryAddress: 'House 12, Road 3, Zindabazar',
     totalAmount: 780,
     paymentMethod: 'bkash',
+    paymentStatus: 'paid',
     status: 'on_the_way',
     statusNote: 'Rider departed kitchen',
     riderName: 'Kamrul Rider',
+    riderPhone: '+8801811223344',
+    etaMinutes: 14,
+    items: [{ name: 'Beef Shatkora', quantity: 2, lineTotal: 720 }],
   });
 
   assert.equal(payload.subject, 'Foodora BD Order FD-2026-9900 — ON THE WAY');
@@ -591,8 +600,13 @@ test('buildOrderTrackingEmailPayload formats tracking URL, escaped customer text
   assert.ok(payload.html.includes('Nadia &lt;Rahman&gt;'));
   assert.ok(payload.html.includes('Panshi &amp; Sons'));
   assert.ok(payload.html.includes('Kamrul Rider'));
+  assert.ok(payload.html.includes('+8801811223344'));
+  assert.ok(payload.html.includes('~14 mins'));
+  assert.ok(payload.html.includes('Beef Shatkora'));
+  assert.ok(payload.html.includes('রাইডার আপনার ঠিকানায় আসছেন'));
   assert.ok(payload.html.includes('https://foodorabd1.vercel.app/?order=99&amp;token=sec_tok_99'));
   assert.ok(payload.text.includes('Sylhet (Zindabazar)'));
+  assert.ok(payload.text.includes('+8801811223344'));
 });
 
 test('mergeCustomSelectOptions deduplicates case-insensitively and appends saved custom options', () => {
@@ -731,12 +745,57 @@ test('buildAiHelpSystemInstruction configures Bangla/English language modes and 
     activeOrderNumber: 'FD-BD-1001',
   });
   assert.ok(bnPrompt.includes('Bengali'));
+  assert.ok(bnPrompt.includes('বাংলা'));
   assert.ok(bnPrompt.includes('Sylhet'));
   assert.ok(bnPrompt.includes('FD-BD-1001'));
 
-  const autoPrompt = buildAiHelpSystemInstruction({ langPreference: 'auto' });
-  assert.ok(autoPrompt.includes('Bangla'));
-  assert.ok(autoPrompt.includes('English'));
+  const autoBnUiPrompt = buildAiHelpSystemInstruction({
+    langPreference: 'auto',
+    uiLang: 'bn',
+    area: 'Mirpur 10',
+  });
+  assert.ok(autoBnUiPrompt.includes('Bangla'));
+  assert.ok(autoBnUiPrompt.includes('Banglish'));
+  assert.ok(autoBnUiPrompt.includes('Mirpur 10'));
+
+  const autoEnUiPrompt = buildAiHelpSystemInstruction({ langPreference: 'auto', uiLang: 'en' });
+  assert.ok(autoEnUiPrompt.includes('Bangla'));
+  assert.ok(autoEnUiPrompt.includes('English'));
 });
+
+test('parseOrderSoundPreference and getOrderAlertChimeNotes validate chime profile defaults and harmonics', () => {
+  // Default enabled when unset or truthy
+  assert.equal(parseOrderSoundPreference(null), true);
+  assert.equal(parseOrderSoundPreference(undefined), true);
+  assert.equal(parseOrderSoundPreference('true'), true);
+  assert.equal(parseOrderSoundPreference('1'), true);
+
+  // Disabled only when explicitly turned off
+  assert.equal(parseOrderSoundPreference('false'), false);
+  assert.equal(parseOrderSoundPreference('0'), false);
+  assert.equal(parseOrderSoundPreference('off'), false);
+
+  const newOrderNotes = getOrderAlertChimeNotes('new_order');
+  assert.equal(newOrderNotes.length, 4);
+  assert.ok(newOrderNotes[3].freq > newOrderNotes[0].freq);
+  assert.ok((newOrderNotes[0].harmonicRatio ?? 0) >= 2);
+  assert.ok(newOrderNotes[3].durationSec > newOrderNotes[0].durationSec);
+
+  const statusNotes = getOrderAlertChimeNotes('status_update');
+  assert.equal(statusNotes.length, 2);
+  assert.ok(statusNotes[1].freq > statusNotes[0].freq);
+});
+
+test('isSandboxAuthToken and shouldPersistAuthToken block persisting demo sandbox tokens across visits', () => {
+  assert.equal(isSandboxAuthToken('sbx.eyJ1aWQiOiJkZW1vIn0.sig'), true);
+  assert.equal(shouldPersistAuthToken('sbx.eyJ1aWQiOiJkZW1vIn0.sig'), false);
+  assert.equal(shouldPersistAuthToken(''), false);
+  assert.equal(shouldPersistAuthToken(null), false);
+
+  assert.equal(isSandboxAuthToken('eyJhbGciOiJIUzI1NiJ9.realuser.sig'), false);
+  assert.equal(shouldPersistAuthToken('eyJhbGciOiJIUzI1NiJ9.realuser.sig'), true);
+});
+
+
 
 

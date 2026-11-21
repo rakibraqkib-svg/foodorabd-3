@@ -29,6 +29,8 @@ import {
   User,
   UserPlus,
   UtensilsCrossed,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import { AdminDashboard } from './components/AdminDashboard';
@@ -41,8 +43,9 @@ import { RestaurantDetailView } from './components/RestaurantDetailView';
 import { RiderDashboard } from './components/RiderDashboard';
 import { VendorDashboard } from './components/VendorDashboard';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { apiFetch } from './lib/api';
+import { apiFetch, getAuthToken } from './lib/api';
 import { BANGLADESH_AREAS, CUISINE_CATEGORIES, localizeCouponTitle, t } from './lib/i18n';
+import { playOrderAlertChime, useOrderSoundSetting, useRealtimeEvents } from './lib/realtime';
 import {
   buildRestaurantUnavailableMessage,
   canAddToSingleRestaurantCart,
@@ -116,6 +119,7 @@ function MarketplaceApp() {
       return 'en';
     }
   });
+  const [orderSoundEnabled, setOrderSoundEnabled] = useOrderSoundSetting();
   const [mapsApiKey, setMapsApiKey] = useState(
     () => (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || ''
   );
@@ -174,16 +178,7 @@ function MarketplaceApp() {
   const [trackOrderNumInput, setTrackOrderNumInput] = useState('');
   const [trackLookupLoading, setTrackLookupLoading] = useState(false);
   const [trackLookupError, setTrackLookupError] = useState<string | null>(null);
-  const [lastTrackedOrder, setLastTrackedOrder] = useState<TrackedOrderShortcut | null>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_LAST_ORDER_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw) as TrackedOrderShortcut;
-      return parsed && Number.isInteger(parsed.orderId) && parsed.orderId > 0 ? parsed : null;
-    } catch {
-      return null;
-    }
-  });
+  const [lastTrackedOrder, setLastTrackedOrder] = useState<TrackedOrderShortcut | null>(null);
 
   // Filters
   const [fulfillmentTab, setFulfillmentTab] = useState<'delivery' | 'pickup'>('delivery');
@@ -260,6 +255,7 @@ function MarketplaceApp() {
   const [osmSearching, setOsmSearching] = useState(false);
   const [locatingGps, setLocatingGps] = useState(false);
   const [pendingAdminRedirect, setPendingAdminRedirect] = useState(false);
+  const [pendingVendorRedirect, setPendingVendorRedirect] = useState(false);
   const [showAdminPinBox, setShowAdminPinBox] = useState(false);
   const [adminPinEmail, setAdminPinEmail] = useState('raqkibrony@gmail.com');
   const [adminPinInput, setAdminPinInput] = useState('');
@@ -307,15 +303,11 @@ function MarketplaceApp() {
 
   useEffect(() => {
     try {
-      if (lastTrackedOrder) {
-        localStorage.setItem(STORAGE_LAST_ORDER_KEY, JSON.stringify(lastTrackedOrder));
-      } else {
-        localStorage.removeItem(STORAGE_LAST_ORDER_KEY);
-      }
+      localStorage.removeItem(STORAGE_LAST_ORDER_KEY);
     } catch {
       // ignore
     }
-  }, [lastTrackedOrder]);
+  }, []);
 
   // Global Escape key close for active modals & cart drawer
   useEffect(() => {
@@ -639,17 +631,19 @@ function MarketplaceApp() {
       ]);
       setFavoriteIds(favRes.favorites.map((f) => f.restaurantId));
       setNotifications(notifRes.notifications);
-      const activeOrder = ordersRes.orders.find(
-        (o) => o.status !== 'delivered' && o.status !== 'cancelled'
-      );
-      if (activeOrder) {
-        setLastTrackedOrder({
-          orderId: activeOrder.id,
-          trackingToken: activeOrder.trackingToken,
-          orderNumber: activeOrder.orderNumber,
-          restaurantName: activeOrder.restaurantName,
-          estimatedMinutes: activeOrder.estimatedMinutes,
-        });
+      if (!user.isSandbox) {
+        const activeOrder = ordersRes.orders.find(
+          (o) => o.status !== 'delivered' && o.status !== 'cancelled'
+        );
+        if (activeOrder) {
+          setLastTrackedOrder({
+            orderId: activeOrder.id,
+            trackingToken: activeOrder.trackingToken,
+            orderNumber: activeOrder.orderNumber,
+            restaurantName: activeOrder.restaurantName,
+            estimatedMinutes: activeOrder.estimatedMinutes,
+          });
+        }
       }
     } catch {
       // ignore if guest
@@ -659,6 +653,52 @@ function MarketplaceApp() {
   useEffect(() => {
     loadUserSignals();
   }, [loadUserSignals]);
+
+  useRealtimeEvents({
+    enabled: Boolean(user?.uid || lastTrackedOrder?.orderId),
+    token: getAuthToken(),
+    orderId: lastTrackedOrder?.orderId ?? null,
+    trackingToken: lastTrackedOrder?.trackingToken ?? null,
+    pollFallbackMs: 12000,
+    onSync: loadUserSignals,
+    onEvent: (ev) => {
+      if (ev.type === 'order:created') {
+        if (
+          user?.role === 'restaurant_owner' ||
+          user?.role === 'rider' ||
+          user?.role === 'admin' ||
+          user?.role === 'super_admin'
+        ) {
+          playOrderAlertChime('new_order');
+          showToast(
+            lang === 'bn'
+              ? `নতুন অর্ডার এসেছে: ${String(ev.payload.orderNumber || '')}`
+              : `New order arrived: ${String(ev.payload.orderNumber || '')}`
+          );
+        }
+        loadUserSignals();
+      } else if (ev.type === 'order:updated') {
+        const ordNum = String(ev.payload.orderNumber || '');
+        const st = String(ev.payload.status || '').replace(/_/g, ' ');
+        if (ordNum && st) {
+          showToast(
+            lang === 'bn'
+              ? `অর্ডার ${ordNum} আপডেট: ${st}`
+              : `Order ${ordNum} updated: ${st}`
+          );
+        }
+        if (ev.payload.status === 'delivered' && lastTrackedOrder?.orderId === Number(ev.payload.orderId)) {
+          setLastTrackedOrder(null);
+        }
+        loadUserSignals();
+      } else if (ev.type === 'notification:created') {
+        if (ev.payload.title) {
+          showToast(String(ev.payload.title));
+        }
+        loadUserSignals();
+      }
+    },
+  });
 
   const handleNotificationClick = useCallback(
     async (n: NotificationItem) => {
@@ -729,7 +769,7 @@ function MarketplaceApp() {
           const lat = pos.coords.latitude;
           const lng = pos.coords.longitude;
           const res = await apiFetch<{ areaName: string; displayName: string }>(
-            `/api/free/reverse-geocode?lat=${lat}&lng=${lng}`
+            `/api/free/reverse-geocode?lat=${lat}&lng=${lng}&lang=${lang}`
           );
           setSelectedArea({
             name: res.areaName || 'Bangladesh',
@@ -915,6 +955,39 @@ function MarketplaceApp() {
     }
   }, [pendingAdminRedirect, isPrivilegedAdmin]);
 
+  useEffect(() => {
+    if (pendingVendorRedirect && user) {
+      setPendingVendorRedirect(false);
+      setAuthModalOpen(false);
+      setView({ type: 'vendor', onboarding: user.role !== 'restaurant_owner' });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [pendingVendorRedirect, user]);
+
+  const openPartnerPortal = useCallback(
+    (onboarding = true) => {
+      if (
+        user &&
+        (user.role === 'restaurant_owner' ||
+          user.role === 'admin' ||
+          user.role === 'super_admin' ||
+          !user.isSandbox)
+      ) {
+        setView({ type: 'vendor', onboarding });
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
+      clearError();
+      setPendingAdminRedirect(false);
+      setShowAdminPinBox(false);
+      setPendingVendorRedirect(true);
+      setAuthMode('register');
+      setAuthRole('restaurant_owner');
+      setAuthModalOpen(true);
+    },
+    [user, clearError]
+  );
+
   const openAdminOrPromptSignIn = useCallback(() => {
     if (isPrivilegedAdmin) {
       setView({ type: 'admin' });
@@ -922,6 +995,7 @@ function MarketplaceApp() {
       return;
     }
     clearError();
+    setPendingVendorRedirect(false);
     setPendingAdminRedirect(true);
     setShowAdminPinBox(true);
     setAuthModalOpen(true);
@@ -1050,7 +1124,7 @@ function MarketplaceApp() {
           <div className="max-w-[1400px] mx-auto px-2 sm:px-6 h-10 sm:h-11 flex items-center justify-center gap-1.5 sm:gap-3 overflow-x-auto">
             <button
               type="button"
-              onClick={() => handleSwitchWorkspace('restaurant_owner', { type: 'vendor', onboarding: false })}
+              onClick={() => openPartnerPortal(false)}
               className="px-2.5 sm:px-4 py-1 rounded-lg border border-white/80 hover:bg-white/15 font-bold text-[10px] sm:text-[11px] uppercase tracking-wide inline-flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 transition-colors"
             >
               <Store className="w-3.5 h-3.5" />
@@ -1202,7 +1276,7 @@ function MarketplaceApp() {
             ) : (
               <button
                 type="button"
-                aria-label={lang === 'bn' ? 'লগইন / সাইন আপ' : 'Login or Sign Up'}
+                aria-label={lang === 'bn' ? 'লগইন / অ্যাকাউন্ট তৈরি' : 'Login or Create Account'}
                 onClick={() => {
                   clearError();
                   setAuthModalOpen(true);
@@ -1215,7 +1289,7 @@ function MarketplaceApp() {
                   {lang === 'bn' ? 'লগইন' : 'Login'}
                 </span>
                 <span className="hidden sm:inline">
-                  {lang === 'bn' ? 'লগইন / সাইন আপ' : 'Login / Sign Up'}
+                  {lang === 'bn' ? 'লগইন / অ্যাকাউন্ট তৈরি' : 'Login / Create Account'}
                 </span>
               </button>
             )}
@@ -1562,7 +1636,7 @@ function MarketplaceApp() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => handleSwitchWorkspace('restaurant_owner', { type: 'vendor', onboarding: true })}
+                  onClick={() => openPartnerPortal(true)}
                   className="text-xs font-bold text-[#E21B70] hover:underline whitespace-nowrap shrink-0"
                 >
                   {lang === 'bn' ? '+ আপনার রেস্টুরেন্ট যুক্ত করুন' : '+ List Your Restaurant'}
@@ -1603,28 +1677,67 @@ function MarketplaceApp() {
             mapsApiKey={mapsApiKey}
             onBack={() => setView({ type: 'home' })}
           />
-        ) : view.type === 'customer' && user ? (
-          <CustomerDashboard
-            user={user}
-            lang={lang}
-            mapsApiKey={mapsApiKey}
-            restaurants={restaurants}
-            favoriteIds={favoriteIds}
-            onToggleFavorite={handleToggleFavorite}
-            onSelectRestaurant={openRestaurant}
-            onTrackOrder={(orderId) => setView({ type: 'tracking', orderId })}
-            onSelectDefaultAddress={(areaName, lat, lng) => {
-              const found = BANGLADESH_AREAS.find((a) => a.name === areaName);
-              setSelectedArea({
-                name: areaName,
-                nameBn: found?.nameBn || areaName,
-                lat,
-                lng,
-              });
-              showToast(lang === 'bn' ? 'ডেলিভারি ঠিকানা আপডেট হয়েছে' : 'Delivery location updated');
-            }}
-            onBack={() => setView({ type: 'home' })}
-          />
+        ) : view.type === 'customer' ? (
+          user ? (
+            <CustomerDashboard
+              user={user}
+              lang={lang}
+              mapsApiKey={mapsApiKey}
+              restaurants={restaurants}
+              favoriteIds={favoriteIds}
+              onToggleFavorite={handleToggleFavorite}
+              onSelectRestaurant={openRestaurant}
+              onTrackOrder={(orderId) => setView({ type: 'tracking', orderId })}
+              onSelectDefaultAddress={(areaName, lat, lng) => {
+                const found = BANGLADESH_AREAS.find((a) => a.name === areaName);
+                setSelectedArea({
+                  name: areaName,
+                  nameBn: found?.nameBn || areaName,
+                  lat,
+                  lng,
+                });
+                showToast(lang === 'bn' ? 'ডেলিভারি ঠিকানা আপডেট হয়েছে' : 'Delivery location updated');
+              }}
+              onBack={() => setView({ type: 'home' })}
+            />
+          ) : (
+            <div className="max-w-lg mx-auto px-4 py-16 text-center space-y-4">
+              <div className="w-12 h-12 rounded-2xl bg-[#FFF0F6] text-[#E21B70] flex items-center justify-center mx-auto">
+                <ShoppingBag className="w-6 h-6" />
+              </div>
+              <h1 className="text-xl font-bold text-[#2E3138]">
+                {lang === 'bn' ? 'আপনার অর্ডার ও প্রোফাইল দেখুন' : 'View Your Orders & Saved Addresses'}
+              </h1>
+              <p className="text-sm text-neutral-600">
+                {lang === 'bn'
+                  ? 'আপনার পূর্বের সব অর্ডার দেখতে সাইন ইন করুন, অথবা গেস্ট হিসেবে অর্ডার করলে ইমেইল দিয়ে লাইভ রাইডার ট্র্যাক করুন।'
+                  : 'Sign in to view your full order history, or look up any guest order live using your checkout email.'}
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearError();
+                    setAuthMode('login');
+                    setAuthModalOpen(true);
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold"
+                >
+                  {lang === 'bn' ? 'সাইন ইন / নতুন অ্যাকাউন্ট' : 'Sign In / Create Account'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTrackLookupError(null);
+                    setEmailTrackModalOpen(true);
+                  }}
+                  className="px-4 py-2.5 rounded-xl border border-neutral-200 hover:border-[#E21B70] text-xs font-bold text-[#2E3138]"
+                >
+                  {lang === 'bn' ? 'ইমেইলে অর্ডার ট্র্যাক করুন' : 'Track Order by Email'}
+                </button>
+              </div>
+            </div>
+          )
         ) : view.type === 'vendor' && user ? (
           <VendorDashboard
             user={user}
@@ -1698,10 +1811,10 @@ function MarketplaceApp() {
           <div className="max-w-[1400px] mx-auto px-4 sm:px-6 py-6 flex flex-col lg:flex-row gap-7">
             {/* Left Sidebar (Dark Promo Card + Clean Filter Panel) */}
             <aside className="hidden lg:block w-[248px] shrink-0 space-y-5">
-              {/* Dark Charcoal Promo Ticket Card (Controlled via Admin -> Frontend Control) */}
+              {/* Brand-Matched Rose-Blush Promo Ticket Card (Controlled via Admin -> Frontend Control) */}
               {sc.showPromoTicket && (
-                <div className="rounded-2xl bg-[#33373D] text-white p-4 space-y-3 shadow-xs">
-                  <div className="bg-white text-[#2E3138] rounded-xl p-3 flex items-center justify-between gap-2">
+                <div className="rounded-2xl bg-gradient-to-br from-[#FFF0F6] via-[#FFF8FB] to-[#FFE2EE] border border-[#F8BBD0] text-[#2E3138] p-4 space-y-3 shadow-xs">
+                  <div className="bg-white text-[#2E3138] rounded-xl p-3 border border-[#FBCFE8] flex items-center justify-between gap-2 shadow-2xs">
                     <div>
                       <p
                         style={{ color: sc.accentColor }}
@@ -1730,7 +1843,7 @@ function MarketplaceApp() {
                       )}
                     </button>
                   </div>
-                  <p className="text-xs leading-relaxed text-white/90 font-medium">
+                  <p className="text-xs leading-relaxed text-[#4A2535] font-medium">
                     {lang === 'bn' ? sc.promoDescBn : sc.promoDescEn}
                   </p>
                   <div className="grid grid-cols-2 gap-2 pt-0.5">
@@ -1739,14 +1852,15 @@ function MarketplaceApp() {
                       onClick={() => {
                         if (restaurants[0]) openRestaurant(restaurants[0].slug);
                       }}
-                      className="py-1.5 rounded-lg bg-white text-[#2E3138] hover:bg-[#FFF0F6] text-[11px] font-bold transition-colors"
+                      style={{ backgroundColor: sc.accentColor }}
+                      className="py-1.5 rounded-lg text-white hover:opacity-90 text-[11px] font-bold transition-opacity shadow-2xs"
                     >
                       {lang === 'bn' ? sc.heroBtnBn : sc.heroBtnEn}
                     </button>
                     <button
                       type="button"
                       onClick={() => setOnlyDiscount((v) => !v)}
-                      className="py-1.5 rounded-lg border border-white/25 hover:bg-white/10 text-white text-[11px] font-semibold transition-colors"
+                      className="py-1.5 rounded-lg bg-white border border-[#E21B70]/30 hover:border-[#E21B70] text-[#E21B70] text-[11px] font-bold transition-colors"
                     >
                       {lang === 'bn' ? 'অফার দেখুন' : 'View Deals'}
                     </button>
@@ -1871,54 +1985,6 @@ function MarketplaceApp() {
 
             {/* Main Storefront Column */}
             <div className="flex-1 min-w-0 space-y-8">
-              {/* Active Order Live Rider Tracking Shortcut Banner */}
-              {lastTrackedOrder && (
-                <div
-                  data-testid="active-rider-shortcut-bar"
-                  className="p-3 sm:px-4 sm:py-3 rounded-2xl bg-gradient-to-r from-[#FFF0F6] via-white to-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-3 shadow-xs"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                      <Bike className="w-4 h-4" />
-                    </span>
-                    <div className="min-w-0">
-                      <p className="text-xs font-bold text-[#2E3138] flex items-center gap-1.5 flex-wrap">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-                        <span>
-                          {lang === 'bn' ? 'লাইভ অর্ডার চালু আছে' : 'Active Delivery Order'}
-                          {lastTrackedOrder.orderNumber ? ` · ${lastTrackedOrder.orderNumber}` : ''}
-                        </span>
-                      </p>
-                      <p className="text-[11px] text-neutral-600 truncate">
-                        {lastTrackedOrder.restaurantName || 'Foodora Partner'}
-                        {lastTrackedOrder.estimatedMinutes
-                          ? ` · ${
-                              lang === 'bn'
-                                ? `প্রায় ${Math.min(Math.max(lastTrackedOrder.estimatedMinutes, 8), 90)} মিনিট`
-                                : `~${Math.min(Math.max(lastTrackedOrder.estimatedMinutes, 8), 90)} min ETA`
-                            }`
-                          : ''}
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setView({
-                        type: 'tracking',
-                        orderId: lastTrackedOrder.orderId,
-                        token: lastTrackedOrder.trackingToken,
-                      });
-                      window.scrollTo({ top: 0, behavior: 'smooth' });
-                    }}
-                    className="px-3.5 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold inline-flex items-center gap-1.5 shrink-0"
-                  >
-                    <LocateFixed className="w-3.5 h-3.5" />
-                    <span>{lang === 'bn' ? 'রাইডার অবস্থান ও সময় দেখুন' : 'Track Rider & ETA'}</span>
-                  </button>
-                </div>
-              )}
-
               {/* Mobile Location + Search + Mode Switcher + Weather */}
               <div className="lg:hidden space-y-2.5">
                 <div className="flex items-center gap-2">
@@ -2231,7 +2297,7 @@ function MarketplaceApp() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleSwitchWorkspace('restaurant_owner', { type: 'vendor', onboarding: true })}
+                        onClick={() => openPartnerPortal(true)}
                         style={{ color: sc.accentColor }}
                         className="px-4 py-2.5 rounded-lg border border-[#E21B70]/35 bg-white/85 hover:bg-white text-xs font-bold transition-colors whitespace-nowrap shrink-0"
                       >
@@ -2593,7 +2659,7 @@ function MarketplaceApp() {
               </p>
               <button
                 type="button"
-                onClick={() => handleSwitchWorkspace('restaurant_owner', { type: 'vendor', onboarding: true })}
+                onClick={() => openPartnerPortal(true)}
                 className="block hover:text-[#E21B70]"
               >
                 {t(lang, 'partnerCta')}
@@ -2651,7 +2717,7 @@ function MarketplaceApp() {
         lang={lang}
         mapsApiKey={mapsApiKey}
         selectedArea={selectedArea}
-        customerName={user?.fullName || 'Rahim Uddin'}
+        customerName={user?.fullName || ''}
         customerEmail={user?.isSandbox ? '' : user?.email || ''}
         paymentGateways={publicGateways}
         onUpdateQty={handleUpdateQty}
@@ -2837,21 +2903,26 @@ function MarketplaceApp() {
             )}
 
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-40 overflow-y-auto pr-1">
-              {BANGLADESH_AREAS.map((a) => (
-                <button
-                  key={a.name}
-                  type="button"
-                  onClick={() => setSelectedArea(a)}
-                  className={`px-3 py-2 rounded-xl border text-xs font-semibold text-left ${
-                    selectedArea.name === a.name
-                      ? 'border-[#E21B70] bg-[#FFF0F6] text-[#E21B70]'
-                      : 'border-neutral-200 text-neutral-700 hover:border-neutral-300'
-                  }`}
-                >
-                  <span className="block truncate">{lang === 'bn' ? a.nameBn : a.name}</span>
-                  <span className="block text-[10px] text-neutral-400 font-normal">{a.division}</span>
-                </button>
-              ))}
+              {BANGLADESH_AREAS.map((a) => {
+                const isExactPreset =
+                  Math.abs(a.lat - selectedArea.lat) < 0.005 &&
+                  Math.abs(a.lng - selectedArea.lng) < 0.005;
+                return (
+                  <button
+                    key={a.name}
+                    type="button"
+                    onClick={() => setSelectedArea(a)}
+                    className={`px-3 py-2 rounded-xl border text-xs font-semibold text-left ${
+                      isExactPreset
+                        ? 'border-[#E21B70] bg-[#FFF0F6] text-[#E21B70]'
+                        : 'border-neutral-200 text-neutral-700 hover:border-neutral-300'
+                    }`}
+                  >
+                    <span className="block truncate">{lang === 'bn' ? a.nameBn : a.name}</span>
+                    <span className="block text-[10px] text-neutral-400 font-normal">{a.division}</span>
+                  </button>
+                );
+              })}
             </div>
 
             <DhakaMapPicker
@@ -2862,15 +2933,48 @@ function MarketplaceApp() {
               interactive
               heightClass="h-[250px]"
               onSelectLocation={(c) => {
-                const found = BANGLADESH_AREAS.find((a) => a.name === c.areaName);
+                const exactPreset = BANGLADESH_AREAS.find(
+                  (a) => Math.abs(a.lat - c.lat) < 0.004 && Math.abs(a.lng - c.lng) < 0.004
+                );
+                const nextName =
+                  exactPreset?.name ||
+                  (c.areaName && c.areaName.trim()) ||
+                  `Pinned (${c.lat.toFixed(4)}, ${c.lng.toFixed(4)})`;
+                const nextNameBn =
+                  exactPreset?.nameBn ||
+                  (c.areaName && c.areaName.trim()) ||
+                  `পিন করা স্থান (${c.lat.toFixed(4)}, ${c.lng.toFixed(4)})`;
                 setSelectedArea({
-                  name: c.areaName || selectedArea.name,
-                  nameBn: found?.nameBn || c.areaName || selectedArea.nameBn,
+                  name: nextName,
+                  nameBn: nextNameBn,
                   lat: c.lat,
                   lng: c.lng,
                 });
               }}
             />
+
+            <div
+              data-testid="selected-map-location-summary"
+              className="rounded-xl border border-[#E21B70]/25 bg-[#FFF9FB] px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs"
+            >
+              <div className="min-w-0 flex items-center gap-2">
+                <MapPin className="w-4 h-4 text-[#E21B70] shrink-0" />
+                <div className="min-w-0">
+                  <p className="font-bold text-[#2E3138] truncate">
+                    {lang === 'bn' ? 'নির্বাচিত লোকেশন:' : 'Selected Location:'}{' '}
+                    <span className="text-[#E21B70]">
+                      {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}
+                    </span>
+                  </p>
+                  <p className="text-[11px] text-neutral-500 font-mono-nums">
+                    GPS: {selectedArea.lat.toFixed(5)}, {selectedArea.lng.toFixed(5)}
+                  </p>
+                </div>
+              </div>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-white border border-[#E21B70]/25 text-[#E21B70] shrink-0">
+                {lang === 'bn' ? 'সেট হয়েছে' : 'Pinned'}
+              </span>
+            </div>
 
             <div className="flex items-center justify-between gap-2 pt-1">
               <button
@@ -3036,37 +3140,128 @@ function MarketplaceApp() {
             )}
 
             {user && (
-              <div className="p-3 rounded-xl bg-neutral-50 border border-neutral-200 text-xs flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="font-bold text-[#2E3138] truncate">{user.fullName}</p>
-                    <span
-                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                        user.isSandbox
-                          ? 'bg-amber-100 text-amber-800'
-                          : 'bg-emerald-100 text-emerald-800'
+              <div className="space-y-2.5">
+                <div className="p-3 rounded-xl bg-neutral-50 border border-neutral-200 text-xs flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="font-bold text-[#2E3138] truncate">{user.fullName}</p>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                          user.isSandbox
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-emerald-100 text-emerald-800'
+                        }`}
+                      >
+                        {user.isSandbox ? 'Sandbox' : 'Account'}
+                      </span>
+                    </div>
+                    <p className="text-neutral-500 truncate mt-0.5">
+                      {user.email} · <span className="uppercase font-semibold">{user.role}</span>
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await signOut();
+                      setFavoriteIds([]);
+                      setNotifications([]);
+                      setLastTrackedOrder(null);
+                      showToast(lang === 'bn' ? 'সাইন আউট সম্পন্ন হয়েছে' : 'Signed out');
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg border border-neutral-300 hover:border-red-400 hover:text-red-600 text-[11px] font-bold inline-flex items-center gap-1 shrink-0 transition-colors"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'সাইন আউট' : 'Sign Out'}</span>
+                  </button>
+                </div>
+
+                {/* User Profile Sound Preference Setting */}
+                <div className="p-3 rounded-xl bg-white border border-neutral-200 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div
+                      className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                        orderSoundEnabled
+                          ? 'bg-[#FFF0F6] text-[#E21B70]'
+                          : 'bg-neutral-100 text-neutral-500'
                       }`}
                     >
-                      {user.isSandbox ? 'Sandbox' : 'Account'}
-                    </span>
+                      {orderSoundEnabled ? (
+                        <Volume2 className="w-4 h-4" />
+                      ) : (
+                        <VolumeX className="w-4 h-4" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-[#2E3138]">
+                        {lang === 'bn' ? 'অর্ডার অ্যালার্ট সাউন্ড' : 'Order Alert Sound'}
+                      </p>
+                      <p className="text-[11px] text-neutral-500 leading-snug">
+                        {orderSoundEnabled
+                          ? lang === 'bn'
+                            ? 'নতুন অর্ডার এলে নোটিফিকেশন সাউন্ড বাজবে'
+                            : 'Chime plays when new orders arrive'
+                          : lang === 'bn'
+                          ? 'অর্ডার নোটিফিকেশন সাউন্ড মিউট করা আছে'
+                          : 'Order notification sound is muted'}
+                      </p>
+                    </div>
                   </div>
-                  <p className="text-neutral-500 truncate mt-0.5">
-                    {user.email} · <span className="uppercase font-semibold">{user.role}</span>
-                  </p>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playOrderAlertChime('new_order', { force: true });
+                        showToast(
+                          lang === 'bn'
+                            ? 'অর্ডার নোটিফিকেশন সাউন্ড প্রিভিউ বাজানো হয়েছে'
+                            : 'Played new order chime preview'
+                        );
+                      }}
+                      aria-label={
+                        lang === 'bn' ? 'অর্ডার সাউন্ড টেস্ট করুন' : 'Test order alert sound'
+                      }
+                      className="px-2.5 py-1 rounded-lg border border-neutral-200 hover:border-[#E21B70] hover:text-[#E21B70] text-[11px] font-semibold text-neutral-700 transition-colors"
+                    >
+                      {lang === 'bn' ? 'টেস্ট' : 'Test'}
+                    </button>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={orderSoundEnabled}
+                      data-testid="profile-order-sound-toggle"
+                      aria-label={
+                        lang === 'bn'
+                          ? 'অর্ডার অ্যালার্ট সাউন্ড চালু বা বন্ধ করুন'
+                          : 'Toggle order alert sound'
+                      }
+                      onClick={() => {
+                        const next = !orderSoundEnabled;
+                        setOrderSoundEnabled(next);
+                        if (next) {
+                          playOrderAlertChime('new_order', { force: true });
+                        }
+                        showToast(
+                          next
+                            ? lang === 'bn'
+                              ? 'অর্ডার অ্যালার্ট সাউন্ড চালু করা হয়েছে'
+                              : 'Order alert sound enabled'
+                            : lang === 'bn'
+                            ? 'অর্ডার অ্যালার্ট সাউন্ড বন্ধ করা হয়েছে'
+                            : 'Order alert sound muted'
+                        );
+                      }}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-[#E21B70]/40 ${
+                        orderSoundEnabled ? 'bg-[#E21B70]' : 'bg-neutral-300'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-xs transition-transform ${
+                          orderSoundEnabled ? 'translate-x-6' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    await signOut();
-                    setFavoriteIds([]);
-                    setNotifications([]);
-                    showToast(lang === 'bn' ? 'সাইন আউট সম্পন্ন হয়েছে' : 'Signed out');
-                  }}
-                  className="px-2.5 py-1.5 rounded-lg border border-neutral-300 hover:border-red-400 hover:text-red-600 text-[11px] font-bold inline-flex items-center gap-1 shrink-0 transition-colors"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span>{lang === 'bn' ? 'সাইন আউট' : 'Sign Out'}</span>
-                </button>
               </div>
             )}
 
@@ -3588,7 +3783,7 @@ function MarketplaceApp() {
 
             <div className="pt-2 border-t border-neutral-100 space-y-2">
               <p className="text-[11px] font-bold uppercase text-neutral-500">
-                {lang === 'bn' ? 'ওয়ার্কস্পেস পরিবর্তন' : 'Switch Workspace'}
+                {lang === 'bn' ? 'টেস্ট / ডেমো অ্যাকাউন্ট (ঐচ্ছিক)' : 'Optional Demo Sandbox Accounts'}
               </p>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                 <button
@@ -3597,7 +3792,7 @@ function MarketplaceApp() {
                   className="p-2.5 rounded-xl border border-neutral-200 hover:border-[#E21B70] text-left font-semibold"
                 >
                   <User className="w-4 h-4 text-[#E21B70] mb-1" />
-                  Customer
+                  Demo Customer
                 </button>
                 <button
                   type="button"
@@ -3605,7 +3800,7 @@ function MarketplaceApp() {
                   className="p-2.5 rounded-xl border border-neutral-200 hover:border-[#E21B70] text-left font-semibold"
                 >
                   <Store className="w-4 h-4 text-[#E21B70] mb-1" />
-                  Vendor
+                  Demo Vendor
                 </button>
                 <button
                   type="button"
@@ -3613,7 +3808,7 @@ function MarketplaceApp() {
                   className="p-2.5 rounded-xl border border-neutral-200 hover:border-[#E21B70] text-left font-semibold"
                 >
                   <Bike className="w-4 h-4 text-[#E21B70] mb-1" />
-                  Rider
+                  Demo Rider
                 </button>
                 <button
                   type="button"

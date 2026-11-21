@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { isEmbeddedIframe, supabase } from '../lib/supabase';
 import { apiFetch, getAuthToken, setAuthToken } from '../lib/api';
+import { isSandboxAuthToken } from '../lib/marketplace-logic';
 import type { AppUser } from '../types/marketplace';
 
 interface AuthContextValue {
@@ -122,33 +123,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // 3. Restore saved local email/password or sandbox token if valid
+      // 3. Restore saved real email/password token only (never auto-restore demo/sandbox tokens)
       const savedToken = getAuthToken();
-      if (savedToken) {
+      if (savedToken && !isSandboxAuthToken(savedToken)) {
         try {
           const res = await apiFetch<{ user: AppUser }>('/api/auth/sync', { method: 'POST' });
-          if (mounted) {
-            setUser(res.user);
-            setLoading(false);
+          if (res.user && !res.user.isSandbox) {
+            if (mounted) {
+              setUser(res.user);
+              setLoading(false);
+            }
+            return;
           }
-          return;
+          setAuthToken(null);
         } catch {
           setAuthToken(null);
         }
+      } else if (savedToken) {
+        setAuthToken(null);
       }
 
-      // 4. Auto-initialize default Customer sandbox session on first visit
-      try {
-        const res = await apiFetch<{ token: string; user: AppUser }>('/api/auth/sandbox-session', {
-          method: 'POST',
-          body: JSON.stringify({ role: 'customer' }),
-        });
-        setAuthToken(res.token);
-        if (mounted) setUser(res.user);
-      } catch {
-        if (mounted) setUser(null);
-      } finally {
-        if (mounted) setLoading(false);
+      // 4. Start as Guest when no real or explicit session exists (never auto-login demo accounts)
+      if (mounted) {
+        setUser(null);
+        setLoading(false);
       }
     }
 
@@ -375,7 +373,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         method: 'POST',
         body: JSON.stringify({ role }),
       });
-      setAuthToken(res.token);
+      // Keep demo sandbox sessions in memory only so revisiting/reloading starts logged out
+      setAuthToken(res.token, false);
       setUser(res.user);
       return res.user;
     },

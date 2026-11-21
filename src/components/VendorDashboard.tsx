@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   BarChart3,
+  Bell,
   Check,
   CheckCircle2,
   ClipboardList,
@@ -35,8 +36,9 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { apiFetch } from '../lib/api';
+import { apiFetch, getAuthToken } from '../lib/api';
 import { BANGLADESH_AREAS } from '../lib/i18n';
+import { playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
 import {
   buildVendorAnalytics,
   CUISINE_PRESET_OPTIONS,
@@ -92,6 +94,13 @@ export function VendorDashboard({
   const [tab, setTab] = useState<'orders' | 'analytics' | 'menu' | 'settings' | 'earnings'>('orders');
   const [trendRange, setTrendRange] = useState<'daily' | 'monthly'>('daily');
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [liveNewOrderAlert, setLiveNewOrderAlert] = useState<{
+    orderNumber: string;
+    customerName: string;
+    totalAmount: number;
+  } | null>(null);
+  const knownOrderIdsRef = useRef<Set<number>>(new Set());
+  const hasHydratedOrdersRef = useRef(false);
 
   // Multi-step onboarding state
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -196,13 +205,13 @@ export function VendorDashboard({
     user.role === 'restaurant_owner' || user.role === 'admin' || user.role === 'super_admin';
 
   const loadWorkspace = useCallback(
-    async (explicitId?: number | null) => {
+    async (explicitId?: number | null, silent = false) => {
       if (!canAccessVendorApi) {
         setShowOnboarding(true);
         setLoading(false);
         return;
       }
-      setLoading(true);
+      if (!silent) setLoading(true);
       const targetId = explicitId !== undefined ? explicitId : selectedRestaurantId;
       try {
         const query = targetId ? `?restaurantId=${targetId}` : '';
@@ -219,34 +228,51 @@ export function VendorDashboard({
         setAllRestaurants(res.restaurants || (res.restaurant ? [res.restaurant] : []));
         setOwnRestaurantIds(res.ownRestaurantIds || []);
         setMenuItems(res.menuItems);
+
+        if (hasHydratedOrdersRef.current) {
+          const freshNew = res.orders.find((o) => !knownOrderIdsRef.current.has(o.id));
+          if (freshNew) {
+            setLiveNewOrderAlert({
+              orderNumber: freshNew.orderNumber,
+              customerName: freshNew.customerName,
+              totalAmount: freshNew.totalAmount,
+            });
+            playOrderAlertChime('new_order');
+          }
+        }
+        knownOrderIdsRef.current = new Set(res.orders.map((o) => o.id));
+        hasHydratedOrdersRef.current = true;
+
         setOrders(res.orders);
         setLedger(res.ledger);
         setPayouts(res.payouts);
-        setRevealedApiKey('');
+        if (!silent) setRevealedApiKey('');
         if (res.restaurant) {
           setSelectedRestaurantId(res.restaurant.id);
-          setEditFee(String(res.restaurant.deliveryFee));
-          setEditMinOrder(String(res.restaurant.minOrder));
-          setEditHours(res.restaurant.openingHours);
-          setEditMode(res.restaurant.deliveryMode);
-          setEditArea(res.restaurant.area || BANGLADESH_AREAS[0].name);
-          setEditAddress(res.restaurant.address || '');
-          setEditCoords({
-            lat: Number(res.restaurant.lat) || BANGLADESH_AREAS[0].lat,
-            lng: Number(res.restaurant.lng) || BANGLADESH_AREAS[0].lng,
-          });
-          setEditLogoUrl(res.restaurant.logoUrl || '');
-          setEditCoverUrl(res.restaurant.coverUrl || '');
-          try {
-            const keyMeta = await apiFetch<{
-              hasKey: boolean;
-              keyPrefix: string | null;
-              label: string | null;
-              lastUsedAt: string | null;
-            }>(`/api/vendor/api-key?restaurantId=${res.restaurant.id}`);
-            setApiKeyInfo(keyMeta);
-          } catch {
-            // ignore if endpoint unavailable
+          if (!silent) {
+            setEditFee(String(res.restaurant.deliveryFee));
+            setEditMinOrder(String(res.restaurant.minOrder));
+            setEditHours(res.restaurant.openingHours);
+            setEditMode(res.restaurant.deliveryMode);
+            setEditArea(res.restaurant.area || BANGLADESH_AREAS[0].name);
+            setEditAddress(res.restaurant.address || '');
+            setEditCoords({
+              lat: Number(res.restaurant.lat) || BANGLADESH_AREAS[0].lat,
+              lng: Number(res.restaurant.lng) || BANGLADESH_AREAS[0].lng,
+            });
+            setEditLogoUrl(res.restaurant.logoUrl || '');
+            setEditCoverUrl(res.restaurant.coverUrl || '');
+            try {
+              const keyMeta = await apiFetch<{
+                hasKey: boolean;
+                keyPrefix: string | null;
+                label: string | null;
+                lastUsedAt: string | null;
+              }>(`/api/vendor/api-key?restaurantId=${res.restaurant.id}`);
+              setApiKeyInfo(keyMeta);
+            } catch {
+              // ignore if endpoint unavailable
+            }
           }
         } else {
           setShowOnboarding(true);
@@ -254,7 +280,7 @@ export function VendorDashboard({
       } catch (err) {
         console.error('Vendor workspace load failed:', err);
       } finally {
-        setLoading(false);
+        if (!silent) setLoading(false);
       }
     },
     [canAccessVendorApi, selectedRestaurantId]
@@ -271,8 +297,30 @@ export function VendorDashboard({
   }, [initialRestaurantId, selectedRestaurantId]);
 
   useEffect(() => {
-    loadWorkspace(selectedRestaurantId);
+    loadWorkspace(selectedRestaurantId, false);
   }, [loadWorkspace, selectedRestaurantId]);
+
+  useRealtimeEvents({
+    enabled: canAccessVendorApi,
+    token: getAuthToken(),
+    pollFallbackMs: 8000,
+    onSync: () => {
+      loadWorkspace(selectedRestaurantId, true);
+    },
+    onEvent: (ev) => {
+      if (ev.type === 'order:created' || ev.type === 'order:updated') {
+        if (ev.type === 'order:created') {
+          setLiveNewOrderAlert({
+            orderNumber: String(ev.payload.orderNumber || 'New Order'),
+            customerName: String(ev.payload.customerName || 'Customer'),
+            totalAmount: Number(ev.payload.totalAmount || 0),
+          });
+          playOrderAlertChime('new_order');
+        }
+        loadWorkspace(selectedRestaurantId, true);
+      }
+    },
+  });
 
   const handleRegisterRestaurant = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1090,6 +1138,53 @@ export function VendorDashboard({
         </div>
       ) : (
         <>
+          {liveNewOrderAlert && (
+            <div
+              role="status"
+              data-testid="vendor-live-order-alert"
+              className="rounded-2xl bg-[#FFF0F6] border border-[#E21B70]/40 p-4 flex flex-wrap items-center justify-between gap-3 shadow-xs"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-[#E21B70] text-white flex items-center justify-center shrink-0 animate-pulse">
+                  <Bell className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="text-sm font-bold text-[#2E3138]">
+                    {lang === 'bn'
+                      ? `নতুন অর্ডার এসেছে! ${liveNewOrderAlert.orderNumber}`
+                      : `New Order Arrived! ${liveNewOrderAlert.orderNumber}`}
+                  </p>
+                  <p className="text-xs text-neutral-600">
+                    {liveNewOrderAlert.customerName}
+                    {liveNewOrderAlert.totalAmount > 0
+                      ? ` · ${formatBdt(liveNewOrderAlert.totalAmount, lang)}`
+                      : ''}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTab('orders');
+                    setLiveNewOrderAlert(null);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-[#E21B70] text-white text-xs font-bold hover:bg-[#C4135E]"
+                >
+                  {lang === 'bn' ? 'অর্ডার দেখুন ও গ্রহণ করুন' : 'View & Accept Order'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLiveNewOrderAlert(null)}
+                  aria-label="Dismiss new order alert"
+                  className="p-2 rounded-lg text-neutral-500 hover:bg-white"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Vendor Header & KPI Summary */}
           <div className="bg-white rounded-2xl border border-neutral-200 p-5 flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-3.5">

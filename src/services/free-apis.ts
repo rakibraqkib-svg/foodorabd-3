@@ -128,24 +128,28 @@ export async function searchOsmPlaces(query: string): Promise<OsmPlaceSuggestion
 
 export async function reverseOsmGeocode(
   lat: number,
-  lng: number
+  lng: number,
+  lang: 'en' | 'bn' = 'en'
 ): Promise<{ displayName: string; areaName: string; source: string }> {
-  const key = `osm-rev:${lat.toFixed(4)},${lng.toFixed(4)}`;
+  const key = `osm-rev:${lang}:${lat.toFixed(4)},${lng.toFixed(4)}`;
   const cached = getCached<{ displayName: string; areaName: string; source: string }>(key);
   if (cached) return cached;
 
   try {
-    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`;
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=${
+      lang === 'bn' ? 'bn,en' : 'en,bn'
+    }`;
     const res = await fetch(url, {
       headers: { 'User-Agent': 'FoodoraBD-Marketplace/1.0' },
-      signal: AbortSignal.timeout(3500),
+      signal: AbortSignal.timeout(4000),
     });
     if (!res.ok) throw new Error(`Nominatim reverse HTTP ${res.status}`);
     const data = (await res.json()) as {
       display_name?: string;
       address?: {
-        suburb?: string;
         neighbourhood?: string;
+        quarter?: string;
+        suburb?: string;
         road?: string;
         city?: string;
         town?: string;
@@ -156,22 +160,31 @@ export async function reverseOsmGeocode(
         state?: string;
       };
     };
+    const addr = data.address;
+    const primaryLocal =
+      addr?.neighbourhood ||
+      addr?.quarter ||
+      addr?.suburb ||
+      addr?.village ||
+      addr?.town ||
+      addr?.road;
+    const cityPart =
+      addr?.city ||
+      addr?.city_district ||
+      addr?.county ||
+      addr?.state_district ||
+      addr?.state;
+
     const areaName =
-      data.address?.suburb ||
-      data.address?.neighbourhood ||
-      data.address?.town ||
-      data.address?.city ||
-      data.address?.city_district ||
-      data.address?.county ||
-      data.address?.state_district ||
-      data.address?.state ||
-      'Bangladesh';
+      primaryLocal && cityPart && primaryLocal !== cityPart
+        ? `${primaryLocal}, ${cityPart}`
+        : primaryLocal || cityPart || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
     const displayName = data.display_name || `${areaName}, Bangladesh`;
     return setCached(key, { displayName, areaName, source: 'OpenStreetMap' }, 10 * 60 * 1000);
   } catch {
     return {
       displayName: `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}, Bangladesh`,
-      areaName: 'Bangladesh',
+      areaName: `Pinned (${lat.toFixed(3)}, ${lng.toFixed(3)})`,
       source: 'Fallback',
     };
   }

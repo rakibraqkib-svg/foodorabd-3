@@ -1,18 +1,26 @@
+import { isSandboxAuthToken, shouldPersistAuthToken } from './marketplace-logic';
+
 const TOKEN_STORAGE_KEY = 'foodora_bd_auth_token_v1';
 
 let activeToken: string | null = (() => {
   try {
-    return typeof window !== 'undefined' ? localStorage.getItem(TOKEN_STORAGE_KEY) : null;
+    if (typeof window === 'undefined') return null;
+    const saved = localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (saved && isSandboxAuthToken(saved)) {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      return null;
+    }
+    return saved;
   } catch {
     return null;
   }
 })();
 
-export function setAuthToken(token: string | null) {
+export function setAuthToken(token: string | null, persist = true) {
   activeToken = token;
   try {
     if (typeof window !== 'undefined') {
-      if (token) {
+      if (token && persist && shouldPersistAuthToken(token)) {
         localStorage.setItem(TOKEN_STORAGE_KEY, token);
       } else {
         localStorage.removeItem(TOKEN_STORAGE_KEY);

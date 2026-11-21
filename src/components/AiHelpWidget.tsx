@@ -102,6 +102,7 @@ export function AiHelpWidget({
         body: JSON.stringify({
           message: trimmed,
           langPreference: langPref,
+          uiLang,
           history: messages.slice(-8).map((m) => ({
             role: m.role === 'assistant' ? 'model' : 'user',
             text: m.text,
@@ -174,21 +175,18 @@ export function AiHelpWidget({
           >
             {/* Header + Bangla / English / Auto Language Selector */}
             <div
-              style={{ backgroundColor: '#2E3138' }}
+              style={{ backgroundColor: accentColor }}
               className="px-4 py-3 text-white flex items-center justify-between gap-2 shrink-0"
             >
               <div className="flex items-center gap-2 min-w-0">
-                <span
-                  style={{ backgroundColor: accentColor }}
-                  className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0"
-                >
+                <span className="w-8 h-8 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
                   <Bot className="w-4 h-4 text-white" />
                 </span>
                 <div className="min-w-0">
                   <h3 className="text-sm font-bold leading-tight truncate">
                     {displayBn ? 'Foodora AI সহায়তা' : 'Foodora AI Help'}
                   </h3>
-                  <p className="text-[11px] text-white/75 truncate">
+                  <p className="text-[11px] text-white/85 truncate">
                     {displayBn ? 'বাংলা ও ইংরেজিতে তাৎক্ষণিক সাহায্য' : 'Instant support in বাংলা & English'}
                   </p>
                 </div>

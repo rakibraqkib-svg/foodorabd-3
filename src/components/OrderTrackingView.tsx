@@ -16,13 +16,14 @@ import {
   Star,
   Truck,
 } from 'lucide-react';
-import { apiFetch } from '../lib/api';
+import { apiFetch, getAuthToken } from '../lib/api';
 import {
   buildOrderTrackingUrl,
   calculateLiveRiderEta,
   computeOrderEtaSummary,
   formatBdt,
 } from '../lib/marketplace-logic';
+import { useRealtimeEvents } from '../lib/realtime';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import type {
   Lang,
@@ -117,11 +118,33 @@ export function OrderTrackingView({
     loadOrder();
   }, [loadOrder]);
 
-  useEffect(() => {
-    if (isTerminal) return;
-    const timer = setInterval(loadOrder, 4000);
-    return () => clearInterval(timer);
-  }, [loadOrder, isTerminal]);
+  useRealtimeEvents({
+    enabled: !isTerminal,
+    token: getAuthToken(),
+    orderId,
+    trackingToken: initialToken || order?.trackingToken || null,
+    pollFallbackMs: 4000,
+    onSync: loadOrder,
+    onEvent: (ev) => {
+      if (
+        (ev.type === 'order:updated' || ev.type === 'rider:location') &&
+        Number(ev.payload.orderId) === orderId
+      ) {
+        if (
+          ev.type === 'rider:location' &&
+          typeof ev.payload.lat === 'number' &&
+          typeof ev.payload.lng === 'number'
+        ) {
+          setRiderLocation((prev) =>
+            prev
+              ? { ...prev, currentLat: ev.payload.lat, currentLng: ev.payload.lng, lat: ev.payload.lat, lng: ev.payload.lng }
+              : prev
+          );
+        }
+        loadOrder();
+      }
+    },
+  });
 
   useEffect(() => {
     if (!order || !restaurant) return;
@@ -745,7 +768,18 @@ export function OrderTrackingView({
                         <div className="min-w-0">
                           <p className="font-semibold text-[#2E3138] truncate">{log.subject}</p>
                           <p className="text-[11px] text-neutral-500 truncate">
-                            To: {log.recipientEmail} · {new Date(log.sentAt).toLocaleTimeString()}
+                            To: {log.recipientEmail} · {new Date(log.sentAt).toLocaleTimeString()} ·{' '}
+                            <span
+                              className={
+                                log.providerStatus === 'sent'
+                                  ? 'text-emerald-700 font-semibold'
+                                  : 'text-neutral-500'
+                              }
+                            >
+                              {log.providerStatus === 'sent'
+                                ? `Sent (${log.deliveryProvider.toUpperCase()})`
+                                : 'Saved in Tracking Inbox'}
+                            </span>
                           </p>
                         </div>
                         <button

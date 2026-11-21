@@ -1074,11 +1074,16 @@ export function buildOrderTrackingEmailPayload(input: {
   customerEmail: string;
   restaurantName: string;
   deliveryArea: string;
+  deliveryAddress?: string | null;
   totalAmount: number;
   paymentMethod: string;
+  paymentStatus?: string | null;
   status: string;
   statusNote?: string;
   riderName?: string | null;
+  riderPhone?: string | null;
+  etaMinutes?: number | null;
+  items?: Array<{ name: string; nameBn?: string; quantity: number; lineTotal: number }>;
 }): {
   subject: string;
   trackingUrl: string;
@@ -1087,34 +1092,107 @@ export function buildOrderTrackingEmailPayload(input: {
 } {
   const trackingUrl = buildOrderTrackingUrl(input.origin, input.orderId, input.trackingToken);
   const niceStatus = input.status.replace(/_/g, ' ').toUpperCase();
+  const statusDisplayMap: Record<string, { en: string; bn: string; step: number }> = {
+    confirmed: { en: 'Order Confirmed', bn: 'অর্ডার কনফার্ম হয়েছে', step: 1 },
+    accepted: { en: 'Accepted by Kitchen', bn: 'রেস্টুরেন্ট অর্ডার গ্রহণ করেছে', step: 2 },
+    preparing: { en: 'Preparing Food', bn: 'খাবার তৈরি হচ্ছে', step: 2 },
+    ready: { en: 'Ready for Pickup', bn: 'পিকআপের জন্য প্রস্তুত', step: 3 },
+    rider_assigned: { en: 'Rider Assigned', bn: 'রাইডার নির্ধারিত হয়েছে', step: 3 },
+    picked_up: { en: 'Order Picked Up', bn: 'রাইডার খাবার সংগ্রহ করেছেন', step: 4 },
+    on_the_way: { en: 'Rider Is On The Way', bn: 'রাইডার আপনার ঠিকানায় আসছেন', step: 4 },
+    delivered: { en: 'Order Delivered', bn: 'ডেলিভারি সম্পন্ন হয়েছে', step: 5 },
+    cancelled: { en: 'Order Cancelled', bn: 'অর্ডার বাতিল হয়েছে', step: 0 },
+  };
+  const info = statusDisplayMap[input.status] || { en: niceStatus, bn: niceStatus, step: 1 };
   const subject = `Foodora BD Order ${input.orderNumber} — ${niceStatus}`;
-  const riderLine = input.riderName ? `<p><strong>Assigned Rider:</strong> ${escapeXml(input.riderName)}</p>` : '';
-  const noteLine = input.statusNote ? `<p><strong>Update:</strong> ${escapeXml(input.statusNote)}</p>` : '';
+  const riderLine = input.riderName
+    ? `<p style="margin:4px 0;"><strong>Assigned Rider:</strong> ${escapeXml(input.riderName)}${
+        input.riderPhone ? ` (${escapeXml(input.riderPhone)})` : ''
+      }</p>`
+    : '';
+  const etaLine =
+    typeof input.etaMinutes === 'number' && input.etaMinutes > 0 && input.status !== 'delivered' && input.status !== 'cancelled'
+      ? `<p style="margin:4px 0;"><strong>Estimated Arrival:</strong> ~${input.etaMinutes} mins</p>`
+      : '';
+  const addressLine = input.deliveryAddress
+    ? `<p style="margin:4px 0;"><strong>Delivery Address:</strong> ${escapeXml(input.deliveryAddress)}</p>`
+    : '';
+  const noteLine = input.statusNote ? `<p style="margin:4px 0;"><strong>Update:</strong> ${escapeXml(input.statusNote)}</p>` : '';
+  const paymentBadge = input.paymentStatus ? ` · ${escapeXml(input.paymentStatus.toUpperCase())}` : '';
+  const itemsBlock =
+    Array.isArray(input.items) && input.items.length > 0
+      ? `<div style="border-top:1px solid #F3F4F6;padding-top:10px;margin-top:10px;">
+           <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#4B5563;">Ordered Items:</p>
+           ${input.items
+             .slice(0, 10)
+             .map(
+               (it) =>
+                 `<p style="margin:2px 0;font-size:12px;color:#374151;">${it.quantity}× ${escapeXml(
+                   it.name
+                 )} — ৳${it.lineTotal}</p>`
+             )
+             .join('')}
+         </div>`
+      : '';
+
+  const steps = [
+    { idx: 1, label: 'Confirmed' },
+    { idx: 2, label: 'Preparing' },
+    { idx: 3, label: 'Rider Assigned' },
+    { idx: 4, label: 'On the Way' },
+    { idx: 5, label: 'Delivered' },
+  ];
+  const progressHtml =
+    info.step > 0
+      ? `<div style="display:flex;gap:6px;margin:14px 0 16px;">
+           ${steps
+             .map((s) => {
+               const active = info.step >= s.idx;
+               return `<div style="flex:1;text-align:center;">
+                 <div style="height:6px;border-radius:999px;background:${active ? '#E21B70' : '#E5E7EB'};margin-bottom:4px;"></div>
+                 <span style="font-size:10px;font-weight:${active ? 'bold' : 'normal'};color:${
+                   active ? '#E21B70' : '#9CA3AF'
+                 };">${s.label}</span>
+               </div>`;
+             })
+             .join('')}
+         </div>`
+      : '';
 
   const html = `<!doctype html>
 <html>
   <body style="font-family:Arial,sans-serif;background:#f7f7f7;padding:24px;color:#2E3138;">
     <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;padding:24px;border:1px solid #e5e7eb;">
-      <h2 style="margin:0 0 8px;color:#E21B70;">Foodora BD — Live Order Tracking</h2>
-      <p style="margin:0 0 16px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
+      <p style="margin:0 0 4px;font-size:11px;font-weight:bold;letter-spacing:0.06em;text-transform:uppercase;color:#E21B70;">Foodora BD · Live Order Update</p>
+      <h2 style="margin:0 0 6px;color:#2E3138;font-size:20px;">${escapeXml(info.en)}</h2>
+      <p style="margin:0 0 14px;font-size:13px;color:#E21B70;font-weight:bold;">${escapeXml(info.bn)}</p>
+      <p style="margin:0 0 10px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
       <p style="margin:0 0 12px;font-size:14px;">Your order <strong>${escapeXml(input.orderNumber)}</strong> from <strong>${escapeXml(input.restaurantName)}</strong> is now <strong>${escapeXml(niceStatus)}</strong>.</p>
+      ${progressHtml}
       <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
         <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
-        <p style="margin:4px 0;"><strong>Total Payable:</strong> ৳${input.totalAmount} (${escapeXml(input.paymentMethod.toUpperCase())})</p>
+        ${addressLine}
+        <p style="margin:4px 0;"><strong>Total Payable:</strong> ৳${input.totalAmount} (${escapeXml(input.paymentMethod.toUpperCase())}${paymentBadge})</p>
+        ${etaLine}
         ${riderLine}
         ${noteLine}
+        ${itemsBlock}
       </div>
-      <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Track Order Live on Map</a>
-      <p style="margin:16px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Or open: ${escapeXml(trackingUrl)}</p>
+      <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Track Order &amp; Rider Live · লাইভ ট্র্যাক করুন</a>
+      <p style="margin:16px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Direct tracking link: ${escapeXml(trackingUrl)}</p>
     </div>
   </body>
 </html>`;
 
-  const text = `Foodora BD — Order ${input.orderNumber} (${niceStatus})
+  const text = `Foodora BD — Order ${input.orderNumber} (${info.en} / ${info.bn})
 Restaurant: ${input.restaurantName}
-Delivery Area: ${input.deliveryArea}
-Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()})
-${input.riderName ? `Rider: ${input.riderName}\n` : ''}${input.statusNote ? `Update: ${input.statusNote}\n` : ''}Track live: ${trackingUrl}`;
+Delivery Area: ${input.deliveryArea}${input.deliveryAddress ? `\nAddress: ${input.deliveryAddress}` : ''}
+Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()}${input.paymentStatus ? ` · ${input.paymentStatus}` : ''})
+${input.etaMinutes ? `Estimated Arrival: ~${input.etaMinutes} mins\n` : ''}${
+    input.riderName
+      ? `Rider: ${input.riderName}${input.riderPhone ? ` (${input.riderPhone})` : ''}\n`
+      : ''
+  }${input.statusNote ? `Update: ${input.statusNote}\n` : ''}Track live on map: ${trackingUrl}`;
 
   return { subject, trackingUrl, html, text };
 }
@@ -1387,17 +1465,21 @@ export type AiHelpLangPreference = 'auto' | 'bn' | 'en';
 
 export function buildAiHelpSystemInstruction(params: {
   langPreference?: AiHelpLangPreference;
+  uiLang?: 'en' | 'bn';
   area?: string;
   viewType?: string;
   activeOrderNumber?: string;
 }): string {
   const pref = params.langPreference || 'auto';
+  const uiIsBn = params.uiLang === 'bn';
   const langRule =
     pref === 'bn'
-      ? 'Always respond strictly in clear, natural Bengali (বাংলা script).'
+      ? 'Always respond strictly in clear, natural, everyday Bengali (বাংলা script). Even if the question contains English words or Banglish, write your entire explanation in natural Bangla (keep brand names/codes like Foodora BD, FOODORA50, bKash, Nagad as needed).'
       : pref === 'en'
       ? 'Always respond strictly in clear, helpful English.'
-      : 'Detect the user language automatically: if they write in Bangla (বাংলা) or Banglish/Romanized Bengali, respond in clear, helpful Bangla (বাংলা). If they write in English, respond in English.';
+      : uiIsBn
+      ? 'The interface language is currently Bangla (বাংলা). Respond in clear, natural Bengali (বাংলা script) by default—including for Banglish or short mixed queries—unless the user explicitly asks in English for an English reply.'
+      : 'Detect the user language automatically: if they write in Bangla (বাংলা script) or Banglish/Romanized Bengali (e.g. "rider kothay", "amar order", "keno"), respond in clear, natural Bangla (বাংলা script). If they write in English, respond in English.';
 
   const contextNotes = [
     params.area ? `User selected area: ${params.area}, Bangladesh.` : '',
@@ -1414,7 +1496,7 @@ export function buildAiHelpSystemInstruction(params: {
     'Platform knowledge:',
     '- Ordering: Customers can order directly from the homepage "Order Popular Food Now" dishes or open any restaurant menu, then pay via bKash, Nagad, SSLCommerz, or Cash on Delivery (COD).',
     '- Why "This restaurant is currently unavailable for orders" appears: It means either the restaurant has "Store Open" switched OFF (isOpen = false) in Vendor/Admin Dashboard, or its status is not "approved" yet (e.g. pending/suspended). Re-enabling "Store Open" in Partner/Admin Dashboard or picking an Open restaurant resolves it immediately.',
-    '- Nationwide Map & Location: Users can search any city/thana across all 64 districts of Bangladesh, enter a custom area, drag/click the interactive Google Map pin, or press Back / click outside the map modal to return.',
+    '- Nationwide Map & Location: Users can search any city/thana across all 64 districts of Bangladesh, enter a custom area, click anywhere on the interactive map or drag the pin to set that exact location, or press Back / click outside the map modal to return.',
     '- Live Rider Tracking & ETA: Users can click "Track Rider" in the header or look up orders via Checkout Email + Order Number to see live rider GPS coordinates, nearest standby rider, and estimated arrival time (ETA).',
     '- Partner & Rider Portals: Restaurant owners can register, add custom cuisines/categories/areas, and integrate Partner APIs; Riders anywhere in Bangladesh can apply to join and share live GPS locations.',
     contextNotes,
@@ -1422,5 +1504,56 @@ export function buildAiHelpSystemInstruction(params: {
     .filter(Boolean)
     .join('\n');
 }
+
+export const ORDER_SOUND_STORAGE_KEY = 'foodora_bd_order_sound_v1';
+
+export function parseOrderSoundPreference(raw: string | null | undefined): boolean {
+  if (raw === null || raw === undefined) return true;
+  const normalized = String(raw).trim().toLowerCase();
+  if (normalized === 'false' || normalized === '0' || normalized === 'off') {
+    return false;
+  }
+  return true;
+}
+
+export interface ChimeNoteSpec {
+  freq: number;
+  delaySec: number;
+  durationSec: number;
+  gain: number;
+  harmonicRatio?: number;
+  harmonicGain?: number;
+}
+
+export function getOrderAlertChimeNotes(
+  kind: 'new_order' | 'status_update' = 'new_order'
+): ChimeNoteSpec[] {
+  if (kind === 'status_update') {
+    return [
+      { freq: 783.99, delaySec: 0, durationSec: 0.24, gain: 0.065, harmonicRatio: 2, harmonicGain: 0.015 },
+      { freq: 987.77, delaySec: 0.11, durationSec: 0.34, gain: 0.075, harmonicRatio: 2, harmonicGain: 0.018 },
+    ];
+  }
+  // Distinct, warm ascending major-octave chime (C5 -> E5 -> G5 -> C6) for new incoming orders
+  return [
+    { freq: 523.25, delaySec: 0, durationSec: 0.26, gain: 0.075, harmonicRatio: 2, harmonicGain: 0.02 },
+    { freq: 659.25, delaySec: 0.09, durationSec: 0.28, gain: 0.085, harmonicRatio: 2, harmonicGain: 0.022 },
+    { freq: 783.99, delaySec: 0.18, durationSec: 0.3, gain: 0.09, harmonicRatio: 2, harmonicGain: 0.024 },
+    { freq: 1046.5, delaySec: 0.28, durationSec: 0.52, gain: 0.105, harmonicRatio: 2, harmonicGain: 0.03 },
+  ];
+}
+
+export function isSandboxAuthToken(token: string | null | undefined): boolean {
+  const trimmed = String(token || '').trim();
+  return trimmed.startsWith('sbx.');
+}
+
+export function shouldPersistAuthToken(token: string | null | undefined): boolean {
+  const trimmed = String(token || '').trim();
+  if (!trimmed) return false;
+  return !isSandboxAuthToken(trimmed);
+}
+
+
 
 

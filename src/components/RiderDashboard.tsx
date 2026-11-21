@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  Bell,
   Bike,
   CheckCircle2,
   LocateFixed,
@@ -9,8 +10,9 @@ import {
   PackageCheck,
   Radio,
   Wallet,
+  X,
 } from 'lucide-react';
-import { apiFetch, setAuthToken } from '../lib/api';
+import { apiFetch, getAuthToken, setAuthToken } from '../lib/api';
 import { BANGLADESH_AREAS } from '../lib/i18n';
 import {
   advanceRiderAlongRoute,
@@ -18,6 +20,7 @@ import {
   formatBdt,
   VEHICLE_TYPE_PRESET_OPTIONS,
 } from '../lib/marketplace-logic';
+import { playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
 import type { AppUser, Lang, OrderRecord, RiderRecord } from '../types/marketplace';
@@ -57,7 +60,7 @@ export function RiderDashboard({
 
   // Onboarding / Public Job Application form
   const [fullName, setFullName] = useState(user?.isSandbox ? '' : user?.fullName || '');
-  const [phone, setPhone] = useState('+8801811000003');
+  const [phone, setPhone] = useState('');
   const [email, setEmail] = useState(
     user && !user.isSandbox && user.email ? user.email : ''
   );
@@ -65,7 +68,7 @@ export function RiderDashboard({
   const [vehicleType, setVehicleType] = useState('Motorbike');
   const [zone, setZone] = useState(BANGLADESH_AREAS[0].name);
   const [customZone, setCustomZone] = useState('');
-  const [nidNumber, setNidNumber] = useState('1995261199887');
+  const [nidNumber, setNidNumber] = useState('');
   const [applyCoords, setApplyCoords] = useState({
     lat: BANGLADESH_AREAS[0].lat,
     lng: BANGLADESH_AREAS[0].lng,
@@ -81,6 +84,10 @@ export function RiderDashboard({
     Boolean(user) &&
     (user!.role === 'rider' || user!.role === 'admin' || user!.role === 'super_admin');
 
+  const [liveDeliveryAlert, setLiveDeliveryAlert] = useState<string | null>(null);
+  const knownAvailableIdsRef = useRef<Set<number>>(new Set());
+  const hasHydratedRef = useRef(false);
+
   const loadWorkspace = useCallback(
     async (silent = false) => {
       if (!canAccessRiderApi || showJobForm) {
@@ -94,6 +101,20 @@ export function RiderDashboard({
           availableOrders: OrderRecord[];
           assignedOrders: OrderRecord[];
         }>('/api/rider/workspace');
+        if (hasHydratedRef.current) {
+          const freshReady = res.availableOrders.find((o) => !knownAvailableIdsRef.current.has(o.id));
+          if (freshReady) {
+            setLiveDeliveryAlert(
+              lang === 'bn'
+                ? `নতুন ডেলিভারি অর্ডার এসেছে: ${freshReady.orderNumber} (${freshReady.restaurantName})`
+                : `New delivery order available: ${freshReady.orderNumber} (${freshReady.restaurantName})`
+            );
+            playOrderAlertChime('new_order');
+          }
+        }
+        knownAvailableIdsRef.current = new Set(res.availableOrders.map((o) => o.id));
+        hasHydratedRef.current = true;
+
         setRider(res.rider);
         setAvailableOrders(res.availableOrders);
         setAssignedOrders(res.assignedOrders);
@@ -103,14 +124,24 @@ export function RiderDashboard({
         if (!silent) setLoading(false);
       }
     },
-    [canAccessRiderApi, showJobForm]
+    [canAccessRiderApi, showJobForm, lang]
   );
 
   useEffect(() => {
     loadWorkspace(false);
-    const timer = setInterval(() => loadWorkspace(true), 10000);
-    return () => clearInterval(timer);
   }, [loadWorkspace]);
+
+  useRealtimeEvents({
+    enabled: canAccessRiderApi && !showJobForm,
+    token: getAuthToken(),
+    pollFallbackMs: 8000,
+    onSync: () => loadWorkspace(true),
+    onEvent: (ev) => {
+      if (ev.type === 'order:created' || ev.type === 'order:updated') {
+        loadWorkspace(true);
+      }
+    },
+  });
 
   const persistRiderLocation = useCallback(
     async (
@@ -445,15 +476,16 @@ export function RiderDashboard({
             </div>
           </div>
 
-          <div>
-            <label className="block text-xs font-semibold text-neutral-700 mb-1">NID Number</label>
-            <input
-              required
-              value={nidNumber}
-              onChange={(e) => setNidNumber(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
-            />
-          </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-700 mb-1">NID Number</label>
+              <input
+                required
+                value={nidNumber}
+                onChange={(e) => setNidNumber(e.target.value)}
+                placeholder="10, 13, or 17 digit NID"
+                className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+              />
+            </div>
 
           <div>
             <label className="block text-xs font-semibold text-neutral-700 mb-1">
@@ -503,6 +535,26 @@ export function RiderDashboard({
         </form>
       ) : (
         <>
+          {liveDeliveryAlert && (
+            <div
+              role="status"
+              className="rounded-2xl bg-[#FFF0F6] border border-[#E21B70]/40 p-3.5 flex items-center justify-between gap-3"
+            >
+              <div className="flex items-center gap-2.5 text-xs font-bold text-[#2E3138]">
+                <Bell className="w-4 h-4 text-[#E21B70] shrink-0 animate-pulse" />
+                <span>{liveDeliveryAlert}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLiveDeliveryAlert(null)}
+                aria-label="Dismiss delivery alert"
+                className="p-1 rounded hover:bg-white text-neutral-500"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
           <div className="bg-white rounded-2xl border border-neutral-200 p-5 flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-3.5">
               <div className="w-12 h-12 rounded-xl bg-[#FFF0F6] text-[#E21B70] flex items-center justify-center">

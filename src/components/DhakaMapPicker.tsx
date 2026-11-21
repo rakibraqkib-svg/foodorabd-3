@@ -10,6 +10,7 @@ import {
   useMapsLibrary,
 } from '@vis.gl/react-google-maps';
 import { Bike, LocateFixed, MapPin } from 'lucide-react';
+import { apiFetch } from '../lib/api';
 import { BANGLADESH_AREAS, DHAKA_AREAS } from '../lib/i18n';
 import { haversineDistanceKm, resolveNearestAreaFromList } from '../lib/marketplace-logic';
 import type { Lang } from '../types/marketplace';
@@ -35,7 +36,12 @@ interface DhakaMapPickerProps {
   onSelectRiderPin?: (riderId: number) => void;
   interactive?: boolean;
   heightClass?: string;
-  onSelectLocation?: (coords: { lat: number; lng: number; areaName?: string }) => void;
+  onSelectLocation?: (coords: {
+    lat: number;
+    lng: number;
+    areaName?: string;
+    displayName?: string;
+  }) => void;
 }
 
 interface MapPolylineLike {
@@ -280,23 +286,56 @@ function GoogleMapInner({
 }: Omit<DhakaMapPickerProps, 'mapsApiKey'>) {
   const status = useApiLoadingStatus();
   const skipPanRef = useRef<{ lat: number; lng: number } | null>(null);
+  const reverseSeqRef = useRef(0);
+  const [resolving, setResolving] = useState(false);
 
   const emitLocation = (lat: number, lng: number, shouldSkipPan = true) => {
-    if (!onSelectLocation) return;
+    if (!onSelectLocation || !Number.isFinite(lat) || !Number.isFinite(lng)) return;
     if (shouldSkipPan) {
       skipPanRef.current = { lat, lng };
     }
-    const { label } = resolveNearestAreaFromList(lat, lng, BANGLADESH_AREAS);
+    const nearest = resolveNearestAreaFromList(lat, lng, BANGLADESH_AREAS);
+    const immediateName =
+      nearest.area && nearest.distanceKm <= 0.8
+        ? nearest.area.name
+        : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+
     onSelectLocation({
       lat,
       lng,
-      areaName: label,
+      areaName: immediateName,
     });
+
+    const seq = ++reverseSeqRef.current;
+    setResolving(true);
+    apiFetch<{ displayName: string; areaName: string }>(
+      `/api/free/reverse-geocode?lat=${lat}&lng=${lng}&lang=${lang}`
+    )
+      .then((res) => {
+        if (seq !== reverseSeqRef.current) return;
+        const resolvedName = res.areaName?.trim() || immediateName;
+        skipPanRef.current = { lat, lng };
+        onSelectLocation({
+          lat,
+          lng,
+          areaName: resolvedName,
+          displayName: res.displayName,
+        });
+      })
+      .catch(() => {
+        // Keep immediate pinned coordinates/label if reverse geocode is unavailable
+      })
+      .finally(() => {
+        if (seq === reverseSeqRef.current) {
+          setResolving(false);
+        }
+      });
   };
 
   if (status === APILoadingStatus.FAILED || status === APILoadingStatus.AUTH_FAILURE) {
     return (
       <FallbackDhakaMap
+        lang={lang}
         center={center}
         markerLabel={markerLabel}
         secondaryPoint={secondaryPoint}
@@ -328,17 +367,14 @@ function GoogleMapInner({
         internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
         className="w-full h-full"
         onClick={(ev) => {
-          if (interactive && ev.detail.latLng) {
-            emitLocation(ev.detail.latLng.lat, ev.detail.latLng.lng);
-          }
-        }}
-        onDragend={(ev) => {
-          if (interactive && !secondaryPoint && (!extraRiders || extraRiders.length === 0)) {
-            const c = ev.map.getCenter();
-            if (c) {
-              emitLocation(c.lat(), c.lng());
-            }
-          }
+          if (!interactive || !ev.detail?.latLng) return;
+          const rawLatLng = ev.detail.latLng as unknown as {
+            lat: number | (() => number);
+            lng: number | (() => number);
+          };
+          const lat = typeof rawLatLng.lat === 'function' ? rawLatLng.lat() : rawLatLng.lat;
+          const lng = typeof rawLatLng.lng === 'function' ? rawLatLng.lng() : rawLatLng.lng;
+          emitLocation(lat, lng);
         }}
       >
         <MapCenterSync center={center} skipPanRef={skipPanRef} />
@@ -410,13 +446,36 @@ function GoogleMapInner({
         />
       </GoogleMap>
       {interactive && (
-        <div className="pointer-events-none absolute bottom-7 left-2.5 bg-white/95 backdrop-blur-xs border border-neutral-200 rounded-lg px-2.5 py-1 text-[11px] font-medium text-neutral-700 shadow-xs">
-          {lang === 'bn'
-            ? 'সারাদেশের ম্যাপে ক্লিক বা পিন টানুন'
-            : 'Move BD map, drag pin, or click to pick'}
-          <span className="ml-1.5 font-mono-nums text-neutral-500">
-            {center.lat.toFixed(4)}, {center.lng.toFixed(4)}
+        <div className="absolute bottom-2.5 left-2.5 right-12 flex items-center justify-between gap-2 bg-white/95 backdrop-blur-xs border border-neutral-200 rounded-lg px-2.5 py-1.5 text-[11px] font-medium text-neutral-700 shadow-xs">
+          <span className="truncate">
+            {resolving
+              ? lang === 'bn'
+                ? 'ঠিকানা নির্ধারণ হচ্ছে...'
+                : 'Setting pinned location...'
+              : markerLabel
+              ? `${markerLabel} · `
+              : lang === 'bn'
+              ? 'ম্যাপে ক্লিক বা পিন টানুন · '
+              : 'Click map or drag pin · '}
+            <span className="font-mono-nums text-neutral-500">
+              {center.lat.toFixed(4)}, {center.lng.toFixed(4)}
+            </span>
           </span>
+          <button
+            type="button"
+            onClick={() => {
+              if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                  (pos) => emitLocation(pos.coords.latitude, pos.coords.longitude, false),
+                  () => emitLocation(23.7949, 90.4144, false)
+                );
+              }
+            }}
+            className="inline-flex items-center gap-1 text-[#E21B70] font-bold hover:underline whitespace-nowrap shrink-0"
+          >
+            <LocateFixed className="w-3.5 h-3.5" />
+            <span>GPS</span>
+          </button>
         </div>
       )}
     </div>
@@ -424,6 +483,7 @@ function GoogleMapInner({
 }
 
 function FallbackDhakaMap({
+  lang,
   center,
   markerLabel,
   secondaryPoint,
@@ -433,7 +493,8 @@ function FallbackDhakaMap({
   interactive,
   heightClass,
   onSelectLocation,
-}: Omit<DhakaMapPickerProps, 'mapsApiKey' | 'lang'>) {
+}: Omit<DhakaMapPickerProps, 'mapsApiKey'>) {
+  const reverseSeqRef = useRef(0);
   const distance = secondaryPoint
     ? haversineDistanceKm(center.lat, center.lng, secondaryPoint.lat, secondaryPoint.lng)
     : null;
@@ -457,6 +518,34 @@ function FallbackDhakaMap({
     return { x, y };
   };
 
+  const emitFallbackPoint = (lat: number, lng: number) => {
+    if (!onSelectLocation) return;
+    const nearest = resolveNearestAreaFromList(lat, lng, BANGLADESH_AREAS);
+    const immediateName =
+      nearest.area && nearest.distanceKm <= 0.8
+        ? nearest.area.name
+        : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+    onSelectLocation({
+      lat,
+      lng,
+      areaName: immediateName,
+    });
+    const seq = ++reverseSeqRef.current;
+    apiFetch<{ displayName: string; areaName: string }>(
+      `/api/free/reverse-geocode?lat=${lat}&lng=${lng}&lang=${lang}`
+    )
+      .then((res) => {
+        if (seq !== reverseSeqRef.current) return;
+        onSelectLocation({
+          lat,
+          lng,
+          areaName: res.areaName?.trim() || immediateName,
+          displayName: res.displayName,
+        });
+      })
+      .catch(() => {});
+  };
+
   const fromClientPoint = (ev: React.MouseEvent<HTMLDivElement>) => {
     if (!interactive || !onSelectLocation) return;
     const rect = ev.currentTarget.getBoundingClientRect();
@@ -464,12 +553,7 @@ function FallbackDhakaMap({
     const pctY = ((ev.clientY - rect.top) / Math.max(1, rect.height)) * 100;
     const lng = bounds.minLng + (pctX / 100) * (bounds.maxLng - bounds.minLng);
     const lat = bounds.minLat + (1 - pctY / 100) * (bounds.maxLat - bounds.minLat);
-    const { label } = resolveNearestAreaFromList(lat, lng, BANGLADESH_AREAS);
-    onSelectLocation({
-      lat,
-      lng,
-      areaName: label,
-    });
+    emitFallbackPoint(lat, lng);
   };
 
   const p1 = toXY(center.lat, center.lng);
@@ -669,6 +753,7 @@ export function DhakaMapPicker(props: DhakaMapPickerProps) {
   if (!effectiveApiKey || useFallback) {
     return (
       <FallbackDhakaMap
+        lang={props.lang}
         center={props.center}
         markerLabel={props.markerLabel}
         secondaryPoint={props.secondaryPoint}

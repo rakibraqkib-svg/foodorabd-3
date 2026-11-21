@@ -7,12 +7,13 @@ var __export = (target, all) => {
 // server.ts
 import "dotenv/config";
 import express from "express";
+import http from "node:http";
 import path from "node:path";
 import fs from "node:fs";
 import crypto3 from "node:crypto";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
-import { and as and2, desc as desc2, eq as eq3, or as or2, sql as sql3 } from "drizzle-orm";
+import { and as and2, desc as desc2, eq as eq4, or as or2, sql as sql3 } from "drizzle-orm";
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { z } from "zod";
 
@@ -2347,34 +2348,81 @@ function doesEmailMatchOrder(orderEmail, queryEmail) {
 function buildOrderTrackingEmailPayload(input) {
   const trackingUrl = buildOrderTrackingUrl(input.origin, input.orderId, input.trackingToken);
   const niceStatus = input.status.replace(/_/g, " ").toUpperCase();
+  const statusDisplayMap = {
+    confirmed: { en: "Order Confirmed", bn: "\u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09A8\u09AB\u09BE\u09B0\u09CD\u09AE \u09B9\u09DF\u09C7\u099B\u09C7", step: 1 },
+    accepted: { en: "Accepted by Kitchen", bn: "\u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0997\u09CD\u09B0\u09B9\u09A3 \u0995\u09B0\u09C7\u099B\u09C7", step: 2 },
+    preparing: { en: "Preparing Food", bn: "\u0996\u09BE\u09AC\u09BE\u09B0 \u09A4\u09C8\u09B0\u09BF \u09B9\u099A\u09CD\u099B\u09C7", step: 2 },
+    ready: { en: "Ready for Pickup", bn: "\u09AA\u09BF\u0995\u0986\u09AA\u09C7\u09B0 \u099C\u09A8\u09CD\u09AF \u09AA\u09CD\u09B0\u09B8\u09CD\u09A4\u09C1\u09A4", step: 3 },
+    rider_assigned: { en: "Rider Assigned", bn: "\u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u09A8\u09BF\u09B0\u09CD\u09A7\u09BE\u09B0\u09BF\u09A4 \u09B9\u09DF\u09C7\u099B\u09C7", step: 3 },
+    picked_up: { en: "Order Picked Up", bn: "\u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u0996\u09BE\u09AC\u09BE\u09B0 \u09B8\u0982\u0997\u09CD\u09B0\u09B9 \u0995\u09B0\u09C7\u099B\u09C7\u09A8", step: 4 },
+    on_the_way: { en: "Rider Is On The Way", bn: "\u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u0986\u09AA\u09A8\u09BE\u09B0 \u09A0\u09BF\u0995\u09BE\u09A8\u09BE\u09DF \u0986\u09B8\u099B\u09C7\u09A8", step: 4 },
+    delivered: { en: "Order Delivered", bn: "\u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \u09B8\u09AE\u09CD\u09AA\u09A8\u09CD\u09A8 \u09B9\u09DF\u09C7\u099B\u09C7", step: 5 },
+    cancelled: { en: "Order Cancelled", bn: "\u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09AC\u09BE\u09A4\u09BF\u09B2 \u09B9\u09DF\u09C7\u099B\u09C7", step: 0 }
+  };
+  const info = statusDisplayMap[input.status] || { en: niceStatus, bn: niceStatus, step: 1 };
   const subject = `Foodora BD Order ${input.orderNumber} \u2014 ${niceStatus}`;
-  const riderLine = input.riderName ? `<p><strong>Assigned Rider:</strong> ${escapeXml(input.riderName)}</p>` : "";
-  const noteLine = input.statusNote ? `<p><strong>Update:</strong> ${escapeXml(input.statusNote)}</p>` : "";
+  const riderLine = input.riderName ? `<p style="margin:4px 0;"><strong>Assigned Rider:</strong> ${escapeXml(input.riderName)}${input.riderPhone ? ` (${escapeXml(input.riderPhone)})` : ""}</p>` : "";
+  const etaLine = typeof input.etaMinutes === "number" && input.etaMinutes > 0 && input.status !== "delivered" && input.status !== "cancelled" ? `<p style="margin:4px 0;"><strong>Estimated Arrival:</strong> ~${input.etaMinutes} mins</p>` : "";
+  const addressLine = input.deliveryAddress ? `<p style="margin:4px 0;"><strong>Delivery Address:</strong> ${escapeXml(input.deliveryAddress)}</p>` : "";
+  const noteLine = input.statusNote ? `<p style="margin:4px 0;"><strong>Update:</strong> ${escapeXml(input.statusNote)}</p>` : "";
+  const paymentBadge = input.paymentStatus ? ` \xB7 ${escapeXml(input.paymentStatus.toUpperCase())}` : "";
+  const itemsBlock = Array.isArray(input.items) && input.items.length > 0 ? `<div style="border-top:1px solid #F3F4F6;padding-top:10px;margin-top:10px;">
+           <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#4B5563;">Ordered Items:</p>
+           ${input.items.slice(0, 10).map(
+    (it) => `<p style="margin:2px 0;font-size:12px;color:#374151;">${it.quantity}\xD7 ${escapeXml(
+      it.name
+    )} \u2014 \u09F3${it.lineTotal}</p>`
+  ).join("")}
+         </div>` : "";
+  const steps = [
+    { idx: 1, label: "Confirmed" },
+    { idx: 2, label: "Preparing" },
+    { idx: 3, label: "Rider Assigned" },
+    { idx: 4, label: "On the Way" },
+    { idx: 5, label: "Delivered" }
+  ];
+  const progressHtml = info.step > 0 ? `<div style="display:flex;gap:6px;margin:14px 0 16px;">
+           ${steps.map((s) => {
+    const active = info.step >= s.idx;
+    return `<div style="flex:1;text-align:center;">
+                 <div style="height:6px;border-radius:999px;background:${active ? "#E21B70" : "#E5E7EB"};margin-bottom:4px;"></div>
+                 <span style="font-size:10px;font-weight:${active ? "bold" : "normal"};color:${active ? "#E21B70" : "#9CA3AF"};">${s.label}</span>
+               </div>`;
+  }).join("")}
+         </div>` : "";
   const html = `<!doctype html>
 <html>
   <body style="font-family:Arial,sans-serif;background:#f7f7f7;padding:24px;color:#2E3138;">
     <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;padding:24px;border:1px solid #e5e7eb;">
-      <h2 style="margin:0 0 8px;color:#E21B70;">Foodora BD \u2014 Live Order Tracking</h2>
-      <p style="margin:0 0 16px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
+      <p style="margin:0 0 4px;font-size:11px;font-weight:bold;letter-spacing:0.06em;text-transform:uppercase;color:#E21B70;">Foodora BD \xB7 Live Order Update</p>
+      <h2 style="margin:0 0 6px;color:#2E3138;font-size:20px;">${escapeXml(info.en)}</h2>
+      <p style="margin:0 0 14px;font-size:13px;color:#E21B70;font-weight:bold;">${escapeXml(info.bn)}</p>
+      <p style="margin:0 0 10px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
       <p style="margin:0 0 12px;font-size:14px;">Your order <strong>${escapeXml(input.orderNumber)}</strong> from <strong>${escapeXml(input.restaurantName)}</strong> is now <strong>${escapeXml(niceStatus)}</strong>.</p>
+      ${progressHtml}
       <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
         <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
-        <p style="margin:4px 0;"><strong>Total Payable:</strong> \u09F3${input.totalAmount} (${escapeXml(input.paymentMethod.toUpperCase())})</p>
+        ${addressLine}
+        <p style="margin:4px 0;"><strong>Total Payable:</strong> \u09F3${input.totalAmount} (${escapeXml(input.paymentMethod.toUpperCase())}${paymentBadge})</p>
+        ${etaLine}
         ${riderLine}
         ${noteLine}
+        ${itemsBlock}
       </div>
-      <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Track Order Live on Map</a>
-      <p style="margin:16px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Or open: ${escapeXml(trackingUrl)}</p>
+      <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Track Order &amp; Rider Live \xB7 \u09B2\u09BE\u0987\u09AD \u099F\u09CD\u09B0\u09CD\u09AF\u09BE\u0995 \u0995\u09B0\u09C1\u09A8</a>
+      <p style="margin:16px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Direct tracking link: ${escapeXml(trackingUrl)}</p>
     </div>
   </body>
 </html>`;
-  const text2 = `Foodora BD \u2014 Order ${input.orderNumber} (${niceStatus})
+  const text2 = `Foodora BD \u2014 Order ${input.orderNumber} (${info.en} / ${info.bn})
 Restaurant: ${input.restaurantName}
-Delivery Area: ${input.deliveryArea}
-Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()})
-${input.riderName ? `Rider: ${input.riderName}
+Delivery Area: ${input.deliveryArea}${input.deliveryAddress ? `
+Address: ${input.deliveryAddress}` : ""}
+Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()}${input.paymentStatus ? ` \xB7 ${input.paymentStatus}` : ""})
+${input.etaMinutes ? `Estimated Arrival: ~${input.etaMinutes} mins
+` : ""}${input.riderName ? `Rider: ${input.riderName}${input.riderPhone ? ` (${input.riderPhone})` : ""}
 ` : ""}${input.statusNote ? `Update: ${input.statusNote}
-` : ""}Track live: ${trackingUrl}`;
+` : ""}Track live on map: ${trackingUrl}`;
   return { subject, trackingUrl, html, text: text2 };
 }
 function pickNearestStandbyRider(candidates, targetLat, targetLng) {
@@ -2412,7 +2460,8 @@ function buildRestaurantUnavailableMessage(restaurantName, status, isOpen, lang 
 }
 function buildAiHelpSystemInstruction(params) {
   const pref = params.langPreference || "auto";
-  const langRule = pref === "bn" ? "Always respond strictly in clear, natural Bengali (\u09AC\u09BE\u0982\u09B2\u09BE script)." : pref === "en" ? "Always respond strictly in clear, helpful English." : "Detect the user language automatically: if they write in Bangla (\u09AC\u09BE\u0982\u09B2\u09BE) or Banglish/Romanized Bengali, respond in clear, helpful Bangla (\u09AC\u09BE\u0982\u09B2\u09BE). If they write in English, respond in English.";
+  const uiIsBn = params.uiLang === "bn";
+  const langRule = pref === "bn" ? "Always respond strictly in clear, natural, everyday Bengali (\u09AC\u09BE\u0982\u09B2\u09BE script). Even if the question contains English words or Banglish, write your entire explanation in natural Bangla (keep brand names/codes like Foodora BD, FOODORA50, bKash, Nagad as needed)." : pref === "en" ? "Always respond strictly in clear, helpful English." : uiIsBn ? "The interface language is currently Bangla (\u09AC\u09BE\u0982\u09B2\u09BE). Respond in clear, natural Bengali (\u09AC\u09BE\u0982\u09B2\u09BE script) by default\u2014including for Banglish or short mixed queries\u2014unless the user explicitly asks in English for an English reply." : 'Detect the user language automatically: if they write in Bangla (\u09AC\u09BE\u0982\u09B2\u09BE script) or Banglish/Romanized Bengali (e.g. "rider kothay", "amar order", "keno"), respond in clear, natural Bangla (\u09AC\u09BE\u0982\u09B2\u09BE script). If they write in English, respond in English.';
   const contextNotes = [
     params.area ? `User selected area: ${params.area}, Bangladesh.` : "",
     params.viewType ? `Current screen: ${params.viewType}.` : "",
@@ -2425,7 +2474,7 @@ function buildAiHelpSystemInstruction(params) {
     "Platform knowledge:",
     '- Ordering: Customers can order directly from the homepage "Order Popular Food Now" dishes or open any restaurant menu, then pay via bKash, Nagad, SSLCommerz, or Cash on Delivery (COD).',
     '- Why "This restaurant is currently unavailable for orders" appears: It means either the restaurant has "Store Open" switched OFF (isOpen = false) in Vendor/Admin Dashboard, or its status is not "approved" yet (e.g. pending/suspended). Re-enabling "Store Open" in Partner/Admin Dashboard or picking an Open restaurant resolves it immediately.',
-    "- Nationwide Map & Location: Users can search any city/thana across all 64 districts of Bangladesh, enter a custom area, drag/click the interactive Google Map pin, or press Back / click outside the map modal to return.",
+    "- Nationwide Map & Location: Users can search any city/thana across all 64 districts of Bangladesh, enter a custom area, click anywhere on the interactive map or drag the pin to set that exact location, or press Back / click outside the map modal to return.",
     '- Live Rider Tracking & ETA: Users can click "Track Rider" in the header or look up orders via Checkout Email + Order Number to see live rider GPS coordinates, nearest standby rider, and estimated arrival time (ETA).',
     "- Partner & Rider Portals: Restaurant owners can register, add custom cuisines/categories/areas, and integrate Partner APIs; Riders anywhere in Bangladesh can apply to join and share live GPS locations.",
     contextNotes
@@ -2908,9 +2957,8 @@ async function getOrCreateUser(uid, email, fullName, defaultRole = "customer") {
     throw new Error("Failed to synchronize user account.", { cause: error });
   }
 }
-async function resolveUserFromHeader(authHeader) {
-  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
-  const token = authHeader.slice("Bearer ".length).trim();
+async function resolveUserFromToken(tokenRaw) {
+  const token = String(tokenRaw || "").trim();
   if (!token) return null;
   const sandboxUser = verifySandboxToken(token);
   if (sandboxUser) {
@@ -2943,6 +2991,10 @@ async function resolveUserFromHeader(authHeader) {
     role: dbUser.role,
     isSandbox: false
   };
+}
+async function resolveUserFromHeader(authHeader) {
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
+  return resolveUserFromToken(authHeader.slice("Bearer ".length));
 }
 var optionalAuth = async (req, _res, next) => {
   try {
@@ -3204,25 +3256,28 @@ async function searchOsmPlaces(query) {
     return [];
   }
 }
-async function reverseOsmGeocode(lat, lng) {
-  const key = `osm-rev:${lat.toFixed(4)},${lng.toFixed(4)}`;
+async function reverseOsmGeocode(lat, lng, lang = "en") {
+  const key = `osm-rev:${lang}:${lat.toFixed(4)},${lng.toFixed(4)}`;
   const cached = getCached(key);
   if (cached) return cached;
   try {
-    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`;
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=${lang === "bn" ? "bn,en" : "en,bn"}`;
     const res = await fetch(url, {
       headers: { "User-Agent": "FoodoraBD-Marketplace/1.0" },
-      signal: AbortSignal.timeout(3500)
+      signal: AbortSignal.timeout(4e3)
     });
     if (!res.ok) throw new Error(`Nominatim reverse HTTP ${res.status}`);
     const data = await res.json();
-    const areaName = data.address?.suburb || data.address?.neighbourhood || data.address?.town || data.address?.city || data.address?.city_district || data.address?.county || data.address?.state_district || data.address?.state || "Bangladesh";
+    const addr = data.address;
+    const primaryLocal = addr?.neighbourhood || addr?.quarter || addr?.suburb || addr?.village || addr?.town || addr?.road;
+    const cityPart = addr?.city || addr?.city_district || addr?.county || addr?.state_district || addr?.state;
+    const areaName = primaryLocal && cityPart && primaryLocal !== cityPart ? `${primaryLocal}, ${cityPart}` : primaryLocal || cityPart || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
     const displayName = data.display_name || `${areaName}, Bangladesh`;
     return setCached(key, { displayName, areaName, source: "OpenStreetMap" }, 10 * 60 * 1e3);
   } catch {
     return {
       displayName: `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}, Bangladesh`,
-      areaName: "Bangladesh",
+      areaName: `Pinned (${lat.toFixed(3)}, ${lng.toFixed(3)})`,
       source: "Fallback"
     };
   }
@@ -3310,6 +3365,32 @@ async function searchMealDbDishes(query) {
 }
 
 // src/services/order-email.ts
+import nodemailer from "nodemailer";
+function getEmailTransportStatus() {
+  const smtpHost = (process.env.SMTP_HOST || "").trim();
+  const smtpUser = (process.env.SMTP_USER || "").trim();
+  const smtpPass = (process.env.SMTP_PASS || "").trim();
+  if (smtpHost && smtpUser && smtpPass) {
+    return {
+      configured: true,
+      provider: "smtp",
+      fromAddress: (process.env.SMTP_FROM || `Foodora BD <${smtpUser}>`).trim()
+    };
+  }
+  const resendKey = (process.env.RESEND_API_KEY || process.env.EMAIL_PROVIDER_API_KEY || "").trim();
+  if (resendKey) {
+    return {
+      configured: true,
+      provider: "resend",
+      fromAddress: (process.env.RESEND_FROM_EMAIL || "Foodora BD <onboarding@resend.dev>").trim()
+    };
+  }
+  return {
+    configured: false,
+    provider: "in_app_email_log",
+    fromAddress: "Foodora BD <orders@foodora.bd>"
+  };
+}
 async function sendAndLogOrderTrackingEmail(params) {
   const emailLower = String(params.customerEmail || "").trim().toLowerCase();
   if (!emailLower || !emailLower.includes("@")) {
@@ -3324,16 +3405,54 @@ async function sendAndLogOrderTrackingEmail(params) {
     customerEmail: emailLower,
     restaurantName: params.restaurantName,
     deliveryArea: params.deliveryArea,
+    deliveryAddress: params.deliveryAddress,
     totalAmount: params.totalAmount,
     paymentMethod: params.paymentMethod,
+    paymentStatus: params.paymentStatus,
     status: params.status,
     statusNote: params.statusNote,
-    riderName: params.riderName
+    riderName: params.riderName,
+    riderPhone: params.riderPhone,
+    etaMinutes: params.etaMinutes,
+    items: params.items
   });
   let deliveryProvider = "in_app_email_log";
   let providerStatus = "recorded";
+  const smtpHost = (process.env.SMTP_HOST || "").trim();
+  const smtpUser = (process.env.SMTP_USER || "").trim();
+  const smtpPass = (process.env.SMTP_PASS || "").trim();
+  const smtpPort = Number(process.env.SMTP_PORT || 587);
+  const smtpSecure = process.env.SMTP_SECURE === "true" || !process.env.SMTP_SECURE && smtpPort === 465;
   const resendKey = (process.env.RESEND_API_KEY || process.env.EMAIL_PROVIDER_API_KEY || "").trim();
-  if (resendKey) {
+  if (smtpHost && smtpUser && smtpPass) {
+    try {
+      const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: Number.isFinite(smtpPort) ? smtpPort : 587,
+        secure: smtpSecure,
+        auth: {
+          user: smtpUser,
+          pass: smtpPass
+        },
+        connectionTimeout: 6e3,
+        greetingTimeout: 6e3,
+        socketTimeout: 8e3
+      });
+      await transporter.sendMail({
+        from: (process.env.SMTP_FROM || `Foodora BD <${smtpUser}>`).trim(),
+        to: emailLower,
+        subject: payload.subject,
+        text: payload.text,
+        html: payload.html
+      });
+      deliveryProvider = "smtp";
+      providerStatus = "sent";
+    } catch (err) {
+      deliveryProvider = "smtp";
+      providerStatus = `fallback_recorded_smtp_error`;
+      console.warn("SMTP email dispatch failed, recorded in orderEmailLogs:", err instanceof Error ? err.message : err);
+    }
+  } else if (resendKey) {
     try {
       const mailRes = await fetch("https://api.resend.com/emails", {
         method: "POST",
@@ -3342,13 +3461,13 @@ async function sendAndLogOrderTrackingEmail(params) {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          from: process.env.RESEND_FROM_EMAIL || "Foodora BD <orders@foodora.bd>",
+          from: process.env.RESEND_FROM_EMAIL || "Foodora BD <onboarding@resend.dev>",
           to: [emailLower],
           subject: payload.subject,
           html: payload.html,
           text: payload.text
         }),
-        signal: AbortSignal.timeout(4e3)
+        signal: AbortSignal.timeout(5e3)
       });
       if (mailRes.ok) {
         deliveryProvider = "resend";
@@ -3378,6 +3497,213 @@ async function sendAndLogOrderTrackingEmail(params) {
   } catch (err) {
     console.warn("Order email log insert skipped:", err);
     return null;
+  }
+}
+
+// src/services/realtime.ts
+import { WebSocketServer, WebSocket } from "ws";
+import { eq as eq3 } from "drizzle-orm";
+var clients = /* @__PURE__ */ new Map();
+var wss = null;
+var heartbeatTimer = null;
+async function resolveClientMetaFromQuery(params) {
+  const token = params.get("token");
+  const orderIdRaw = Number(params.get("orderId"));
+  const trackingToken = (params.get("trackingToken") || "").trim();
+  let uid = null;
+  let role = null;
+  const restaurantIds = /* @__PURE__ */ new Set();
+  let watchOrderId = null;
+  if (token) {
+    try {
+      const user = await resolveUserFromToken(token);
+      if (user) {
+        uid = user.uid;
+        role = user.role;
+        if (user.role === "restaurant_owner") {
+          const owned = await db.select({ id: restaurants.id }).from(restaurants).where(eq3(restaurants.ownerUid, user.uid));
+          for (const r of owned) restaurantIds.add(r.id);
+        }
+      }
+    } catch {
+    }
+  }
+  if (Number.isInteger(orderIdRaw) && orderIdRaw > 0) {
+    try {
+      const rows = await db.select({
+        id: orders.id,
+        customerUid: orders.customerUid,
+        riderUid: orders.riderUid,
+        trackingToken: orders.trackingToken
+      }).from(orders).where(eq3(orders.id, orderIdRaw)).limit(1);
+      const ord = rows[0];
+      if (ord) {
+        const isAdmin = role === "admin" || role === "super_admin";
+        const isParticipant = Boolean(uid && (ord.customerUid === uid || ord.riderUid === uid));
+        const hasValidTrackingToken = Boolean(
+          trackingToken && ord.trackingToken && trackingToken === ord.trackingToken
+        );
+        if (isAdmin || isParticipant || hasValidTrackingToken) {
+          watchOrderId = ord.id;
+        }
+      }
+    } catch {
+    }
+  }
+  return { uid, role, restaurantIds, watchOrderId };
+}
+function initRealtimeWebSocketServer(httpServer) {
+  if (wss) return wss;
+  wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+  wss.on("connection", async (socket, req) => {
+    const clientId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const url = new URL(req.url || "/ws", "http://localhost");
+    const auth = await resolveClientMetaFromQuery(url.searchParams);
+    const meta = {
+      id: clientId,
+      uid: auth.uid,
+      role: auth.role,
+      restaurantIds: auth.restaurantIds,
+      watchOrderId: auth.watchOrderId,
+      send: (jsonText) => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(jsonText);
+        }
+      },
+      close: () => {
+        try {
+          socket.close();
+        } catch {
+        }
+      }
+    };
+    clients.set(clientId, meta);
+    meta.send(
+      JSON.stringify({
+        type: "connected",
+        payload: { role: auth.role, watchOrderId: auth.watchOrderId },
+        ts: Date.now()
+      })
+    );
+    socket.on("close", () => {
+      clients.delete(clientId);
+    });
+    socket.on("error", () => {
+      clients.delete(clientId);
+    });
+  });
+  if (!heartbeatTimer) {
+    heartbeatTimer = setInterval(() => {
+      if (!wss) return;
+      for (const client of wss.clients) {
+        if (client.readyState === WebSocket.OPEN) {
+          try {
+            client.ping();
+          } catch {
+          }
+        }
+      }
+    }, 25e3);
+  }
+  return wss;
+}
+async function attachSseRealtimeClient(res, params) {
+  const clientId = `sse-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const auth = await resolveClientMetaFromQuery(params);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+  const meta = {
+    id: clientId,
+    uid: auth.uid,
+    role: auth.role,
+    restaurantIds: auth.restaurantIds,
+    watchOrderId: auth.watchOrderId,
+    send: (jsonText) => {
+      res.write(`data: ${jsonText}
+
+`);
+    },
+    close: () => {
+      try {
+        res.end();
+      } catch {
+      }
+    }
+  };
+  clients.set(clientId, meta);
+  meta.send(
+    JSON.stringify({
+      type: "connected",
+      payload: { role: auth.role, watchOrderId: auth.watchOrderId },
+      ts: Date.now()
+    })
+  );
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch {
+      clearInterval(keepAlive);
+      clients.delete(clientId);
+    }
+  }, 2e4);
+  return () => {
+    clearInterval(keepAlive);
+    clients.delete(clientId);
+  };
+}
+function shouldReceiveOrderEvent(client, payload) {
+  if (client.role === "admin" || client.role === "super_admin") return true;
+  if (client.watchOrderId && client.watchOrderId === payload.orderId) return true;
+  if (client.uid && client.uid === payload.customerUid) return true;
+  if (client.uid && payload.restaurantOwnerUid && client.uid === payload.restaurantOwnerUid) return true;
+  if (client.restaurantIds.has(payload.restaurantId)) return true;
+  if (client.uid && payload.riderUid && client.uid === payload.riderUid) return true;
+  if (client.role === "rider" && !payload.riderUid && payload.deliveryMode !== "restaurant" && ["confirmed", "accepted", "preparing", "ready"].includes(payload.status)) {
+    return true;
+  }
+  return false;
+}
+function broadcastOrderEvent(type, payload) {
+  if (clients.size === 0) return;
+  const serialized = JSON.stringify({
+    type,
+    payload: { ...payload, updatedAt: payload.updatedAt || (/* @__PURE__ */ new Date()).toISOString() },
+    ts: Date.now()
+  });
+  for (const client of clients.values()) {
+    if (shouldReceiveOrderEvent(client, payload)) {
+      try {
+        client.send(serialized);
+      } catch {
+        clients.delete(client.id);
+      }
+    }
+  }
+}
+function broadcastNotificationEvent(payload) {
+  if (clients.size === 0) return;
+  const serialized = JSON.stringify({
+    type: "notification:created",
+    payload,
+    ts: Date.now()
+  });
+  for (const client of clients.values()) {
+    const matchesUid = Boolean(
+      payload.recipientUid && client.uid && client.uid === payload.recipientUid
+    );
+    const matchesRole = Boolean(
+      payload.roleTarget && (payload.roleTarget === "all" || client.role && client.role === payload.roleTarget)
+    );
+    const isAdmin = client.role === "admin" || client.role === "super_admin";
+    if (matchesUid || matchesRole || isAdmin && payload.roleTarget === "super_admin") {
+      try {
+        client.send(serialized);
+      } catch {
+        clients.delete(client.id);
+      }
+    }
   }
 }
 
@@ -3534,14 +3860,14 @@ async function settleOrderCommissionIdempotent(orderId) {
   await db.transaction(async (tx) => {
     const existing = await tx.select().from(commissionLedger).where(
       and2(
-        eq3(commissionLedger.orderId, orderId),
-        eq3(commissionLedger.entryType, "commission_earned")
+        eq4(commissionLedger.orderId, orderId),
+        eq4(commissionLedger.entryType, "commission_earned")
       )
     ).limit(1);
     if (existing.length > 0) {
       return;
     }
-    const orderRows = await tx.select().from(orders).where(eq3(orders.id, orderId)).limit(1);
+    const orderRows = await tx.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
     if (orderRows.length === 0) return;
     const order = orderRows[0];
     await tx.insert(commissionLedger).values({
@@ -3605,11 +3931,20 @@ app.get("/api/public-config", async (_req, res) => {
       mapsApiKey: process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || "",
       gateways: getGatewayAvailability(),
       paymentGateways: paymentGatewaysList,
+      emailTransport: getEmailTransportStatus(),
       settings
     });
   } catch (error) {
     res.status(500).json({ error: error.message || "Failed to load public config" });
   }
+});
+app.get("/api/realtime/stream", async (req, res) => {
+  const qs = new URLSearchParams();
+  if (typeof req.query.token === "string") qs.set("token", req.query.token);
+  if (typeof req.query.orderId === "string") qs.set("orderId", req.query.orderId);
+  if (typeof req.query.trackingToken === "string") qs.set("trackingToken", req.query.trackingToken);
+  const cleanup = await attachSseRealtimeClient(res, qs);
+  req.on("close", cleanup);
 });
 app.post("/api/auth/sync", requireAuth, async (req, res) => {
   res.json({ user: req.user });
@@ -3674,7 +4009,7 @@ function getFallbackAdminPin() {
   return process.env.ADMIN_ACCESS_PIN || "2026";
 }
 async function verifyAdminPinValue(pin) {
-  const rows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq3(localCredentials.email, ADMIN_PIN_VAULT_KEY)).limit(1);
+  const rows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq4(localCredentials.email, ADMIN_PIN_VAULT_KEY)).limit(1);
   if (rows.length > 0) {
     return verifyPasswordScrypt(pin, rows[0].passwordHash);
   }
@@ -3687,7 +4022,7 @@ async function verifyAdminPinValue(pin) {
 async function verifyAdminPinForEmail(email, pin) {
   const normalized = email.trim().toLowerCase();
   if (!normalized) return false;
-  const specificRows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq3(localCredentials.email, adminPinKeyForEmail(normalized))).limit(1);
+  const specificRows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq4(localCredentials.email, adminPinKeyForEmail(normalized))).limit(1);
   if (specificRows.length > 0) {
     return verifyPasswordScrypt(pin, specificRows[0].passwordHash);
   }
@@ -3719,7 +4054,7 @@ app.post("/api/auth/admin-pin", async (req, res) => {
     let dbUser = existingRows[0];
     if (dbUser) {
       if (dbUser.role !== assignedRole) {
-        const updated = await db.update(users).set({ role: assignedRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq3(users.id, dbUser.id)).returning();
+        const updated = await db.update(users).set({ role: assignedRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq4(users.id, dbUser.id)).returning();
         dbUser = updated[0];
       }
     } else {
@@ -3794,7 +4129,7 @@ app.post(
       const targetRole = isProtectedSuperAdminEmail(targetEmail) ? "super_admin" : existingTarget[0]?.role === "super_admin" ? "super_admin" : "admin";
       if (existingTarget.length > 0) {
         if (existingTarget[0].role !== targetRole) {
-          await db.update(users).set({ role: targetRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq3(users.id, existingTarget[0].id));
+          await db.update(users).set({ role: targetRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq4(users.id, existingTarget[0].id));
         }
       } else {
         await getOrCreateUser(
@@ -3845,7 +4180,7 @@ app.post("/api/auth/register", async (req, res) => {
   const fullName = parsed.data.fullName.trim();
   const requestedRole = parsed.data.role || "customer";
   const attemptRegister = async () => {
-    const existingCred = await db.select({ uid: localCredentials.uid }).from(localCredentials).where(eq3(localCredentials.email, emailLower)).limit(1);
+    const existingCred = await db.select({ uid: localCredentials.uid }).from(localCredentials).where(eq4(localCredentials.email, emailLower)).limit(1);
     if (existingCred.length > 0) {
       return { status: 409, body: { error: "An account with this email already exists. Please sign in." } };
     }
@@ -3927,7 +4262,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
   const emailLower = parsed.data.email.trim().toLowerCase();
   const attemptLogin = async () => {
-    const credRows = await db.select().from(localCredentials).where(eq3(localCredentials.email, emailLower)).limit(1);
+    const credRows = await db.select().from(localCredentials).where(eq4(localCredentials.email, emailLower)).limit(1);
     if (credRows.length === 0) {
       try {
         const { data: supaAuth, error: supaErr } = await supabaseServer.auth.signInWithPassword({
@@ -3968,7 +4303,7 @@ app.post("/api/auth/login", async (req, res) => {
     if (!verifyPasswordScrypt(parsed.data.password, storedHash)) {
       return { status: 401, body: { error: "Incorrect password. Please try again." } };
     }
-    const userRows = await db.select().from(users).where(eq3(users.uid, uid)).limit(1);
+    const userRows = await db.select().from(users).where(eq4(users.uid, uid)).limit(1);
     const dbUser = userRows[0];
     if (dbUser?.status === "suspended") {
       return { status: 403, body: { error: "This account has been suspended by an administrator." } };
@@ -4019,7 +4354,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   try {
     const [existingUsers, existingCreds] = await Promise.all([
       db.select().from(users).where(sql3`lower(${users.email}) = ${emailLower}`).limit(1),
-      db.select().from(localCredentials).where(eq3(localCredentials.email, emailLower)).limit(1)
+      db.select().from(localCredentials).where(eq4(localCredentials.email, emailLower)).limit(1)
     ]);
     const userRow = existingUsers[0];
     if (!userRow && existingCreds.length === 0) {
@@ -4113,7 +4448,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
   try {
     const [existingUsers, existingCreds] = await Promise.all([
       db.select().from(users).where(sql3`lower(${users.email}) = ${emailLower}`).limit(1),
-      db.select().from(localCredentials).where(eq3(localCredentials.email, emailLower)).limit(1)
+      db.select().from(localCredentials).where(eq4(localCredentials.email, emailLower)).limit(1)
     ]);
     const userRow = existingUsers[0];
     if (!userRow && existingCreds.length === 0) {
@@ -4132,7 +4467,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
       }
     } else {
       const resetKey = pwResetKeyForEmail(emailLower);
-      const tokenRows = await db.select().from(localCredentials).where(eq3(localCredentials.email, resetKey)).limit(1);
+      const tokenRows = await db.select().from(localCredentials).where(eq4(localCredentials.email, resetKey)).limit(1);
       if (tokenRows.length === 0) {
         return res.status(401).json({
           error: "Reset code not found or already used. Please request a new code."
@@ -4142,7 +4477,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
       const expMs = Number(sepIdx > 0 ? tokenRows[0].passwordHash.slice(0, sepIdx) : "0");
       const storedOtpHash = sepIdx > 0 ? tokenRows[0].passwordHash.slice(sepIdx + 1) : "";
       if (!expMs || expMs < Date.now()) {
-        await db.delete(localCredentials).where(eq3(localCredentials.email, resetKey));
+        await db.delete(localCredentials).where(eq4(localCredentials.email, resetKey));
         return res.status(401).json({ error: "Reset code has expired. Please request a new one." });
       }
       if (!verifyPasswordScrypt(parsed.data.code, storedOtpHash)) {
@@ -4170,7 +4505,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
           role
         }).onConflictDoNothing();
       }
-      await tx.delete(localCredentials).where(eq3(localCredentials.email, pwResetKeyForEmail(emailLower)));
+      await tx.delete(localCredentials).where(eq4(localCredentials.email, pwResetKeyForEmail(emailLower)));
     });
     try {
       await db.insert(auditLogs).values({
@@ -4264,7 +4599,7 @@ app.post("/api/coupons/validate", async (req, res) => {
     return res.status(400).json({ error: "Invalid coupon request" });
   }
   try {
-    const rows = await db.select().from(coupons).where(eq3(coupons.code, parsed.data.code.trim().toUpperCase())).limit(1);
+    const rows = await db.select().from(coupons).where(eq4(coupons.code, parsed.data.code.trim().toUpperCase())).limit(1);
     if (rows.length === 0) {
       return res.status(404).json({ valid: false, reason: "Coupon code not found" });
     }
@@ -4305,7 +4640,8 @@ app.get("/api/free/geocode", async (req, res) => {
 app.get("/api/free/reverse-geocode", async (req, res) => {
   const lat = Number(req.query.lat) || 23.7949;
   const lng = Number(req.query.lng) || 90.4144;
-  const result = await reverseOsmGeocode(lat, lng);
+  const lang = req.query.lang === "bn" ? "bn" : "en";
+  const result = await reverseOsmGeocode(lat, lng, lang);
   res.json(result);
 });
 app.get("/api/free/route", async (req, res) => {
@@ -4340,7 +4676,7 @@ app.post("/api/delivery/quote", async (req, res) => {
     return res.status(400).json({ error: "Invalid delivery quote parameters" });
   }
   try {
-    const rows = await db.select().from(restaurants).where(eq3(restaurants.id, parsed.data.restaurantId)).limit(1);
+    const rows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
     if (rows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
     const rest = rows[0];
     const provider = getDeliveryProvider(parsed.data.deliveryMode);
@@ -4460,7 +4796,7 @@ app.get("/api/orders/track-by-email", async (req, res) => {
       const ord = matched[0];
       let matches = doesEmailMatchOrder(ord.customerEmail, email);
       if (!matches && ord.customerUid) {
-        const custUsers = await db.select().from(users).where(eq3(users.uid, ord.customerUid)).limit(1);
+        const custUsers = await db.select().from(users).where(eq4(users.uid, ord.customerUid)).limit(1);
         if (custUsers[0] && doesEmailMatchOrder(custUsers[0].email, email)) {
           matches = true;
         }
@@ -4475,7 +4811,7 @@ app.get("/api/orders/track-by-email", async (req, res) => {
       if (matched.length === 0) {
         const custUsers = await db.select().from(users).where(sql3`lower(${users.email}) = ${email}`).limit(1);
         if (custUsers[0]) {
-          matched = await db.select().from(orders).where(eq3(orders.customerUid, custUsers[0].uid)).orderBy(desc2(orders.createdAt)).limit(1);
+          matched = await db.select().from(orders).where(eq4(orders.customerUid, custUsers[0].uid)).orderBy(desc2(orders.createdAt)).limit(1);
         }
       }
       if (matched.length === 0) {
@@ -4532,7 +4868,7 @@ app.post("/api/orders/:id/send-tracking-email", optionalAuth, async (req, res) =
     return res.status(400).json({ error: "Please enter a valid email address." });
   }
   try {
-    const orderRows = await db.select().from(orders).where(eq3(orders.id, id)).limit(1);
+    const orderRows = await db.select().from(orders).where(eq4(orders.id, id)).limit(1);
     if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
     let order = orderRows[0];
     const isAdmin = req.user?.role === "super_admin" || req.user?.role === "admin";
@@ -4549,9 +4885,13 @@ app.post("/api/orders/:id/send-tracking-email", optionalAuth, async (req, res) =
     }
     const nextToken = order.trackingToken || crypto3.randomBytes(12).toString("hex");
     if (targetEmail !== order.customerEmail || nextToken !== order.trackingToken) {
-      const upd = await db.update(orders).set({ customerEmail: targetEmail, trackingToken: nextToken, updatedAt: /* @__PURE__ */ new Date() }).where(eq3(orders.id, order.id)).returning();
+      const upd = await db.update(orders).set({ customerEmail: targetEmail, trackingToken: nextToken, updatedAt: /* @__PURE__ */ new Date() }).where(eq4(orders.id, order.id)).returning();
       order = upd[0] || order;
     }
+    const [restRows, riderRows] = await Promise.all([
+      db.select({ lat: restaurants.lat, lng: restaurants.lng }).from(restaurants).where(eq4(restaurants.id, order.restaurantId)).limit(1),
+      order.riderUid ? db.select({ phone: riders.phone }).from(riders).where(eq4(riders.uid, order.riderUid)).limit(1) : Promise.resolve([])
+    ]);
     const emailLog = await sendAndLogOrderTrackingEmail({
       origin: getRequestOrigin(req),
       orderId: order.id,
@@ -4561,18 +4901,24 @@ app.post("/api/orders/:id/send-tracking-email", optionalAuth, async (req, res) =
       customerEmail: targetEmail,
       restaurantName: order.restaurantName,
       deliveryArea: order.deliveryArea,
+      deliveryAddress: order.deliveryAddress,
       totalAmount: order.totalAmount,
       paymentMethod: order.paymentMethod,
+      paymentStatus: order.paymentStatus,
       status: order.status,
       statusEvent: order.status,
       statusNote: `Live tracking update requested (${order.status.replace(/_/g, " ")})`,
-      riderName: order.riderName
+      riderName: order.riderName,
+      riderPhone: riderRows[0]?.phone || null,
+      etaMinutes: order.estimatedMinutes,
+      items: order.itemsSnapshotJson
     });
     return res.json({
       ok: true,
       customerEmail: targetEmail,
       emailLog,
-      trackingUrl: emailLog?.trackingUrl || ""
+      trackingUrl: emailLog?.trackingUrl || "",
+      restaurantLat: restRows[0]?.lat ?? null
     });
   } catch (error) {
     return res.status(500).json({ error: error.message || "Failed to send tracking email" });
@@ -4621,7 +4967,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       });
     }
     const created = await db.transaction(async (tx) => {
-      const restRows = await tx.select().from(restaurants).where(eq3(restaurants.id, input.restaurantId)).limit(1);
+      const restRows = await tx.select().from(restaurants).where(eq4(restaurants.id, input.restaurantId)).limit(1);
       if (restRows.length === 0) throw new Error("Restaurant not found");
       const rest = restRows[0];
       if (rest.status !== "approved" || !rest.isOpen) {
@@ -4629,7 +4975,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
           buildRestaurantUnavailableMessage(rest.name, rest.status, rest.isOpen, "en")
         );
       }
-      const dbMenu = await tx.select().from(foodItems).where(eq3(foodItems.restaurantId, rest.id));
+      const dbMenu = await tx.select().from(foodItems).where(eq4(foodItems.restaurantId, rest.id));
       const snapshotItems = [];
       let subtotal = 0;
       for (const reqItem of input.items) {
@@ -4689,7 +5035,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       let deliveryFeeAfterCoupon = quote.fee;
       let appliedCouponCode = "";
       if (input.couponCode && input.couponCode.trim()) {
-        const cRows = await tx.select().from(coupons).where(eq3(coupons.code, input.couponCode.trim().toUpperCase())).limit(1);
+        const cRows = await tx.select().from(coupons).where(eq4(coupons.code, input.couponCode.trim().toUpperCase())).limit(1);
         if (cRows.length > 0) {
           const c = cRows[0];
           const evalRes = evaluateCoupon(
@@ -4712,7 +5058,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
             discountAmount = evalRes.discountAmount;
             deliveryFeeAfterCoupon = evalRes.deliveryFeeAfterCoupon;
             appliedCouponCode = c.code;
-            await tx.update(coupons).set({ usedCount: sql3`${coupons.usedCount} + 1` }).where(eq3(coupons.id, c.id));
+            await tx.update(coupons).set({ usedCount: sql3`${coupons.usedCount} + 1` }).where(eq4(coupons.id, c.id));
           }
         }
       }
@@ -4808,7 +5154,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
           relatedOrderId: newOrder.id
         }
       ]);
-      return { order: newOrder, paymentSession: paymentInit, deliveryDispatch };
+      return { order: newOrder, paymentSession: paymentInit, deliveryDispatch, restaurantOwnerUid: rest.ownerUid };
     });
     const emailLog = resolvedCustomerEmail ? await sendAndLogOrderTrackingEmail({
       origin: getRequestOrigin(req),
@@ -4819,12 +5165,45 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       customerEmail: resolvedCustomerEmail,
       restaurantName: created.order.restaurantName,
       deliveryArea: created.order.deliveryArea,
+      deliveryAddress: created.order.deliveryAddress,
       totalAmount: created.order.totalAmount,
       paymentMethod: created.order.paymentMethod,
+      paymentStatus: created.order.paymentStatus,
       status: created.order.status,
       statusEvent: "confirmed",
-      statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`
+      statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`,
+      etaMinutes: created.order.estimatedMinutes,
+      items: created.order.itemsSnapshotJson
     }) : null;
+    broadcastOrderEvent("order:created", {
+      orderId: created.order.id,
+      orderNumber: created.order.orderNumber,
+      restaurantId: created.order.restaurantId,
+      restaurantName: created.order.restaurantName,
+      restaurantOwnerUid: created.restaurantOwnerUid,
+      customerUid: created.order.customerUid,
+      customerName: created.order.customerName,
+      status: created.order.status,
+      deliveryMode: created.order.deliveryMode,
+      deliveryArea: created.order.deliveryArea,
+      totalAmount: created.order.totalAmount
+    });
+    broadcastNotificationEvent({
+      recipientUid: created.restaurantOwnerUid,
+      roleTarget: "restaurant_owner",
+      title: `New Order ${created.order.orderNumber}`,
+      message: `\u09F3${created.order.totalAmount} order from ${created.order.customerName} (${created.order.deliveryArea})`,
+      type: "order",
+      relatedOrderId: created.order.id
+    });
+    broadcastNotificationEvent({
+      recipientUid: created.order.customerUid,
+      roleTarget: "customer",
+      title: `Order ${created.order.orderNumber} Confirmed`,
+      message: `Your order from ${created.order.restaurantName} has been received.`,
+      type: "order",
+      relatedOrderId: created.order.id
+    });
     res.status(201).json({ ...created, emailLog });
   } catch (error) {
     console.error("Order creation failed:", error);
@@ -4839,7 +5218,7 @@ app.post("/api/payments/verify", requireAuth, async (req, res) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid verification payload" });
   try {
-    const orderRows = await db.select().from(orders).where(eq3(orders.id, parsed.data.orderId)).limit(1);
+    const orderRows = await db.select().from(orders).where(eq4(orders.id, parsed.data.orderId)).limit(1);
     if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
     const order = orderRows[0];
     if (order.paymentStatus === "paid") {
@@ -4862,12 +5241,47 @@ app.post("/api/payments/verify", requireAuth, async (req, res) => {
       paymentStatus: "paid",
       paymentTxId: verification.transactionId,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(eq3(orders.id, order.id)).returning();
+    }).where(eq4(orders.id, order.id)).returning();
     await db.insert(orderStatusHistory).values({
       orderId: order.id,
       status: order.status,
       note: verification.message,
       actorUid: req.user.uid
+    });
+    if (updated[0].customerEmail) {
+      await sendAndLogOrderTrackingEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        customerName: updated[0].customerName,
+        customerEmail: updated[0].customerEmail,
+        restaurantName: updated[0].restaurantName,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: updated[0].status,
+        statusEvent: "payment_verified",
+        statusNote: verification.message,
+        riderName: updated[0].riderName,
+        etaMinutes: updated[0].estimatedMinutes,
+        items: updated[0].itemsSnapshotJson
+      });
+    }
+    broadcastOrderEvent("order:updated", {
+      orderId: updated[0].id,
+      orderNumber: updated[0].orderNumber,
+      restaurantId: updated[0].restaurantId,
+      restaurantName: updated[0].restaurantName,
+      customerUid: updated[0].customerUid,
+      riderUid: updated[0].riderUid,
+      riderName: updated[0].riderName,
+      status: updated[0].status,
+      deliveryMode: updated[0].deliveryMode,
+      deliveryArea: updated[0].deliveryArea,
+      totalAmount: updated[0].totalAmount
     });
     res.json({ verified: true, order: updated[0], message: verification.message });
   } catch (error) {
@@ -4878,7 +5292,7 @@ app.post("/api/payments/webhook/:code", async (req, res) => {
   const code = normalizeGatewayCode(String(req.params.code || ""));
   if (!code) return res.status(400).json({ error: "Invalid gateway code" });
   try {
-    const gwRows = await db.select().from(paymentGateways).where(eq3(paymentGateways.code, code)).limit(1);
+    const gwRows = await db.select().from(paymentGateways).where(eq4(paymentGateways.code, code)).limit(1);
     const gateway = gwRows[0];
     if (!gateway) return res.status(404).json({ error: `Payment gateway "${code}" not registered` });
     const expectedSecret = String(gateway.webhookSecret || "").trim();
@@ -4897,7 +5311,7 @@ app.post("/api/payments/webhook/:code", async (req, res) => {
     if (!orderNumber && !txId) {
       return res.status(400).json({ error: "orderNumber or transactionId is required" });
     }
-    const matchingOrders = orderNumber ? await db.select().from(orders).where(eq3(orders.orderNumber, orderNumber)).limit(1) : await db.select().from(orders).where(eq3(orders.paymentTxId, txId)).limit(1);
+    const matchingOrders = orderNumber ? await db.select().from(orders).where(eq4(orders.orderNumber, orderNumber)).limit(1) : await db.select().from(orders).where(eq4(orders.paymentTxId, txId)).limit(1);
     if (matchingOrders.length === 0) {
       return res.status(404).json({ error: "Matching order not found" });
     }
@@ -4906,7 +5320,7 @@ app.post("/api/payments/webhook/:code", async (req, res) => {
       paymentStatus: nextPaymentStatus,
       paymentTxId: txId || targetOrder.paymentTxId,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(eq3(orders.id, targetOrder.id)).returning();
+    }).where(eq4(orders.id, targetOrder.id)).returning();
     await db.insert(orderStatusHistory).values({
       orderId: targetOrder.id,
       status: targetOrder.status,
@@ -4938,12 +5352,12 @@ app.post("/api/reviews", requireAuth, async (req, res) => {
       foodRating: parsed.data.foodRating,
       comment: parsed.data.comment
     }).returning();
-    const allReviews = await db.select().from(reviews).where(eq3(reviews.restaurantId, parsed.data.restaurantId));
+    const allReviews = await db.select().from(reviews).where(eq4(reviews.restaurantId, parsed.data.restaurantId));
     const avg = allReviews.reduce((s, r) => s + r.rating, 0) / Math.max(1, allReviews.length);
     await db.update(restaurants).set({
       rating: avg.toFixed(1),
       reviewCount: sql3`${restaurants.reviewCount} + 1`
-    }).where(eq3(restaurants.id, parsed.data.restaurantId));
+    }).where(eq4(restaurants.id, parsed.data.restaurantId));
     res.status(201).json({ review: inserted[0] });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -5006,7 +5420,7 @@ app.post("/api/restaurants/register", requireAuth, async (req, res) => {
       status: isOwnerAdmin ? "approved" : "pending"
     }).returning();
     if (req.user.role === "customer") {
-      await db.update(users).set({ role: "restaurant_owner", fullName: parsed.data.ownerName }).where(eq3(users.uid, req.user.uid));
+      await db.update(users).set({ role: "restaurant_owner", fullName: parsed.data.ownerName }).where(eq4(users.uid, req.user.uid));
     }
     await db.insert(notifications).values({
       recipientUid: "demo-admin-uid",
@@ -5056,7 +5470,7 @@ app.post(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid food item details" });
     try {
-      const restRows = await db.select().from(restaurants).where(eq3(restaurants.id, parsed.data.restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
       if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
@@ -5089,9 +5503,9 @@ app.patch(
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId)) return res.status(400).json({ error: "Invalid item ID" });
     try {
-      const itemRows = await db.select().from(foodItems).where(eq3(foodItems.id, itemId)).limit(1);
+      const itemRows = await db.select().from(foodItems).where(eq4(foodItems.id, itemId)).limit(1);
       if (itemRows.length === 0) return res.status(404).json({ error: "Food item not found" });
-      const restRows = await db.select().from(restaurants).where(eq3(restaurants.id, itemRows[0].restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, itemRows[0].restaurantId)).limit(1);
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && restRows[0]?.ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden" });
@@ -5108,7 +5522,7 @@ app.patch(
         price: typeof req.body.price === "number" && req.body.price > 0 ? req.body.price : itemRows[0].price,
         discountPrice: req.body.discountPrice === null ? null : typeof req.body.discountPrice === "number" && req.body.discountPrice > 0 ? req.body.discountPrice : itemRows[0].discountPrice,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(foodItems.id, itemId)).returning();
+      }).where(eq4(foodItems.id, itemId)).returning();
       res.json({ item: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5123,14 +5537,14 @@ app.delete(
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId)) return res.status(400).json({ error: "Invalid item ID" });
     try {
-      const itemRows = await db.select().from(foodItems).where(eq3(foodItems.id, itemId)).limit(1);
+      const itemRows = await db.select().from(foodItems).where(eq4(foodItems.id, itemId)).limit(1);
       if (itemRows.length === 0) return res.status(404).json({ error: "Item not found" });
-      const restRows = await db.select().from(restaurants).where(eq3(restaurants.id, itemRows[0].restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, itemRows[0].restaurantId)).limit(1);
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && restRows[0]?.ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      await db.delete(foodItems).where(eq3(foodItems.id, itemId));
+      await db.delete(foodItems).where(eq4(foodItems.id, itemId));
       res.json({ deleted: true });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5153,18 +5567,18 @@ async function resolvePartnerRestaurant(req) {
   const rawKey = extractPartnerApiKey(req);
   if (!rawKey) return { ok: false, error: "Missing X-Partner-API-Key header", status: 401 };
   const keyHash = hashPartnerApiKey(rawKey);
-  const keyRows = await db.select().from(partnerApiKeys).where(eq3(partnerApiKeys.keyHash, keyHash)).limit(1);
+  const keyRows = await db.select().from(partnerApiKeys).where(eq4(partnerApiKeys.keyHash, keyHash)).limit(1);
   if (keyRows.length === 0) {
     return { ok: false, error: "Invalid or revoked Partner API key", status: 401 };
   }
-  const restRows = await db.select().from(restaurants).where(eq3(restaurants.id, keyRows[0].restaurantId)).limit(1);
+  const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, keyRows[0].restaurantId)).limit(1);
   if (restRows.length === 0) {
     return { ok: false, error: "Linked restaurant no longer exists", status: 404 };
   }
   if (restRows[0].status === "suspended" || restRows[0].status === "rejected") {
     return { ok: false, error: "Restaurant account is not active for Partner API access", status: 403 };
   }
-  await db.update(partnerApiKeys).set({ lastUsedAt: /* @__PURE__ */ new Date() }).where(eq3(partnerApiKeys.id, keyRows[0].id));
+  await db.update(partnerApiKeys).set({ lastUsedAt: /* @__PURE__ */ new Date() }).where(eq4(partnerApiKeys.id, keyRows[0].id));
   return { ok: true, restaurant: restRows[0], apiKeyRow: keyRows[0] };
 }
 app.get(
@@ -5175,7 +5589,7 @@ app.get(
     try {
       const requestedId = Number(req.query.restaurantId);
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
-      let restRows = Number.isInteger(requestedId) && requestedId > 0 ? await db.select().from(restaurants).where(eq3(restaurants.id, requestedId)).limit(1) : await db.select().from(restaurants).where(eq3(restaurants.ownerUid, req.user.uid)).limit(1);
+      let restRows = Number.isInteger(requestedId) && requestedId > 0 ? await db.select().from(restaurants).where(eq4(restaurants.id, requestedId)).limit(1) : await db.select().from(restaurants).where(eq4(restaurants.ownerUid, req.user.uid)).limit(1);
       if (restRows.length === 0 && isAdmin && !(Number.isInteger(requestedId) && requestedId > 0)) {
         restRows = await db.select().from(restaurants).limit(1);
       }
@@ -5185,7 +5599,7 @@ app.get(
       if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      const keyRows = await db.select().from(partnerApiKeys).where(eq3(partnerApiKeys.restaurantId, restRows[0].id)).limit(1);
+      const keyRows = await db.select().from(partnerApiKeys).where(eq4(partnerApiKeys.restaurantId, restRows[0].id)).limit(1);
       if (keyRows.length === 0) {
         return res.json({
           hasKey: false,
@@ -5223,7 +5637,7 @@ app.post(
       return res.status(400).json({ error: "Invalid API key rotation request" });
     }
     try {
-      const restRows = await db.select().from(restaurants).where(eq3(restaurants.id, parsed.data.restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
       if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
@@ -5272,7 +5686,7 @@ app.get("/api/partner/v1/products", async (req, res) => {
   try {
     const auth = await resolvePartnerRestaurant(req);
     if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
-    const products = await db.select().from(foodItems).where(eq3(foodItems.restaurantId, auth.restaurant.id)).orderBy(desc2(foodItems.id));
+    const products = await db.select().from(foodItems).where(eq4(foodItems.restaurantId, auth.restaurant.id)).orderBy(desc2(foodItems.id));
     res.json({
       restaurant: {
         id: auth.restaurant.id,
@@ -5355,7 +5769,7 @@ app.patch("/api/partner/v1/products/:id", async (req, res) => {
   try {
     const auth = await resolvePartnerRestaurant(req);
     if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
-    const existing = await db.select().from(foodItems).where(and2(eq3(foodItems.id, itemId), eq3(foodItems.restaurantId, auth.restaurant.id))).limit(1);
+    const existing = await db.select().from(foodItems).where(and2(eq4(foodItems.id, itemId), eq4(foodItems.restaurantId, auth.restaurant.id))).limit(1);
     if (existing.length === 0) {
       return res.status(404).json({ error: "Product not found for this partner restaurant" });
     }
@@ -5395,7 +5809,7 @@ app.patch("/api/partner/v1/products/:id", async (req, res) => {
       variationsJson: merged.product.variationsJson,
       addonsJson: merged.product.addonsJson,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(and2(eq3(foodItems.id, itemId), eq3(foodItems.restaurantId, auth.restaurant.id))).returning();
+    }).where(and2(eq4(foodItems.id, itemId), eq4(foodItems.restaurantId, auth.restaurant.id))).returning();
     res.json({ product: updated[0] });
   } catch (error) {
     res.status(500).json({ error: error.message || "Failed to update partner product" });
@@ -5409,7 +5823,7 @@ app.delete("/api/partner/v1/products/:id", async (req, res) => {
   try {
     const auth = await resolvePartnerRestaurant(req);
     if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
-    const deleted = await db.delete(foodItems).where(and2(eq3(foodItems.id, itemId), eq3(foodItems.restaurantId, auth.restaurant.id))).returning();
+    const deleted = await db.delete(foodItems).where(and2(eq4(foodItems.id, itemId), eq4(foodItems.restaurantId, auth.restaurant.id))).returning();
     if (deleted.length === 0) {
       return res.status(404).json({ error: "Product not found for this partner restaurant" });
     }
@@ -5441,7 +5855,7 @@ app.patch(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid restaurant settings" });
     try {
-      const rows = await db.select().from(restaurants).where(eq3(restaurants.id, parsed.data.restaurantId)).limit(1);
+      const rows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && rows[0].ownerUid !== req.user.uid) {
@@ -5461,7 +5875,7 @@ app.patch(
         coverUrl: parsed.data.coverUrl !== void 0 && parsed.data.coverUrl.trim() ? parsed.data.coverUrl.trim() : rows[0].coverUrl,
         description: parsed.data.description !== void 0 ? parsed.data.description.trim() : rows[0].description,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(restaurants.id, rows[0].id)).returning();
+      }).where(eq4(restaurants.id, rows[0].id)).returning();
       res.json({ restaurant: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5483,10 +5897,10 @@ app.patch(
       return res.status(400).json({ error: "Invalid status update" });
     }
     try {
-      const orderRows = await db.select().from(orders).where(eq3(orders.id, orderId)).limit(1);
+      const orderRows = await db.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
       if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
       const order = orderRows[0];
-      const restRows = await db.select().from(restaurants).where(eq3(restaurants.id, order.restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, order.restaurantId)).limit(1);
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && restRows[0]?.ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden: Order belongs to another restaurant" });
@@ -5500,7 +5914,7 @@ app.patch(
         status: parsed.data.status,
         cancelReason: parsed.data.status === "cancelled" ? parsed.data.note || "Cancelled by restaurant" : order.cancelReason,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(orders.id, order.id)).returning();
+      }).where(eq4(orders.id, order.id)).returning();
       await db.insert(orderStatusHistory).values({
         orderId: order.id,
         status: parsed.data.status,
@@ -5528,14 +5942,41 @@ app.patch(
           customerEmail: updated[0].customerEmail,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
+          deliveryAddress: updated[0].deliveryAddress,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
+          paymentStatus: updated[0].paymentStatus,
           status: updated[0].status,
           statusEvent: parsed.data.status,
           statusNote: parsed.data.note || `${order.restaurantName} updated order status`,
-          riderName: updated[0].riderName
+          riderName: updated[0].riderName,
+          etaMinutes: updated[0].estimatedMinutes,
+          items: updated[0].itemsSnapshotJson
         });
       }
+      broadcastOrderEvent("order:updated", {
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        restaurantId: updated[0].restaurantId,
+        restaurantName: updated[0].restaurantName,
+        restaurantOwnerUid: restRows[0]?.ownerUid || null,
+        customerUid: updated[0].customerUid,
+        customerName: updated[0].customerName,
+        riderUid: updated[0].riderUid,
+        riderName: updated[0].riderName,
+        status: updated[0].status,
+        deliveryMode: updated[0].deliveryMode,
+        deliveryArea: updated[0].deliveryArea,
+        totalAmount: updated[0].totalAmount
+      });
+      broadcastNotificationEvent({
+        recipientUid: order.customerUid,
+        roleTarget: "customer",
+        title: `Order ${order.orderNumber}: ${parsed.data.status.replace("_", " ")}`,
+        message: parsed.data.note || `${order.restaurantName} updated your order status.`,
+        type: "order",
+        relatedOrderId: order.id
+      });
       res.json({ order: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5554,7 +5995,7 @@ app.post(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid payout request" });
     try {
-      const restRows = await db.select().from(restaurants).where(eq3(restaurants.id, parsed.data.restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
       if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const rest = restRows[0];
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
@@ -5609,7 +6050,7 @@ app.post("/api/riders/apply", async (req, res) => {
           error: "This email belongs to an Admin account. Please use a separate rider email."
         });
       }
-      const credRows = await db.select().from(localCredentials).where(eq3(localCredentials.email, emailLower)).limit(1);
+      const credRows = await db.select().from(localCredentials).where(eq4(localCredentials.email, emailLower)).limit(1);
       if (credRows.length > 0 && parsed.data.password) {
         if (!verifyPasswordScrypt(parsed.data.password, credRows[0].passwordHash)) {
           return res.status(401).json({
@@ -5622,7 +6063,7 @@ app.post("/api/riders/apply", async (req, res) => {
         phone: parsed.data.phone,
         role: existingUsers[0].role === "restaurant_owner" ? "rider" : "rider",
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(users.uid, uid));
+      }).where(eq4(users.uid, uid));
     } else {
       uid = `rdr-${crypto3.randomBytes(8).toString("hex")}`;
       await db.insert(users).values({
@@ -5740,7 +6181,7 @@ app.post("/api/riders/register", requireAuth, async (req, res) => {
     }).returning();
     let nextUser = req.user;
     if (req.user.role === "customer") {
-      await db.update(users).set({ role: "rider", fullName: parsed.data.fullName }).where(eq3(users.uid, req.user.uid));
+      await db.update(users).set({ role: "rider", fullName: parsed.data.fullName }).where(eq4(users.uid, req.user.uid));
       nextUser = { ...req.user, role: "rider", fullName: parsed.data.fullName };
     }
     const freshToken = signSandboxToken({
@@ -5786,7 +6227,7 @@ app.patch(
     }
     try {
       const riderUid = req.user.role === "super_admin" || req.user.role === "admin" ? "demo-rider-uid" : req.user.uid;
-      const existing = await db.select().from(riders).where(eq3(riders.uid, riderUid)).limit(1);
+      const existing = await db.select().from(riders).where(eq4(riders.uid, riderUid)).limit(1);
       if (existing.length === 0) {
         return res.status(404).json({ error: "Rider profile not found." });
       }
@@ -5797,7 +6238,31 @@ app.patch(
         locationUpdatedAt: /* @__PURE__ */ new Date(),
         isAvailable: typeof parsed.data.isAvailable === "boolean" ? parsed.data.isAvailable : cur.isAvailable,
         zone: parsed.data.zone ? parsed.data.zone.trim() : cur.zone
-      }).where(eq3(riders.uid, riderUid)).returning();
+      }).where(eq4(riders.uid, riderUid)).returning();
+      const activeRiderOrders = await db.select({
+        id: orders.id,
+        orderNumber: orders.orderNumber,
+        restaurantId: orders.restaurantId,
+        restaurantName: orders.restaurantName,
+        customerUid: orders.customerUid,
+        status: orders.status
+      }).from(orders).where(eq4(orders.riderUid, riderUid));
+      for (const ord of activeRiderOrders) {
+        if (!["delivered", "cancelled"].includes(ord.status)) {
+          broadcastOrderEvent("rider:location", {
+            orderId: ord.id,
+            orderNumber: ord.orderNumber,
+            restaurantId: ord.restaurantId,
+            restaurantName: ord.restaurantName,
+            customerUid: ord.customerUid,
+            riderUid,
+            riderName: updated[0].fullName,
+            status: ord.status,
+            lat: updated[0].currentLat,
+            lng: updated[0].currentLng
+          });
+        }
+      }
       res.json({ rider: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5813,7 +6278,7 @@ app.post(
     if (!Number.isInteger(orderId)) return res.status(400).json({ error: "Invalid order ID" });
     try {
       const riderUid = req.user.role === "super_admin" || req.user.role === "admin" ? "demo-rider-uid" : req.user.uid;
-      const orderRows = await db.select().from(orders).where(eq3(orders.id, orderId)).limit(1);
+      const orderRows = await db.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
       if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
       const existingOrder = orderRows[0];
       if (["delivered", "cancelled"].includes(existingOrder.status)) {
@@ -5822,14 +6287,14 @@ app.post(
       if (existingOrder.riderUid && existingOrder.riderUid !== riderUid) {
         return res.status(409).json({ error: "Order has already been claimed by another rider." });
       }
-      const riderRows = await db.select().from(riders).where(eq3(riders.uid, riderUid)).limit(1);
+      const riderRows = await db.select().from(riders).where(eq4(riders.uid, riderUid)).limit(1);
       const riderName = riderRows[0]?.fullName || req.user.fullName;
       const updated = await db.update(orders).set({
         riderUid,
         riderName,
         status: "rider_assigned",
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(orders.id, orderId)).returning();
+      }).where(eq4(orders.id, orderId)).returning();
       await db.insert(orderStatusHistory).values({
         orderId,
         status: "rider_assigned",
@@ -5854,14 +6319,40 @@ app.post(
           customerEmail: updated[0].customerEmail,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
+          deliveryAddress: updated[0].deliveryAddress,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
+          paymentStatus: updated[0].paymentStatus,
           status: updated[0].status,
           statusEvent: "rider_assigned",
           statusNote: `Rider ${riderName} accepted delivery assignment`,
-          riderName
+          riderName,
+          riderPhone: riderRows[0]?.phone || null,
+          etaMinutes: updated[0].estimatedMinutes,
+          items: updated[0].itemsSnapshotJson
         });
       }
+      broadcastOrderEvent("order:updated", {
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        restaurantId: updated[0].restaurantId,
+        restaurantName: updated[0].restaurantName,
+        customerUid: updated[0].customerUid,
+        riderUid: updated[0].riderUid,
+        riderName: updated[0].riderName,
+        status: updated[0].status,
+        deliveryMode: updated[0].deliveryMode,
+        deliveryArea: updated[0].deliveryArea,
+        totalAmount: updated[0].totalAmount
+      });
+      broadcastNotificationEvent({
+        recipientUid: existingOrder.customerUid,
+        roleTarget: "customer",
+        title: "Rider Assigned to Your Order",
+        message: `${riderName} is assigned for ${existingOrder.orderNumber}. Track live rider GPS on your map.`,
+        type: "order",
+        relatedOrderId: existingOrder.id
+      });
       res.json({ order: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5882,7 +6373,7 @@ app.patch(
       return res.status(400).json({ error: "Invalid rider status update" });
     }
     try {
-      const orderRows = await db.select().from(orders).where(eq3(orders.id, orderId)).limit(1);
+      const orderRows = await db.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
       if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
       const order = orderRows[0];
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
@@ -5896,7 +6387,7 @@ app.patch(
         status: parsed.data.status,
         paymentStatus: parsed.data.status === "delivered" && order.paymentMethod === "cod" ? "paid" : order.paymentStatus,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(orders.id, order.id)).returning();
+      }).where(eq4(orders.id, order.id)).returning();
       await db.insert(orderStatusHistory).values({
         orderId: order.id,
         status: parsed.data.status,
@@ -5922,10 +6413,11 @@ app.patch(
           await db.update(riders).set({
             totalDeliveries: sql3`${riders.totalDeliveries} + 1`,
             totalEarnings: sql3`${riders.totalEarnings} + ${Math.max(40, order.deliveryFee)}`
-          }).where(eq3(riders.uid, order.riderUid));
+          }).where(eq4(riders.uid, order.riderUid));
         }
       }
       if (updated[0].customerEmail) {
+        const assignedRiderRows = updated[0].riderUid ? await db.select({ phone: riders.phone }).from(riders).where(eq4(riders.uid, updated[0].riderUid)).limit(1) : [];
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: updated[0].id,
@@ -5935,14 +6427,40 @@ app.patch(
           customerEmail: updated[0].customerEmail,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
+          deliveryAddress: updated[0].deliveryAddress,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
+          paymentStatus: updated[0].paymentStatus,
           status: updated[0].status,
           statusEvent: parsed.data.status,
           statusNote: statusLabels[parsed.data.status] || "Delivery Update",
-          riderName: updated[0].riderName
+          riderName: updated[0].riderName,
+          riderPhone: assignedRiderRows[0]?.phone || null,
+          etaMinutes: updated[0].estimatedMinutes,
+          items: updated[0].itemsSnapshotJson
         });
       }
+      broadcastOrderEvent("order:updated", {
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        restaurantId: updated[0].restaurantId,
+        restaurantName: updated[0].restaurantName,
+        customerUid: updated[0].customerUid,
+        riderUid: updated[0].riderUid,
+        riderName: updated[0].riderName,
+        status: updated[0].status,
+        deliveryMode: updated[0].deliveryMode,
+        deliveryArea: updated[0].deliveryArea,
+        totalAmount: updated[0].totalAmount
+      });
+      broadcastNotificationEvent({
+        recipientUid: order.customerUid,
+        roleTarget: "customer",
+        title: statusLabels[parsed.data.status] || "Delivery Update",
+        message: `${order.orderNumber} (${order.restaurantName}) is now ${parsed.data.status.replace(/_/g, " ")}.`,
+        type: "order",
+        relatedOrderId: order.id
+      });
       res.json({ order: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -6107,7 +6625,7 @@ app.patch(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid admin restaurant update" });
     try {
-      const rows = await db.select().from(restaurants).where(eq3(restaurants.id, id)).limit(1);
+      const rows = await db.select().from(restaurants).where(eq4(restaurants.id, id)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const current = rows[0];
       const updated = await db.update(restaurants).set({
@@ -6134,7 +6652,7 @@ app.patch(
         subscriptionPlan: parsed.data.subscriptionPlan ?? current.subscriptionPlan,
         isSponsored: parsed.data.isSponsored ?? current.isSponsored,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(restaurants.id, id)).returning();
+      }).where(eq4(restaurants.id, id)).returning();
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
         action: `restaurant_update_${parsed.data.status || "config"}`,
@@ -6172,7 +6690,7 @@ app.post(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid product payload" });
     try {
-      const restRows = await db.select().from(restaurants).where(eq3(restaurants.id, parsed.data.restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
       if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const inserted = await db.insert(foodItems).values({
         restaurantId: parsed.data.restaurantId,
@@ -6233,7 +6751,7 @@ app.patch(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid product update payload" });
     try {
-      const existing = await db.select().from(foodItems).where(eq3(foodItems.id, id)).limit(1);
+      const existing = await db.select().from(foodItems).where(eq4(foodItems.id, id)).limit(1);
       if (existing.length === 0) return res.status(404).json({ error: "Product not found" });
       const cur = existing[0];
       const updated = await db.update(foodItems).set({
@@ -6252,7 +6770,7 @@ app.patch(
         variationsJson: parsed.data.variationsJson ?? cur.variationsJson,
         addonsJson: parsed.data.addonsJson ?? cur.addonsJson,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(foodItems.id, id)).returning();
+      }).where(eq4(foodItems.id, id)).returning();
       const visibilityChanged = parsed.data.isVisibleOnStorefront !== void 0 && parsed.data.isVisibleOnStorefront !== cur.isVisibleOnStorefront;
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
@@ -6279,7 +6797,7 @@ app.delete(
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid product ID" });
     try {
-      const deleted = await db.delete(foodItems).where(eq3(foodItems.id, id)).returning();
+      const deleted = await db.delete(foodItems).where(eq4(foodItems.id, id)).returning();
       if (deleted.length === 0) return res.status(404).json({ error: "Product not found" });
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
@@ -6320,7 +6838,7 @@ app.patch(
       return res.status(400).json({ error: "Invalid admin order status payload" });
     }
     try {
-      const rows = await db.select().from(orders).where(eq3(orders.id, orderId)).limit(1);
+      const rows = await db.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: "Order not found" });
       const order = rows[0];
       let nextRiderUid = order.riderUid;
@@ -6330,7 +6848,7 @@ app.patch(
           nextRiderUid = null;
           nextRiderName = null;
         } else {
-          const riderRows = await db.select().from(riders).where(eq3(riders.uid, parsed.data.riderUid)).limit(1);
+          const riderRows = await db.select().from(riders).where(eq4(riders.uid, parsed.data.riderUid)).limit(1);
           nextRiderUid = parsed.data.riderUid;
           nextRiderName = riderRows[0]?.fullName || parsed.data.riderUid;
         }
@@ -6341,7 +6859,7 @@ app.patch(
         riderName: nextRiderName,
         paymentStatus: parsed.data.status === "delivered" && order.paymentMethod === "cod" ? "paid" : order.paymentStatus,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(orders.id, orderId)).returning();
+      }).where(eq4(orders.id, orderId)).returning();
       await db.insert(orderStatusHistory).values({
         orderId,
         status: parsed.data.status,
@@ -6359,6 +6877,7 @@ app.patch(
         details: JSON.stringify(parsed.data)
       });
       if (updated[0].customerEmail) {
+        const assignedRiderRows = updated[0].riderUid ? await db.select({ phone: riders.phone }).from(riders).where(eq4(riders.uid, updated[0].riderUid)).limit(1) : [];
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: updated[0].id,
@@ -6368,14 +6887,32 @@ app.patch(
           customerEmail: updated[0].customerEmail,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
+          deliveryAddress: updated[0].deliveryAddress,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
+          paymentStatus: updated[0].paymentStatus,
           status: updated[0].status,
           statusEvent: parsed.data.status,
           statusNote: parsed.data.note || `Order update: ${parsed.data.status.replace(/_/g, " ")}`,
-          riderName: updated[0].riderName
+          riderName: updated[0].riderName,
+          riderPhone: assignedRiderRows[0]?.phone || null,
+          etaMinutes: updated[0].estimatedMinutes,
+          items: updated[0].itemsSnapshotJson
         });
       }
+      broadcastOrderEvent("order:updated", {
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        restaurantId: updated[0].restaurantId,
+        restaurantName: updated[0].restaurantName,
+        customerUid: updated[0].customerUid,
+        riderUid: updated[0].riderUid,
+        riderName: updated[0].riderName,
+        status: updated[0].status,
+        deliveryMode: updated[0].deliveryMode,
+        deliveryArea: updated[0].deliveryArea,
+        totalAmount: updated[0].totalAmount
+      });
       res.json({ order: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -6391,7 +6928,7 @@ app.patch(
     if (!Number.isInteger(orderId)) return res.status(400).json({ error: "Invalid order ID" });
     try {
       const result = await db.transaction(async (tx) => {
-        const rows = await tx.select().from(orders).where(eq3(orders.id, orderId)).limit(1);
+        const rows = await tx.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
         if (rows.length === 0) throw new Error("Order not found");
         const order = rows[0];
         const updated = await tx.update(orders).set({
@@ -6399,11 +6936,11 @@ app.patch(
           paymentStatus: order.paymentStatus === "paid" ? "refunded" : "failed",
           cancelReason: req.body.reason || "Cancelled & refunded by Super Admin",
           updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq3(orders.id, order.id)).returning();
+        }).where(eq4(orders.id, order.id)).returning();
         const existingReversal = await tx.select().from(commissionLedger).where(
           and2(
-            eq3(commissionLedger.orderId, order.id),
-            eq3(commissionLedger.entryType, "commission_reversal")
+            eq4(commissionLedger.orderId, order.id),
+            eq4(commissionLedger.entryType, "commission_reversal")
           )
         ).limit(1);
         if (existingReversal.length === 0 && order.platformCommission > 0) {
@@ -6433,6 +6970,41 @@ app.patch(
         });
         return updated[0];
       });
+      if (result.customerEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: result.id,
+          orderNumber: result.orderNumber,
+          trackingToken: result.trackingToken,
+          customerName: result.customerName,
+          customerEmail: result.customerEmail,
+          restaurantName: result.restaurantName,
+          deliveryArea: result.deliveryArea,
+          deliveryAddress: result.deliveryAddress,
+          totalAmount: result.totalAmount,
+          paymentMethod: result.paymentMethod,
+          paymentStatus: result.paymentStatus,
+          status: result.status,
+          statusEvent: "cancelled",
+          statusNote: result.cancelReason || "Order cancelled & refunded by Admin",
+          riderName: result.riderName,
+          etaMinutes: result.estimatedMinutes,
+          items: result.itemsSnapshotJson
+        });
+      }
+      broadcastOrderEvent("order:updated", {
+        orderId: result.id,
+        orderNumber: result.orderNumber,
+        restaurantId: result.restaurantId,
+        restaurantName: result.restaurantName,
+        customerUid: result.customerUid,
+        riderUid: result.riderUid,
+        riderName: result.riderName,
+        status: result.status,
+        deliveryMode: result.deliveryMode,
+        deliveryArea: result.deliveryArea,
+        totalAmount: result.totalAmount
+      });
       res.json({ order: result });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -6452,7 +7024,7 @@ app.patch(
         status,
         referenceId: status === "paid" ? `PAY-${Date.now().toString(36).toUpperCase()}` : "",
         processedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(restaurantPayouts.id, id)).returning();
+      }).where(eq4(restaurantPayouts.id, id)).returning();
       if (updated.length === 0) return res.status(404).json({ error: "Payout not found" });
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
@@ -6513,11 +7085,11 @@ app.patch(
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid coupon ID" });
     try {
-      const rows = await db.select().from(coupons).where(eq3(coupons.id, id)).limit(1);
+      const rows = await db.select().from(coupons).where(eq4(coupons.id, id)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: "Coupon not found" });
       const updated = await db.update(coupons).set({
         isActive: typeof req.body.isActive === "boolean" ? req.body.isActive : rows[0].isActive
-      }).where(eq3(coupons.id, id)).returning();
+      }).where(eq4(coupons.id, id)).returning();
       res.json({ coupon: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -6532,7 +7104,7 @@ app.delete(
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid coupon ID" });
     try {
-      await db.delete(coupons).where(eq3(coupons.id, id));
+      await db.delete(coupons).where(eq4(coupons.id, id));
       res.json({ deleted: true });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -6564,7 +7136,7 @@ app.patch(
         sslcommerzSandbox: req.body.sslcommerzSandbox ?? cur.sslcommerzSandbox,
         storefrontConfig: nextStorefront,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq3(platformSettings.id, cur.id)).returning();
+      }).where(eq4(platformSettings.id, cur.id)).returning();
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
         action: "platform_settings_updated",
@@ -6587,7 +7159,7 @@ app.patch(
     if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid user ID" });
     const allowedRoles = ["customer", "restaurant_owner", "rider", "admin", "super_admin"];
     try {
-      const existing = await db.select().from(users).where(eq3(users.id, id)).limit(1);
+      const existing = await db.select().from(users).where(eq4(users.id, id)).limit(1);
       if (existing.length === 0) return res.status(404).json({ error: "User not found" });
       const target = existing[0];
       const nextStatus = req.body.status === "suspended" || req.body.status === "active" ? req.body.status : target.status;
@@ -6604,7 +7176,7 @@ app.patch(
       if (!decision.allowed) {
         return res.status(403).json({ error: decision.reason || "Forbidden: Role change not permitted." });
       }
-      const updated = await db.update(users).set({ status: nextStatus, role: nextRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq3(users.id, id)).returning();
+      const updated = await db.update(users).set({ status: nextStatus, role: nextRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq4(users.id, id)).returning();
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
         action: "user_updated",
@@ -6638,7 +7210,7 @@ app.patch(
       return res.status(400).json({ error: "Invalid rider update payload" });
     }
     try {
-      const existing = await db.select().from(riders).where(eq3(riders.id, id)).limit(1);
+      const existing = await db.select().from(riders).where(eq4(riders.id, id)).limit(1);
       if (existing.length === 0) return res.status(404).json({ error: "Rider not found" });
       const cur = existing[0];
       const hasCoords = typeof parsed.data.currentLat === "number" || typeof parsed.data.currentLng === "number";
@@ -6650,7 +7222,7 @@ app.patch(
         currentLat: typeof parsed.data.currentLat === "number" ? Math.round(parsed.data.currentLat * 1e6) / 1e6 : cur.currentLat,
         currentLng: typeof parsed.data.currentLng === "number" ? Math.round(parsed.data.currentLng * 1e6) / 1e6 : cur.currentLng,
         locationUpdatedAt: hasCoords ? /* @__PURE__ */ new Date() : cur.locationUpdatedAt
-      }).where(eq3(riders.id, id)).returning();
+      }).where(eq4(riders.id, id)).returning();
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
         action: hasCoords ? "rider_gps_override" : "rider_updated",
@@ -6712,7 +7284,7 @@ app.put(
     }
     try {
       await ensureDefaultPaymentGateways();
-      const existing = await db.select().from(paymentGateways).where(eq3(paymentGateways.code, code)).limit(1);
+      const existing = await db.select().from(paymentGateways).where(eq4(paymentGateways.code, code)).limit(1);
       const keepOrReplaceSecret = (incoming, prev) => {
         if (incoming === void 0) return prev || "";
         const clean = incoming.trim();
@@ -6753,7 +7325,7 @@ app.put(
               sslcommerzSandbox: nextValues.mode !== "live",
               updatedAt: /* @__PURE__ */ new Date()
             }
-          ).where(eq3(platformSettings.id, settingsRows[0].id));
+          ).where(eq4(platformSettings.id, settingsRows[0].id));
         }
       }
       await db.insert(auditLogs).values({
@@ -6789,7 +7361,7 @@ app.post(
     if (!code) return res.status(400).json({ error: "Invalid gateway code" });
     try {
       await ensureDefaultPaymentGateways();
-      const rows = await db.select().from(paymentGateways).where(eq3(paymentGateways.code, code)).limit(1);
+      const rows = await db.select().from(paymentGateways).where(eq4(paymentGateways.code, code)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: "Gateway not found" });
       const result = validatePaymentGatewayConfiguration(
         rows[0],
@@ -6814,7 +7386,7 @@ app.delete(
       });
     }
     try {
-      await db.delete(paymentGateways).where(eq3(paymentGateways.code, code));
+      await db.delete(paymentGateways).where(eq4(paymentGateways.code, code));
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
         action: "payment_gateway_deleted",
@@ -6930,6 +7502,13 @@ app.post(
         targetType: "notification",
         targetId: String(inserted[0].id),
         details: JSON.stringify({ targetRole: validated.targetRole, title: validated.title })
+      });
+      broadcastNotificationEvent({
+        recipientUid,
+        roleTarget: validated.targetRole,
+        title: validated.title,
+        message: validated.message,
+        type: validated.type
       });
       res.status(201).json({ notification: inserted[0] });
     } catch (error) {
@@ -7088,9 +7667,9 @@ app.get("/api/notifications", requireAuth, async (req, res) => {
 app.post("/api/notifications/read-all", requireAuth, async (req, res) => {
   await db.update(notifications).set({ isRead: true }).where(
     or2(
-      eq3(notifications.recipientUid, req.user.uid),
-      eq3(notifications.roleTarget, req.user.role),
-      eq3(notifications.roleTarget, "all")
+      eq4(notifications.recipientUid, req.user.uid),
+      eq4(notifications.roleTarget, req.user.role),
+      eq4(notifications.roleTarget, "all")
     )
   );
   res.json({ ok: true });
@@ -7100,11 +7679,11 @@ app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
   if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid notification ID" });
   await db.update(notifications).set({ isRead: true }).where(
     and2(
-      eq3(notifications.id, id),
+      eq4(notifications.id, id),
       or2(
-        eq3(notifications.recipientUid, req.user.uid),
-        eq3(notifications.roleTarget, req.user.role),
-        eq3(notifications.roleTarget, "all")
+        eq4(notifications.recipientUid, req.user.uid),
+        eq4(notifications.roleTarget, req.user.role),
+        eq4(notifications.roleTarget, "all")
       )
     )
   );
@@ -7125,6 +7704,7 @@ function getGeminiHelpClient() {
 var aiHelpRequestSchema = z.object({
   message: z.string().trim().min(1, "Please enter a question.").max(1500),
   langPreference: z.enum(["auto", "bn", "en"]).optional().default("auto"),
+  uiLang: z.enum(["en", "bn"]).optional().default("en"),
   history: z.array(
     z.object({
       role: z.enum(["user", "model"]),
@@ -7137,6 +7717,44 @@ var aiHelpRequestSchema = z.object({
     activeOrderNumber: z.string().trim().max(60).optional()
   }).optional()
 });
+function extractReadableGeminiError(err) {
+  const rawStatus = typeof err?.status === "number" ? err.status : 502;
+  const rawMsg = err instanceof Error ? err.message : "Failed to generate AI Help response.";
+  let parsedMessage = rawMsg;
+  let parsedStatus = rawStatus;
+  if (rawMsg.trim().startsWith("{")) {
+    try {
+      const obj = JSON.parse(rawMsg);
+      if (obj.error?.message) parsedMessage = obj.error.message;
+      else if (obj.message) parsedMessage = obj.message;
+      if (typeof obj.error?.code === "number") parsedStatus = obj.error.code;
+    } catch {
+    }
+  }
+  return {
+    status: parsedStatus >= 400 && parsedStatus < 600 ? parsedStatus : 502,
+    message: parsedMessage
+  };
+}
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error(`${label} timed out after ${Math.round(ms / 1e3)}s`);
+      err.status = 504;
+      reject(err);
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
 app.post("/api/ai/help", optionalAuth, async (req, res) => {
   try {
     const parsed = aiHelpRequestSchema.safeParse(req.body);
@@ -7151,9 +7769,10 @@ app.post("/api/ai/help", optionalAuth, async (req, res) => {
         error: "AI Help is unavailable because GEMINI_API_KEY is not configured in Settings > Secrets."
       });
     }
-    const { message, langPreference, history, context } = parsed.data;
+    const { message, langPreference, uiLang, history, context } = parsed.data;
     const systemInstruction = buildAiHelpSystemInstruction({
       langPreference,
+      uiLang,
       area: context?.area,
       viewType: context?.viewType,
       activeOrderNumber: context?.activeOrderNumber
@@ -7168,30 +7787,60 @@ app.post("/api/ai/help", optionalAuth, async (req, res) => {
         parts: [{ text: message }]
       }
     ];
-    const response = await ai.models.generateContent({
-      model: "gemini-4-hydrogen",
-      contents,
-      config: {
-        systemInstruction,
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
+    const attempts = [
+      { model: "gemini-3.1-flash-lite", thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 9e3 },
+      { model: "gemini-4-hydrogen", thinkingLevel: ThinkingLevel.LOW, timeoutMs: 9e3 },
+      { model: "gemini-3.1-flash-lite", thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 1e4 }
+    ];
+    let reply = "";
+    let usedModel = attempts[0].model;
+    let lastError = null;
+    for (let i = 0; i < attempts.length; i += 1) {
+      const attempt = attempts[i];
+      try {
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model: attempt.model,
+            contents,
+            config: {
+              systemInstruction,
+              thinkingConfig: { thinkingLevel: attempt.thinkingLevel }
+            }
+          }),
+          attempt.timeoutMs,
+          attempt.model
+        );
+        const text2 = (response.text || "").trim();
+        if (!text2) {
+          const emptyErr = new Error("AI Help returned an empty response.");
+          emptyErr.status = 502;
+          throw emptyErr;
+        }
+        reply = text2;
+        usedModel = attempt.model;
+        break;
+      } catch (err) {
+        lastError = err;
+        const { status } = extractReadableGeminiError(err);
+        const isTransient = status === 503 || status === 504 || status === 429 || status === 502;
+        if (!isTransient || i === attempts.length - 1) {
+          throw err;
+        }
+        await new Promise((r) => setTimeout(r, i === 0 ? 400 : 1e3));
       }
-    });
-    const reply = (response.text || "").trim();
-    if (!reply) {
-      return res.status(502).json({
-        error: "AI Help returned an empty response. Please try asking again."
-      });
+    }
+    if (!reply && lastError) {
+      throw lastError;
     }
     return res.json({
       reply,
-      model: "gemini-4-hydrogen"
+      model: usedModel
     });
   } catch (err) {
-    const status = typeof err?.status === "number" ? err.status : 502;
-    const rawMsg = err instanceof Error ? err.message : "Failed to generate AI Help response.";
-    console.error("POST /api/ai/help error:", rawMsg);
-    return res.status(status >= 400 && status < 600 ? status : 502).json({
-      error: rawMsg
+    const { status, message } = extractReadableGeminiError(err);
+    console.error("POST /api/ai/help error:", message);
+    return res.status(status).json({
+      error: message
     });
   }
 });
@@ -7217,8 +7866,10 @@ async function startServer() {
       });
     }
   }
-  app.listen(port, "0.0.0.0", () => {
-    console.log(`Foodora BD server listening on http://0.0.0.0:${port}`);
+  const httpServer = http.createServer(app);
+  initRealtimeWebSocketServer(httpServer);
+  httpServer.listen(port, "0.0.0.0", () => {
+    console.log(`Foodora BD server (HTTP + WS) listening on http://0.0.0.0:${port}`);
   });
 }
 var isServerless = Boolean(

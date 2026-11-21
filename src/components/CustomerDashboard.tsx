@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Heart, MapPin, Package, Plus, Star, User } from 'lucide-react';
-import { apiFetch } from '../lib/api';
+import { ArrowLeft, Heart, MapPin, Package, Plus, Star, User, Volume2, VolumeX } from 'lucide-react';
+import { apiFetch, getAuthToken } from '../lib/api';
 import { BANGLADESH_AREAS } from '../lib/i18n';
 import { formatBdt } from '../lib/marketplace-logic';
+import { playOrderAlertChime, useOrderSoundSetting, useRealtimeEvents } from '../lib/realtime';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
 import type {
@@ -39,6 +40,7 @@ export function CustomerDashboard({
   onBack,
 }: CustomerDashboardProps) {
   const [tab, setTab] = useState<'orders' | 'addresses' | 'favorites'>('orders');
+  const [orderSoundEnabled, setOrderSoundEnabled] = useOrderSoundSetting();
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [addresses, setAddresses] = useState<CustomerAddress[]>([]);
   const [loading, setLoading] = useState(true);
@@ -51,8 +53,8 @@ export function CustomerDashboard({
   const [coords, setCoords] = useState({ lat: BANGLADESH_AREAS[0].lat, lng: BANGLADESH_AREAS[0].lng });
   const [savingAddr, setSavingAddr] = useState(false);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const loadData = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const [ordRes, addrRes] = await Promise.all([
         apiFetch<{ orders: OrderRecord[] }>('/api/customer/orders'),
@@ -63,13 +65,25 @@ export function CustomerDashboard({
     } catch (err) {
       console.error('Failed to load customer workspace:', err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadData();
+    loadData(false);
   }, [loadData]);
+
+  useRealtimeEvents({
+    enabled: Boolean(user?.uid),
+    token: getAuthToken(),
+    pollFallbackMs: 10000,
+    onSync: () => loadData(true),
+    onEvent: (ev) => {
+      if (ev.type === 'order:created' || ev.type === 'order:updated') {
+        loadData(true);
+      }
+    },
+  });
 
   const handleSaveAddress = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -150,7 +164,7 @@ export function CustomerDashboard({
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-6 text-sm tabular-nums">
+        <div className="flex flex-wrap items-center gap-5 text-sm tabular-nums">
           <div>
             <p className="text-xs text-neutral-500">{lang === 'bn' ? 'মোট অর্ডার' : 'Total Orders'}</p>
             <p className="font-bold text-[#2E3138]">{orders.length}</p>
@@ -162,6 +176,54 @@ export function CustomerDashboard({
           <div>
             <p className="text-xs text-neutral-500">{lang === 'bn' ? 'পছন্দ' : 'Favorites'}</p>
             <p className="font-bold text-[#2E3138]">{favoriteRestaurants.length}</p>
+          </div>
+          <div className="flex items-center gap-2.5 sm:pl-4 sm:border-l border-neutral-200">
+            <div className="text-right">
+              <p className="text-xs font-semibold text-[#2E3138] flex items-center gap-1">
+                {orderSoundEnabled ? (
+                  <Volume2 className="w-3.5 h-3.5 text-[#E21B70]" />
+                ) : (
+                  <VolumeX className="w-3.5 h-3.5 text-neutral-400" />
+                )}
+                <span>{lang === 'bn' ? 'অর্ডার সাউন্ড' : 'Order Sound'}</span>
+              </p>
+              <p className="text-[11px] text-neutral-500">
+                {orderSoundEnabled
+                  ? lang === 'bn'
+                    ? 'চালু'
+                    : 'On'
+                  : lang === 'bn'
+                  ? 'বন্ধ'
+                  : 'Muted'}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={orderSoundEnabled}
+              data-testid="customer-order-sound-toggle"
+              aria-label={
+                lang === 'bn'
+                  ? 'অর্ডার অ্যালার্ট সাউন্ড চালু বা বন্ধ করুন'
+                  : 'Toggle order alert sound'
+              }
+              onClick={() => {
+                const next = !orderSoundEnabled;
+                setOrderSoundEnabled(next);
+                if (next) {
+                  playOrderAlertChime('new_order', { force: true });
+                }
+              }}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-[#E21B70]/40 ${
+                orderSoundEnabled ? 'bg-[#E21B70]' : 'bg-neutral-300'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-xs transition-transform ${
+                  orderSoundEnabled ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
           </div>
         </div>
       </div>

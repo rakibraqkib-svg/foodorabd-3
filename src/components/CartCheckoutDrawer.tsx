@@ -77,9 +77,9 @@ export function CartCheckoutDrawer({
   } | null>(null);
   const [couponError, setCouponError] = useState<string | null>(null);
 
-  const [name, setName] = useState(customerName || 'Rahim Uddin');
-  const [phone, setPhone] = useState('+8801711000001');
-  const [email, setEmail] = useState(customerEmail || 'customer@foodora.bd');
+  const [name, setName] = useState(customerName || '');
+  const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState(customerEmail || '');
   const [area, setArea] = useState(selectedArea.name);
   const [addressLine, setAddressLine] = useState(`House 24, Road 5, ${selectedArea.name}, Bangladesh`);
   const [coords, setCoords] = useState({ lat: selectedArea.lat, lng: selectedArea.lng });
@@ -109,15 +109,11 @@ export function CartCheckoutDrawer({
   }, [selectedArea]);
 
   useEffect(() => {
-    if (customerName) {
-      setName(customerName);
-    }
+    setName(customerName || '');
   }, [customerName]);
 
   useEffect(() => {
-    if (customerEmail) {
-      setEmail(customerEmail);
-    }
+    setEmail(customerEmail || '');
   }, [customerEmail]);
 
   useEffect(() => {
@@ -537,6 +533,7 @@ export function CartCheckoutDrawer({
                     required
                     value={name}
                     onChange={(e) => setName(e.target.value)}
+                    placeholder={lang === 'bn' ? 'আপনার নাম লিখুন' : 'e.g. Tanvir Hasan'}
                     className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
                   />
                 </div>
@@ -548,6 +545,7 @@ export function CartCheckoutDrawer({
                     required
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
+                    placeholder="+8801XXXXXXXXX"
                     className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
                   />
                 </div>
@@ -558,8 +556,8 @@ export function CartCheckoutDrawer({
                   <span className="inline-flex items-center gap-1">
                     <Mail className="w-3.5 h-3.5 text-[#E21B70]" />
                     {lang === 'bn'
-                      ? 'ইমেইল ঠিকানা (ইমেইলে অর্ডার ট্র্যাকিং লিংক পেতে)'
-                      : 'Email Address (for Live Order Tracking Updates)'}
+                      ? 'ইমেইল ঠিকানা (অর্ডারের প্রতিটি আপডেট ও ট্র্যাকিং লিংক ইমেইলে পাবেন)'
+                      : 'Email Address (Live order & rider updates sent here)'}
                   </span>
                 </label>
                 <input
@@ -634,15 +632,9 @@ export function CartCheckoutDrawer({
                     setCoords({ lat: c.lat, lng: c.lng });
                     if (c.areaName) {
                       setArea(c.areaName);
-                    } else {
-                      apiFetch<{ displayName: string; areaName: string }>(
-                        `/api/free/reverse-geocode?lat=${c.lat}&lng=${c.lng}`
-                      )
-                        .then((r) => {
-                          if (r.areaName) setArea(r.areaName);
-                          if (r.displayName) setAddressLine(r.displayName.split(',').slice(0, 3).join(', '));
-                        })
-                        .catch(() => {});
+                    }
+                    if (c.displayName) {
+                      setAddressLine(c.displayName.split(',').slice(0, 4).join(', '));
                     }
                   }}
                 />

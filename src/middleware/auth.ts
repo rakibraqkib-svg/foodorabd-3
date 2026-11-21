@@ -134,9 +134,8 @@ export async function getOrCreateUser(
   }
 }
 
-async function resolveUserFromHeader(authHeader?: string): Promise<AuthenticatedUser | null> {
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
-  const token = authHeader.slice('Bearer '.length).trim();
+export async function resolveUserFromToken(tokenRaw?: string | null): Promise<AuthenticatedUser | null> {
+  const token = String(tokenRaw || '').trim();
   if (!token) return null;
 
   // 1. Check server-signed session/sandbox token
@@ -173,6 +172,11 @@ async function resolveUserFromHeader(authHeader?: string): Promise<Authenticated
     role: dbUser.role as UserRole,
     isSandbox: false,
   };
+}
+
+async function resolveUserFromHeader(authHeader?: string): Promise<AuthenticatedUser | null> {
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+  return resolveUserFromToken(authHeader.slice('Bearer '.length));
 }
 
 export const optionalAuth = async (req: AuthRequest, _res: Response, next: NextFunction) => {

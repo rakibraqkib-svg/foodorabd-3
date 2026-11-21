@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { apiFetch, getAuthToken } from '../lib/api';
 import { BANGLADESH_AREAS } from '../lib/i18n';
+import { playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
 import {
@@ -278,8 +279,8 @@ export function AdminDashboard({
     }
   }, []);
 
-  const loadAdmin = useCallback(async () => {
-    setLoading(true);
+  const loadAdmin = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const res = await apiFetch<{
         restaurants: Restaurant[];
@@ -307,7 +308,7 @@ export function AdminDashboard({
       if (Array.isArray(res.adminPinEmails) && res.adminPinEmails.length > 0) {
         setAdminPinEmails(res.adminPinEmails);
       }
-      if (res.settings) {
+      if (res.settings && !silent) {
         setPlatformName(res.settings.platformName);
         setDefaultCommissionPct(String(res.settings.defaultCommissionPct));
         setDefaultDeliveryFee(String(res.settings.defaultDeliveryFee));
@@ -315,24 +316,46 @@ export function AdminDashboard({
         setMinOrderDefault(String(res.settings.minOrderDefault));
         setStorefrontForm(mergeStorefrontConfig(res.settings.storefrontConfig));
       }
-      try {
-        const gwRes = await apiFetch<{ paymentGateways: AdminPaymentGateway[] }>(
-          '/api/admin/payment-gateways'
-        );
-        setPaymentGateways(gwRes.paymentGateways || []);
-      } catch {
-        // non-blocking
+      if (!silent) {
+        try {
+          const gwRes = await apiFetch<{ paymentGateways: AdminPaymentGateway[] }>(
+            '/api/admin/payment-gateways'
+          );
+          setPaymentGateways(gwRes.paymentGateways || []);
+        } catch {
+          // non-blocking
+        }
       }
     } catch (err) {
       console.error('Failed to load admin workspace:', err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadAdmin();
+    loadAdmin(false);
   }, [loadAdmin]);
+
+  useRealtimeEvents({
+    enabled: Boolean(currentUser?.uid),
+    token: getAuthToken(),
+    pollFallbackMs: 10000,
+    onSync: () => loadAdmin(true),
+    onEvent: (ev) => {
+      if (ev.type === 'order:created' || ev.type === 'order:updated') {
+        if (ev.type === 'order:created') {
+          playOrderAlertChime('new_order');
+          setFeedback(
+            lang === 'bn'
+              ? `নতুন অর্ডার এসেছে: ${String(ev.payload.orderNumber || '')}`
+              : `New order received: ${String(ev.payload.orderNumber || '')}`
+          );
+        }
+        loadAdmin(true);
+      }
+    },
+  });
 
   useEffect(() => {
     if (tab === 'backend') {
