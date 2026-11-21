@@ -43,6 +43,7 @@ import {
   getOrderAlertChimeNotes,
   isSandboxAuthToken,
   shouldPersistAuthToken,
+  shouldRestoreTrackedOrderShortcut,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 
@@ -795,6 +796,24 @@ test('isSandboxAuthToken and shouldPersistAuthToken block persisting demo sandbo
   assert.equal(isSandboxAuthToken('eyJhbGciOiJIUzI1NiJ9.realuser.sig'), false);
   assert.equal(shouldPersistAuthToken('eyJhbGciOiJIUzI1NiJ9.realuser.sig'), true);
 });
+
+test('shouldRestoreTrackedOrderShortcut ignores stale demo/sandbox records and keeps real orders', () => {
+  assert.equal(shouldRestoreTrackedOrderShortcut(null), false);
+  assert.equal(shouldRestoreTrackedOrderShortcut({ orderId: 12, isSandbox: true }), false);
+  assert.equal(
+    shouldRestoreTrackedOrderShortcut({ orderId: 99, orderNumber: 'FD-BD-48374' }),
+    false
+  );
+  assert.equal(
+    shouldRestoreTrackedOrderShortcut({ orderId: 101, orderNumber: 'FD-BD-10041' }),
+    false
+  );
+  assert.equal(
+    shouldRestoreTrackedOrderShortcut({ orderId: 505, orderNumber: 'FD-BD-99210', isSandbox: false }),
+    true
+  );
+});
+
 
 
 

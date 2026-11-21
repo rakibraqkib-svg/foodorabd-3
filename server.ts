@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import JSZip from 'jszip';
-import { and, desc, eq, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ne, or, sql } from 'drizzle-orm';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { z } from 'zod';
 import { db, hasDatabaseConfig } from './src/db/index.ts';
@@ -228,19 +228,40 @@ app.get('/api/health', async (_req, res) => {
 
 app.get('/api/public-config', async (_req, res) => {
   try {
-    const [settings, gatewayRows] = await Promise.all([
+    const [settings, gatewayRows, activeOrderRows] = await Promise.all([
       getPlatformSettingsRow(),
       ensureDefaultPaymentGateways(),
+      db
+        .select({
+          id: orders.id,
+          orderNumber: orders.orderNumber,
+          restaurantName: orders.restaurantName,
+          estimatedMinutes: orders.estimatedMinutes,
+        })
+        .from(orders)
+        .where(and(ne(orders.status, 'delivered'), ne(orders.status, 'cancelled')))
+        .orderBy(desc(orders.createdAt))
+        .limit(1)
+        .catch(() => []),
     ]);
     const paymentGatewaysList = gatewayRows.map((row) =>
       toPublicPaymentGatewayView(row, isEnvConfiguredForGateway(row.code))
     );
+    const activeRow = activeOrderRows[0];
     res.json({
       mapsApiKey: process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '',
       gateways: getGatewayAvailability(),
       paymentGateways: paymentGatewaysList,
       emailTransport: getEmailTransportStatus(),
       settings,
+      featuredActiveOrder: activeRow
+        ? {
+            orderId: activeRow.id,
+            orderNumber: activeRow.orderNumber,
+            restaurantName: activeRow.restaurantName,
+            estimatedMinutes: activeRow.estimatedMinutes,
+          }
+        : null,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to load public config' });
@@ -1404,6 +1425,9 @@ app.get('/api/orders/:id', optionalAuth, async (req: AuthRequest, res) => {
         ...detail,
         order: {
           ...detail.order,
+          customerName: 'Foodora Customer',
+          customerPhone: '',
+          customerEmail: '',
           trackingToken: '',
         },
         emailLogs: [],

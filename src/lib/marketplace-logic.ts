@@ -1554,6 +1554,21 @@ export function shouldPersistAuthToken(token: string | null | undefined): boolea
   return !isSandboxAuthToken(trimmed);
 }
 
+const SEEDED_DEMO_ORDER_NUMBERS = new Set(['FD-BD-10041', 'FD-BD-10042', 'FD-BD-48374']);
+
+export function shouldRestoreTrackedOrderShortcut(
+  entry: { orderId?: unknown; orderNumber?: unknown; isSandbox?: unknown } | null | undefined
+): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  if (entry.isSandbox === true) return false;
+  const orderId = Number(entry.orderId);
+  if (!Number.isInteger(orderId) || orderId <= 0) return false;
+  const orderNum = typeof entry.orderNumber === 'string' ? entry.orderNumber.trim().toUpperCase() : '';
+  if (orderNum && SEEDED_DEMO_ORDER_NUMBERS.has(orderNum)) return false;
+  return true;
+}
+
+
 
 
 

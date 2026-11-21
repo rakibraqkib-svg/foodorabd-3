@@ -52,6 +52,7 @@ import {
   type CartItemInput,
   filterStorefrontProducts,
   formatBdt,
+  shouldRestoreTrackedOrderShortcut,
 } from './lib/marketplace-logic';
 import { mergeStorefrontConfig } from './lib/storefront-config';
 import type {
@@ -87,6 +88,7 @@ interface TrackedOrderShortcut {
   orderNumber?: string;
   restaurantName?: string;
   estimatedMinutes?: number;
+  isSandbox?: boolean;
 }
 
 function MarketplaceApp() {
@@ -178,7 +180,21 @@ function MarketplaceApp() {
   const [trackOrderNumInput, setTrackOrderNumInput] = useState('');
   const [trackLookupLoading, setTrackLookupLoading] = useState(false);
   const [trackLookupError, setTrackLookupError] = useState<string | null>(null);
-  const [lastTrackedOrder, setLastTrackedOrder] = useState<TrackedOrderShortcut | null>(null);
+  const [lastTrackedOrder, setLastTrackedOrder] = useState<TrackedOrderShortcut | null>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_LAST_ORDER_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as TrackedOrderShortcut;
+      if (shouldRestoreTrackedOrderShortcut(parsed)) {
+        return parsed;
+      }
+      localStorage.removeItem(STORAGE_LAST_ORDER_KEY);
+      return null;
+    } catch {
+      return null;
+    }
+  });
+  const [featuredActiveOrder, setFeaturedActiveOrder] = useState<TrackedOrderShortcut | null>(null);
 
   // Filters
   const [fulfillmentTab, setFulfillmentTab] = useState<'delivery' | 'pickup'>('delivery');
@@ -303,11 +319,15 @@ function MarketplaceApp() {
 
   useEffect(() => {
     try {
-      localStorage.removeItem(STORAGE_LAST_ORDER_KEY);
+      if (lastTrackedOrder && !lastTrackedOrder.isSandbox) {
+        localStorage.setItem(STORAGE_LAST_ORDER_KEY, JSON.stringify(lastTrackedOrder));
+      } else {
+        localStorage.removeItem(STORAGE_LAST_ORDER_KEY);
+      }
     } catch {
       // ignore
     }
-  }, []);
+  }, [lastTrackedOrder]);
 
   // Global Escape key close for active modals & cart drawer
   useEffect(() => {
@@ -403,6 +423,7 @@ function MarketplaceApp() {
           mapsApiKey: string;
           settings?: PlatformSettings | null;
           paymentGateways?: PublicPaymentGateway[];
+          featuredActiveOrder?: TrackedOrderShortcut | null;
         }>('/api/public-config'),
         apiFetch<{ restaurants: Restaurant[] }>('/api/restaurants'),
         apiFetch<{ products: StorefrontProduct[] }>('/api/products').catch(() => ({ products: [] })),
@@ -413,6 +434,7 @@ function MarketplaceApp() {
       );
       setPublicSettings(cfgRes.settings || null);
       setPublicGateways(cfgRes.paymentGateways || []);
+      setFeaturedActiveOrder(cfgRes.featuredActiveOrder || null);
       setRestaurants(restRes.restaurants);
       setStorefrontProducts(prodRes.products || []);
       setCoupons(coupRes.coupons);
@@ -1985,6 +2007,57 @@ function MarketplaceApp() {
 
             {/* Main Storefront Column */}
             <div className="flex-1 min-w-0 space-y-8">
+              {/* Active Order Live Rider Tracking Shortcut Banner */}
+              {(lastTrackedOrder || featuredActiveOrder) && (() => {
+                const bannerOrder = (lastTrackedOrder || featuredActiveOrder)!;
+                return (
+                  <div
+                    data-testid="active-rider-shortcut-bar"
+                    className="p-3 sm:px-4 sm:py-3 rounded-2xl bg-gradient-to-r from-[#FFF0F6] via-white to-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-3 shadow-xs"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                        <Bike className="w-4 h-4" />
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-[#2E3138] flex items-center gap-1.5 flex-wrap">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                          <span>
+                            {lang === 'bn' ? 'লাইভ অর্ডার চালু আছে' : 'Active Delivery Order'}
+                            {bannerOrder.orderNumber ? ` · ${bannerOrder.orderNumber}` : ''}
+                          </span>
+                        </p>
+                        <p className="text-[11px] text-neutral-600 truncate">
+                          {bannerOrder.restaurantName || 'Foodora Partner'}
+                          {bannerOrder.estimatedMinutes
+                            ? ` · ${
+                                lang === 'bn'
+                                  ? `প্রায় ${Math.min(Math.max(bannerOrder.estimatedMinutes, 8), 90)} মিনিট`
+                                  : `~${Math.min(Math.max(bannerOrder.estimatedMinutes, 8), 90)} min ETA`
+                              }`
+                            : ''}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setView({
+                          type: 'tracking',
+                          orderId: bannerOrder.orderId,
+                          token: bannerOrder.trackingToken,
+                        });
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      }}
+                      className="px-3.5 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold inline-flex items-center gap-1.5 shrink-0"
+                    >
+                      <LocateFixed className="w-3.5 h-3.5" />
+                      <span>{lang === 'bn' ? 'রাইডার অবস্থান ও সময় দেখুন' : 'Track Rider & ETA'}</span>
+                    </button>
+                  </div>
+                );
+              })()}
+
               {/* Mobile Location + Search + Mode Switcher + Weather */}
               <div className="lg:hidden space-y-2.5">
                 <div className="flex items-center gap-2">
@@ -2731,6 +2804,7 @@ function MarketplaceApp() {
             orderNumber: meta?.orderNumber,
             restaurantName: meta?.restaurantName,
             estimatedMinutes: meta?.estimatedMinutes,
+            isSandbox: Boolean(user?.isSandbox),
           });
           setView({ type: 'tracking', orderId, token: trackingToken });
           loadUserSignals();

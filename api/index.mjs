@@ -13,7 +13,7 @@ import fs from "node:fs";
 import crypto3 from "node:crypto";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
-import { and as and2, desc as desc2, eq as eq4, or as or2, sql as sql3 } from "drizzle-orm";
+import { and as and2, desc as desc2, eq as eq4, ne, or as or2, sql as sql3 } from "drizzle-orm";
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { z } from "zod";
 
@@ -3920,19 +3920,32 @@ app.get("/api/health", async (_req, res) => {
 });
 app.get("/api/public-config", async (_req, res) => {
   try {
-    const [settings, gatewayRows] = await Promise.all([
+    const [settings, gatewayRows, activeOrderRows] = await Promise.all([
       getPlatformSettingsRow(),
-      ensureDefaultPaymentGateways()
+      ensureDefaultPaymentGateways(),
+      db.select({
+        id: orders.id,
+        orderNumber: orders.orderNumber,
+        restaurantName: orders.restaurantName,
+        estimatedMinutes: orders.estimatedMinutes
+      }).from(orders).where(and2(ne(orders.status, "delivered"), ne(orders.status, "cancelled"))).orderBy(desc2(orders.createdAt)).limit(1).catch(() => [])
     ]);
     const paymentGatewaysList = gatewayRows.map(
       (row) => toPublicPaymentGatewayView(row, isEnvConfiguredForGateway(row.code))
     );
+    const activeRow = activeOrderRows[0];
     res.json({
       mapsApiKey: process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || "",
       gateways: getGatewayAvailability(),
       paymentGateways: paymentGatewaysList,
       emailTransport: getEmailTransportStatus(),
-      settings
+      settings,
+      featuredActiveOrder: activeRow ? {
+        orderId: activeRow.id,
+        orderNumber: activeRow.orderNumber,
+        restaurantName: activeRow.restaurantName,
+        estimatedMinutes: activeRow.estimatedMinutes
+      } : null
     });
   } catch (error) {
     res.status(500).json({ error: error.message || "Failed to load public config" });
@@ -4844,6 +4857,9 @@ app.get("/api/orders/:id", optionalAuth, async (req, res) => {
         ...detail,
         order: {
           ...detail.order,
+          customerName: "Foodora Customer",
+          customerPhone: "",
+          customerEmail: "",
           trackingToken: ""
         },
         emailLogs: []
