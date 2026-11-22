@@ -10,25 +10,25 @@ This project is a full-stack TypeScript application with:
 ---
 
 ## 1. Configure Supabase URL Redirects (For Google Sign-In)
-1. Open your Supabase project (`https://supabase.com/dashboard/project/uvqptlflvdtxbrqiztzi`).
+1. Open your Supabase project (`https://supabase.com/dashboard/project/joxahjncgxsikggsqmrh`).
 2. Go to **Authentication -> URL Configuration**:
-   - **Site URL**: `https://foodorabd1.vercel.app`
+   - **Site URL**: `https://your-app.vercel.app`
    - **Redirect URLs** (add all of these):
-     - `https://foodorabd1.vercel.app/**`
+     - `https://your-app.vercel.app/**`
      - `https://*.vercel.app/**`
      - `http://localhost:3000/**`
 3. Verify **Authentication -> Providers -> Google** is enabled with your Google OAuth Client ID & Secret.
 
 ---
 
-## 2. Deploy to Vercel (`foodorabd1.vercel.app`)
-1. Push or import the extracted ZIP folder into Vercel (or run `npx vercel --prod`).
+## 2. Deploy to Vercel
+1. Push or import the project into Vercel (or run `npx vercel --prod`).
 2. In **Vercel Project Settings -> Environment Variables**, add:
-   - `DATABASE_URL` = your Supabase Pooler URI (`postgresql://postgres.uvqptlflvdtxbrqiztzi:[YOUR-PASSWORD]@aws-1-ap-northeast-1.pooler.supabase.com:6543/postgres`)
-   - `VITE_SUPABASE_URL` = `https://uvqptlflvdtxbrqiztzi.supabase.co`
-   - `VITE_SUPABASE_ANON_KEY` = your Supabase anon key
-   - `SUPABASE_URL` = `https://uvqptlflvdtxbrqiztzi.supabase.co`
-   - `SUPABASE_ANON_KEY` = your Supabase anon key
+   - `DATABASE_URL` = your Supabase Pooler URI (`postgresql://postgres.joxahjncgxsikggsqmrh:[YOUR-PASSWORD]@aws-0-ap-northeast-1.pooler.supabase.com:6543/postgres`)
+   - `VITE_SUPABASE_URL` = `https://joxahjncgxsikggsqmrh.supabase.co`
+   - `VITE_SUPABASE_ANON_KEY` = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpveGFoam5jZ3hzaWtnZ3NxbXJoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ0NzQyMjUsImV4cCI6MjExMDA1MDIyNX0.4YArqUGJx3wDfjAHmzcuXtbxU0yaKcJcRqMiKSRZOZg`
+   - `SUPABASE_URL` = `https://joxahjncgxsikggsqmrh.supabase.co`
+   - `SUPABASE_ANON_KEY` = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpveGFoam5jZ3hzaWtnZ3NxbXJoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ0NzQyMjUsImV4cCI6MjExMDA1MDIyNX0.4YArqUGJx3wDfjAHmzcuXtbxU0yaKcJcRqMiKSRZOZg`
    - `SUPABASE_SERVICE_ROLE_KEY` = your Supabase secret key (optional, for server-side admin verification)
    - `SANDBOX_SESSION_SECRET` = any strong random 32+ character string
    - `VITE_GOOGLE_MAPS_API_KEY` = your Google Maps Browser API key (optional — built-in Dhaka interactive map works without it)

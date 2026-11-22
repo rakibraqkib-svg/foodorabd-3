@@ -56,6 +56,10 @@ export const createPool = () => {
     }
 
     global._postgresPool.on('error', (err) => {
+      // Suppress transient idle client connection terminations (e.g. Supabase pooler / NAT timeout drops)
+      if (err.message && (err.message.includes('Connection terminated unexpectedly') || err.message.includes('terminating connection'))) {
+        return;
+      }
       console.error('Unexpected error on idle SQL pool client:', err);
     });
   }

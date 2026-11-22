@@ -440,7 +440,7 @@ function GoogleMapInner({
         <MapCenterSync center={center} skipPanRef={skipPanRef} />
         <AdvancedMarker
           position={center}
-          title={markerLabel || 'Selected Location'}
+          title={markerLabel || 'User Location'}
           draggable={Boolean(interactive)}
           onDragEnd={(ev) => {
             if (interactive && ev.latLng) {
@@ -448,14 +448,24 @@ function GoogleMapInner({
             }
           }}
         >
-          <Pin background="#E21B70" borderColor="#9E0B52" glyphColor="#FFFFFF" />
+          <div className="flex flex-col items-center">
+            <span className="px-2 py-0.5 rounded bg-[#E21B70] text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5">
+              {markerLabel || 'User Location'}
+            </span>
+            <Pin background="#E21B70" borderColor="#9E0B52" glyphColor="#FFFFFF" />
+          </div>
         </AdvancedMarker>
         {secondaryPoint && (
           <AdvancedMarker
             position={{ lat: secondaryPoint.lat, lng: secondaryPoint.lng }}
             title={secondaryPoint.label}
           >
-            <Pin background="#2E3138" borderColor="#111827" glyphColor="#FFFFFF" />
+            <div className="flex flex-col items-center">
+              <span className="px-2 py-0.5 rounded bg-[#2E3138] text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5">
+                {secondaryPoint.label}
+              </span>
+              <Pin background="#2E3138" borderColor="#111827" glyphColor="#FFFFFF" />
+            </div>
           </AdvancedMarker>
         )}
         {riderPoint && (
@@ -716,18 +726,18 @@ function FallbackDhakaMap({
           );
         })}
 
-      {/* Primary Pin */}
+      {/* Primary Pin (User Delivery - Red) */}
       <div
         style={{ left: `${p1.x}%`, top: `${p1.y}%` }}
         className="absolute -translate-x-1/2 -translate-y-full z-20 flex flex-col items-center pointer-events-none"
       >
         <span className="px-2 py-0.5 rounded bg-[#E21B70] text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5">
-          {markerLabel || 'Selected Pin'}
+          {markerLabel || 'User Location'}
         </span>
         <MapPin className="w-5 h-5 text-[#E21B70] fill-[#E21B70]/20" />
       </div>
 
-      {/* Restaurant / Origin Pin */}
+      {/* Restaurant / Origin Pin (Black) */}
       {p2 && secondaryPoint && (
         <div
           style={{ left: `${p2.x}%`, top: `${p2.y}%` }}

@@ -530,7 +530,7 @@ export function OrderTrackingView({
             mapsApiKey={mapsApiKey}
             lang={lang}
             center={{ lat: order.deliveryLat, lng: order.deliveryLng }}
-            markerLabel={order.deliveryArea}
+            markerLabel={order.customerName ? `${order.customerName} (${order.deliveryArea})` : order.deliveryArea}
             secondaryPoint={
               restaurant
                 ? { lat: restaurant.lat, lng: restaurant.lng, label: restaurant.name }
