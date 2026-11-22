@@ -491,16 +491,31 @@ export async function getAdminWorkspace() {
 
 export async function getNotificationsForUser(uid: string, role: string) {
   try {
+    const cleanUid = String(uid || '').trim();
+    const cleanRole = String(role || 'customer').trim();
+    if (!cleanUid) return [];
+
+    const isAdmin = cleanRole === 'admin' || cleanRole === 'super_admin';
+    const roleBroadcastUid = `role-${cleanRole}`;
+    const roleCondition = isAdmin
+      ? or(
+          eq(notifications.recipientUid, cleanUid),
+          eq(notifications.recipientUid, 'broadcast-all'),
+          eq(notifications.recipientUid, roleBroadcastUid),
+          eq(notifications.recipientUid, 'role-admin'),
+          eq(notifications.recipientUid, 'role-super_admin'),
+          eq(notifications.recipientUid, 'demo-admin-uid')
+        )
+      : or(
+          eq(notifications.recipientUid, cleanUid),
+          eq(notifications.recipientUid, 'broadcast-all'),
+          eq(notifications.recipientUid, roleBroadcastUid)
+        );
+
     return await db
       .select()
       .from(notifications)
-      .where(
-        or(
-          eq(notifications.recipientUid, uid),
-          eq(notifications.roleTarget, role),
-          eq(notifications.roleTarget, 'all')
-        )
-      )
+      .where(roleCondition)
       .orderBy(desc(notifications.createdAt))
       .limit(25);
   } catch (error) {

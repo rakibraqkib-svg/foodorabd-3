@@ -82,6 +82,7 @@ import {
   toPublicPaymentGatewayView,
   validateBroadcastNotification,
 } from './src/lib/marketplace-logic.ts';
+import { mergeStorefrontConfig } from './src/lib/storefront-config.ts';
 import { getDeliveryProvider } from './src/services/delivery.ts';
 import {
   fetchBdtExchangeRates,
@@ -92,8 +93,13 @@ import {
   searchOsmPlaces,
 } from './src/services/free-apis.ts';
 import {
+  getAdminEmailSettingsView,
   getEmailTransportStatus,
+  saveAdminEmailSettings,
   sendAndLogOrderTrackingEmail,
+  sendMerchantOrderAlertEmail,
+  sendTestEmail,
+  sendTransactionalEmail,
 } from './src/services/order-email.ts';
 import {
   attachSseRealtimeClient,
@@ -235,28 +241,38 @@ app.get('/api/public-config', async (_req, res) => {
         .select({
           id: orders.id,
           orderNumber: orders.orderNumber,
+          trackingToken: orders.trackingToken,
           restaurantName: orders.restaurantName,
           estimatedMinutes: orders.estimatedMinutes,
         })
         .from(orders)
         .where(and(ne(orders.status, 'delivered'), ne(orders.status, 'cancelled')))
         .orderBy(desc(orders.createdAt))
-        .limit(1)
+        .limit(30)
         .catch(() => []),
     ]);
     const paymentGatewaysList = gatewayRows.map((row) =>
       toPublicPaymentGatewayView(row, isEnvConfiguredForGateway(row.code))
     );
-    const activeRow = activeOrderRows[0];
+    const emailTransport = await getEmailTransportStatus();
+    const sc = mergeStorefrontConfig(settings?.storefrontConfig);
+    const pinnedId = Number(sc.featuredActiveOrderId);
+    const activeRow =
+      sc.showActiveDeliveryBar === false
+        ? undefined
+        : (Number.isInteger(pinnedId) && pinnedId > 0
+            ? activeOrderRows.find((r) => r.id === pinnedId)
+            : undefined) || activeOrderRows[0];
     res.json({
       mapsApiKey: process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '',
       gateways: getGatewayAvailability(),
       paymentGateways: paymentGatewaysList,
-      emailTransport: getEmailTransportStatus(),
+      emailTransport,
       settings,
       featuredActiveOrder: activeRow
         ? {
             orderId: activeRow.id,
+            trackingToken: activeRow.trackingToken,
             orderNumber: activeRow.orderNumber,
             restaurantName: activeRow.restaurantName,
             estimatedMinutes: activeRow.estimatedMinutes,
@@ -871,32 +887,22 @@ app.post('/api/auth/forgot-password', async (req, res) => {
         set: { passwordHash: `${expiresAt}|${otpHash}` },
       });
 
-    // If Resend email transport is configured, send real email and do not expose code in JSON
-    if (process.env.RESEND_API_KEY) {
-      try {
-        const mailRes = await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            from: process.env.RESEND_FROM_EMAIL || 'Foodora BD <no-reply@foodora.bd>',
-            to: [emailLower],
-            subject: 'Foodora BD Password Reset Code',
-            html: `<p>Your Foodora BD password reset code is <strong>${otp}</strong>. It expires in 15 minutes.</p>`,
-          }),
+    // If Email transport (Gmail SMTP / Custom SMTP / Resend) is configured, send real email and do not expose code in JSON
+    const emailTransport = await getEmailTransportStatus();
+    if (emailTransport.configured) {
+      const otpDispatch = await sendTransactionalEmail({
+        to: emailLower,
+        subject: 'Foodora BD Password Reset Code',
+        html: `<p>Your Foodora BD password reset code is <strong>${otp}</strong>. It expires in 15 minutes.</p>`,
+        text: `Your Foodora BD password reset code is ${otp}. It expires in 15 minutes.`,
+      });
+      if (otpDispatch.ok) {
+        return res.json({
+          ok: true,
+          mode: 'email',
+          isAdminAccount: false,
+          message: 'A 6-digit password reset code has been sent to your email address.',
         });
-        if (mailRes.ok) {
-          return res.json({
-            ok: true,
-            mode: 'email',
-            isAdminAccount: false,
-            message: 'A 6-digit password reset code has been sent to your email address.',
-          });
-        }
-      } catch {
-        // fallback cleanly to preview verification flow below
       }
     }
 
@@ -1492,32 +1498,43 @@ app.post('/api/orders/:id/send-tracking-email', optionalAuth, async (req: AuthRe
         : Promise.resolve([]),
     ]);
 
-    const emailLog = await sendAndLogOrderTrackingEmail({
-      origin: getRequestOrigin(req),
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      trackingToken: nextToken,
-      customerName: order.customerName,
-      customerEmail: targetEmail,
-      restaurantName: order.restaurantName,
-      deliveryArea: order.deliveryArea,
-      deliveryAddress: order.deliveryAddress,
-      totalAmount: order.totalAmount,
-      paymentMethod: order.paymentMethod,
-      paymentStatus: order.paymentStatus,
-      status: order.status,
-      statusEvent: order.status,
-      statusNote: `Live tracking update requested (${order.status.replace(/_/g, ' ')})`,
-      riderName: order.riderName,
-      riderPhone: riderRows[0]?.phone || null,
-      etaMinutes: order.estimatedMinutes,
-      items: order.itemsSnapshotJson,
-    });
+    const [emailLog, emailTransport] = await Promise.all([
+      sendAndLogOrderTrackingEmail({
+        origin: getRequestOrigin(req),
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        trackingToken: nextToken,
+        customerName: order.customerName,
+        customerEmail: targetEmail,
+        restaurantName: order.restaurantName,
+        deliveryArea: order.deliveryArea,
+        deliveryAddress: order.deliveryAddress,
+        subtotal: order.subtotal,
+        discountAmount: order.discountAmount,
+        couponCode: order.couponCode,
+        deliveryFee: order.deliveryFee,
+        serviceFee: order.serviceFee,
+        taxAmount: order.taxAmount,
+        totalAmount: order.totalAmount,
+        paymentMethod: order.paymentMethod,
+        paymentStatus: order.paymentStatus,
+        status: order.status,
+        statusEvent: order.status,
+        statusNote: `Live tracking update requested (${order.status.replace(/_/g, ' ')})`,
+        riderName: order.riderName,
+        riderPhone: riderRows[0]?.phone || null,
+        etaMinutes: order.estimatedMinutes,
+        createdAt: order.createdAt,
+        items: order.itemsSnapshotJson,
+      }),
+      getEmailTransportStatus(),
+    ]);
 
     return res.json({
       ok: true,
       customerEmail: targetEmail,
       emailLog,
+      emailTransport,
       trackingUrl: emailLog?.trackingUrl || '',
       restaurantLat: restRows[0]?.lat ?? null,
     });
@@ -1811,6 +1828,14 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
           relatedOrderId: newOrder.id,
         },
         {
+          recipientUid: 'role-super_admin',
+          roleTarget: 'super_admin',
+          title: `New Order ${newOrder.orderNumber} · ${rest.name}`,
+          message: `৳${newOrder.totalAmount} order from ${input.customerName} (${input.deliveryArea})`,
+          type: 'order',
+          relatedOrderId: newOrder.id,
+        },
+        {
           recipientUid: req.user!.uid,
           roleTarget: 'customer',
           title: `Order ${newOrder.orderNumber} Confirmed`,
@@ -1820,30 +1845,74 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
         },
       ]);
 
-      return { order: newOrder, paymentSession: paymentInit, deliveryDispatch, restaurantOwnerUid: rest.ownerUid };
+      return {
+        order: newOrder,
+        paymentSession: paymentInit,
+        deliveryDispatch,
+        restaurantOwnerUid: rest.ownerUid,
+        restaurantEmail: rest.email,
+      };
     });
 
-    const emailLog = resolvedCustomerEmail
-      ? await sendAndLogOrderTrackingEmail({
-          origin: getRequestOrigin(req),
-          orderId: created.order.id,
-          orderNumber: created.order.orderNumber,
-          trackingToken: created.order.trackingToken,
-          customerName: created.order.customerName,
-          customerEmail: resolvedCustomerEmail,
-          restaurantName: created.order.restaurantName,
-          deliveryArea: created.order.deliveryArea,
-          deliveryAddress: created.order.deliveryAddress,
-          totalAmount: created.order.totalAmount,
-          paymentMethod: created.order.paymentMethod,
-          paymentStatus: created.order.paymentStatus,
-          status: created.order.status,
-          statusEvent: 'confirmed',
-          statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`,
-          etaMinutes: created.order.estimatedMinutes,
-          items: created.order.itemsSnapshotJson,
-        })
-      : null;
+    const ownerEmailRows = created.restaurantOwnerUid
+      ? await db
+          .select({ email: users.email })
+          .from(users)
+          .where(eq(users.uid, created.restaurantOwnerUid))
+          .limit(1)
+      : [];
+
+    const [emailLog, emailTransport] = await Promise.all([
+      resolvedCustomerEmail
+        ? sendAndLogOrderTrackingEmail({
+            origin: getRequestOrigin(req),
+            orderId: created.order.id,
+            orderNumber: created.order.orderNumber,
+            trackingToken: created.order.trackingToken,
+            customerName: created.order.customerName,
+            customerEmail: resolvedCustomerEmail,
+            restaurantName: created.order.restaurantName,
+            deliveryArea: created.order.deliveryArea,
+            deliveryAddress: created.order.deliveryAddress,
+            subtotal: created.order.subtotal,
+            discountAmount: created.order.discountAmount,
+            couponCode: created.order.couponCode,
+            deliveryFee: created.order.deliveryFee,
+            serviceFee: created.order.serviceFee,
+            taxAmount: created.order.taxAmount,
+            totalAmount: created.order.totalAmount,
+            paymentMethod: created.order.paymentMethod,
+            paymentStatus: created.order.paymentStatus,
+            status: created.order.status,
+            statusEvent: 'confirmed',
+            statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`,
+            etaMinutes: created.order.estimatedMinutes,
+            createdAt: created.order.createdAt,
+            items: created.order.itemsSnapshotJson,
+          })
+        : Promise.resolve(null),
+      getEmailTransportStatus(),
+      sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: created.order.id,
+        orderNumber: created.order.orderNumber,
+        trackingToken: created.order.trackingToken,
+        eventKind: 'new_order',
+        restaurantName: created.order.restaurantName,
+        restaurantEmail: created.restaurantEmail,
+        ownerEmail: ownerEmailRows[0]?.email || null,
+        customerName: created.order.customerName,
+        customerPhone: created.order.customerPhone,
+        deliveryArea: created.order.deliveryArea,
+        deliveryAddress: created.order.deliveryAddress,
+        totalAmount: created.order.totalAmount,
+        paymentMethod: created.order.paymentMethod,
+        paymentStatus: created.order.paymentStatus,
+        status: created.order.status,
+        statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`,
+        items: created.order.itemsSnapshotJson,
+      }).catch(() => []),
+    ]);
 
     broadcastOrderEvent('order:created', {
       orderId: created.order.id,
@@ -1867,6 +1936,14 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
       relatedOrderId: created.order.id,
     });
     broadcastNotificationEvent({
+      recipientUid: 'role-super_admin',
+      roleTarget: 'super_admin',
+      title: `New Order ${created.order.orderNumber} · ${created.order.restaurantName}`,
+      message: `৳${created.order.totalAmount} order from ${created.order.customerName} (${created.order.deliveryArea})`,
+      type: 'order',
+      relatedOrderId: created.order.id,
+    });
+    broadcastNotificationEvent({
       recipientUid: created.order.customerUid,
       roleTarget: 'customer',
       title: `Order ${created.order.orderNumber} Confirmed`,
@@ -1875,7 +1952,7 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
       relatedOrderId: created.order.id,
     });
 
-    res.status(201).json({ ...created, emailLog });
+    res.status(201).json({ ...created, emailLog, emailTransport });
   } catch (error: any) {
     console.error('Order creation failed:', error);
     res.status(400).json({ error: error.message || 'Could not place order' });
@@ -1936,6 +2013,12 @@ app.post('/api/payments/verify', requireAuth, async (req: AuthRequest, res) => {
       actorUid: req.user!.uid,
     });
 
+    const restRowsForBroadcast = await db
+      .select({ ownerUid: restaurants.ownerUid })
+      .from(restaurants)
+      .where(eq(restaurants.id, updated[0].restaurantId))
+      .limit(1);
+
     if (updated[0].customerEmail) {
       await sendAndLogOrderTrackingEmail({
         origin: getRequestOrigin(req),
@@ -1947,6 +2030,12 @@ app.post('/api/payments/verify', requireAuth, async (req: AuthRequest, res) => {
         restaurantName: updated[0].restaurantName,
         deliveryArea: updated[0].deliveryArea,
         deliveryAddress: updated[0].deliveryAddress,
+        subtotal: updated[0].subtotal,
+        discountAmount: updated[0].discountAmount,
+        couponCode: updated[0].couponCode,
+        deliveryFee: updated[0].deliveryFee,
+        serviceFee: updated[0].serviceFee,
+        taxAmount: updated[0].taxAmount,
         totalAmount: updated[0].totalAmount,
         paymentMethod: updated[0].paymentMethod,
         paymentStatus: updated[0].paymentStatus,
@@ -1955,6 +2044,7 @@ app.post('/api/payments/verify', requireAuth, async (req: AuthRequest, res) => {
         statusNote: verification.message,
         riderName: updated[0].riderName,
         etaMinutes: updated[0].estimatedMinutes,
+        createdAt: updated[0].createdAt,
         items: updated[0].itemsSnapshotJson,
       });
     }
@@ -1964,6 +2054,7 @@ app.post('/api/payments/verify', requireAuth, async (req: AuthRequest, res) => {
       orderNumber: updated[0].orderNumber,
       restaurantId: updated[0].restaurantId,
       restaurantName: updated[0].restaurantName,
+      restaurantOwnerUid: restRowsForBroadcast[0]?.ownerUid || null,
       customerUid: updated[0].customerUid,
       riderUid: updated[0].riderUid,
       riderName: updated[0].riderName,
@@ -2876,6 +2967,12 @@ app.patch(
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
+          subtotal: updated[0].subtotal,
+          discountAmount: updated[0].discountAmount,
+          couponCode: updated[0].couponCode,
+          deliveryFee: updated[0].deliveryFee,
+          serviceFee: updated[0].serviceFee,
+          taxAmount: updated[0].taxAmount,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
           paymentStatus: updated[0].paymentStatus,
@@ -2884,9 +2981,31 @@ app.patch(
           statusNote: parsed.data.note || `${order.restaurantName} updated order status`,
           riderName: updated[0].riderName,
           etaMinutes: updated[0].estimatedMinutes,
+          createdAt: updated[0].createdAt,
           items: updated[0].itemsSnapshotJson,
         });
       }
+
+      await sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        eventKind: 'status_update',
+        restaurantName: updated[0].restaurantName,
+        restaurantEmail: restRows[0]?.email || null,
+        customerName: updated[0].customerName,
+        customerPhone: updated[0].customerPhone,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: updated[0].status,
+        statusNote: parsed.data.note || `${order.restaurantName} updated order status`,
+        riderName: updated[0].riderName,
+        items: updated[0].itemsSnapshotJson,
+      }).catch(() => []);
 
       broadcastOrderEvent('order:updated', {
         orderId: updated[0].id,
@@ -2908,6 +3027,14 @@ app.patch(
         roleTarget: 'customer',
         title: `Order ${order.orderNumber}: ${parsed.data.status.replace('_', ' ')}`,
         message: parsed.data.note || `${order.restaurantName} updated your order status.`,
+        type: 'order',
+        relatedOrderId: order.id,
+      });
+      broadcastNotificationEvent({
+        recipientUid: 'role-super_admin',
+        roleTarget: 'super_admin',
+        title: `Order ${order.orderNumber}: ${parsed.data.status.replace('_', ' ')}`,
+        message: `${order.restaurantName} updated order ${order.orderNumber}.`,
         type: 'order',
         relatedOrderId: order.id,
       });
@@ -3327,6 +3454,12 @@ app.post(
         relatedOrderId: existingOrder.id,
       });
 
+      const restOwnerRows = await db
+        .select({ ownerUid: restaurants.ownerUid, email: restaurants.email })
+        .from(restaurants)
+        .where(eq(restaurants.id, updated[0].restaurantId))
+        .limit(1);
+
       if (updated[0].customerEmail) {
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
@@ -3338,6 +3471,12 @@ app.post(
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
+          subtotal: updated[0].subtotal,
+          discountAmount: updated[0].discountAmount,
+          couponCode: updated[0].couponCode,
+          deliveryFee: updated[0].deliveryFee,
+          serviceFee: updated[0].serviceFee,
+          taxAmount: updated[0].taxAmount,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
           paymentStatus: updated[0].paymentStatus,
@@ -3347,15 +3486,38 @@ app.post(
           riderName,
           riderPhone: riderRows[0]?.phone || null,
           etaMinutes: updated[0].estimatedMinutes,
+          createdAt: updated[0].createdAt,
           items: updated[0].itemsSnapshotJson,
         });
       }
+
+      await sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        eventKind: 'status_update',
+        restaurantName: updated[0].restaurantName,
+        restaurantEmail: restOwnerRows[0]?.email || null,
+        customerName: updated[0].customerName,
+        customerPhone: updated[0].customerPhone,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: updated[0].status,
+        statusNote: `Rider ${riderName} accepted delivery assignment`,
+        riderName,
+        items: updated[0].itemsSnapshotJson,
+      }).catch(() => []);
 
       broadcastOrderEvent('order:updated', {
         orderId: updated[0].id,
         orderNumber: updated[0].orderNumber,
         restaurantId: updated[0].restaurantId,
         restaurantName: updated[0].restaurantName,
+        restaurantOwnerUid: restOwnerRows[0]?.ownerUid || null,
         customerUid: updated[0].customerUid,
         riderUid: updated[0].riderUid,
         riderName: updated[0].riderName,
@@ -3369,6 +3531,14 @@ app.post(
         roleTarget: 'customer',
         title: 'Rider Assigned to Your Order',
         message: `${riderName} is assigned for ${existingOrder.orderNumber}. Track live rider GPS on your map.`,
+        type: 'order',
+        relatedOrderId: existingOrder.id,
+      });
+      broadcastNotificationEvent({
+        recipientUid: 'role-super_admin',
+        roleTarget: 'super_admin',
+        title: `Rider Assigned · ${existingOrder.orderNumber}`,
+        message: `${riderName} accepted ${existingOrder.orderNumber} (${existingOrder.restaurantName}).`,
         type: 'order',
         relatedOrderId: existingOrder.id,
       });
@@ -3456,6 +3626,12 @@ app.patch(
         }
       }
 
+      const restOwnerRows = await db
+        .select({ ownerUid: restaurants.ownerUid, email: restaurants.email })
+        .from(restaurants)
+        .where(eq(restaurants.id, updated[0].restaurantId))
+        .limit(1);
+
       if (updated[0].customerEmail) {
         const assignedRiderRows = updated[0].riderUid
           ? await db
@@ -3474,6 +3650,12 @@ app.patch(
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
+          subtotal: updated[0].subtotal,
+          discountAmount: updated[0].discountAmount,
+          couponCode: updated[0].couponCode,
+          deliveryFee: updated[0].deliveryFee,
+          serviceFee: updated[0].serviceFee,
+          taxAmount: updated[0].taxAmount,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
           paymentStatus: updated[0].paymentStatus,
@@ -3483,15 +3665,38 @@ app.patch(
           riderName: updated[0].riderName,
           riderPhone: assignedRiderRows[0]?.phone || null,
           etaMinutes: updated[0].estimatedMinutes,
+          createdAt: updated[0].createdAt,
           items: updated[0].itemsSnapshotJson,
         });
       }
+
+      await sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        eventKind: 'status_update',
+        restaurantName: updated[0].restaurantName,
+        restaurantEmail: restOwnerRows[0]?.email || null,
+        customerName: updated[0].customerName,
+        customerPhone: updated[0].customerPhone,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: updated[0].status,
+        statusNote: statusLabels[parsed.data.status] || 'Delivery Update',
+        riderName: updated[0].riderName,
+        items: updated[0].itemsSnapshotJson,
+      }).catch(() => []);
 
       broadcastOrderEvent('order:updated', {
         orderId: updated[0].id,
         orderNumber: updated[0].orderNumber,
         restaurantId: updated[0].restaurantId,
         restaurantName: updated[0].restaurantName,
+        restaurantOwnerUid: restOwnerRows[0]?.ownerUid || null,
         customerUid: updated[0].customerUid,
         riderUid: updated[0].riderUid,
         riderName: updated[0].riderName,
@@ -3504,6 +3709,14 @@ app.patch(
         recipientUid: order.customerUid,
         roleTarget: 'customer',
         title: statusLabels[parsed.data.status] || 'Delivery Update',
+        message: `${order.orderNumber} (${order.restaurantName}) is now ${parsed.data.status.replace(/_/g, ' ')}.`,
+        type: 'order',
+        relatedOrderId: order.id,
+      });
+      broadcastNotificationEvent({
+        recipientUid: 'role-super_admin',
+        roleTarget: 'super_admin',
+        title: `${statusLabels[parsed.data.status] || 'Delivery Update'} · ${order.orderNumber}`,
         message: `${order.orderNumber} (${order.restaurantName}) is now ${parsed.data.status.replace(/_/g, ' ')}.`,
         type: 'order',
         relatedOrderId: order.id,
@@ -4018,6 +4231,12 @@ app.patch(
         details: JSON.stringify(parsed.data),
       });
 
+      const restOwnerRows = await db
+        .select({ ownerUid: restaurants.ownerUid, email: restaurants.email })
+        .from(restaurants)
+        .where(eq(restaurants.id, updated[0].restaurantId))
+        .limit(1);
+
       if (updated[0].customerEmail) {
         const assignedRiderRows = updated[0].riderUid
           ? await db
@@ -4036,6 +4255,12 @@ app.patch(
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
+          subtotal: updated[0].subtotal,
+          discountAmount: updated[0].discountAmount,
+          couponCode: updated[0].couponCode,
+          deliveryFee: updated[0].deliveryFee,
+          serviceFee: updated[0].serviceFee,
+          taxAmount: updated[0].taxAmount,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
           paymentStatus: updated[0].paymentStatus,
@@ -4046,15 +4271,38 @@ app.patch(
           riderName: updated[0].riderName,
           riderPhone: assignedRiderRows[0]?.phone || null,
           etaMinutes: updated[0].estimatedMinutes,
+          createdAt: updated[0].createdAt,
           items: updated[0].itemsSnapshotJson,
         });
       }
+
+      await sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        eventKind: 'status_update',
+        restaurantName: updated[0].restaurantName,
+        restaurantEmail: restOwnerRows[0]?.email || null,
+        customerName: updated[0].customerName,
+        customerPhone: updated[0].customerPhone,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: updated[0].status,
+        statusNote: parsed.data.note || `Order update: ${parsed.data.status.replace(/_/g, ' ')}`,
+        riderName: updated[0].riderName,
+        items: updated[0].itemsSnapshotJson,
+      }).catch(() => []);
 
       broadcastOrderEvent('order:updated', {
         orderId: updated[0].id,
         orderNumber: updated[0].orderNumber,
         restaurantId: updated[0].restaurantId,
         restaurantName: updated[0].restaurantName,
+        restaurantOwnerUid: restOwnerRows[0]?.ownerUid || null,
         customerUid: updated[0].customerUid,
         riderUid: updated[0].riderUid,
         riderName: updated[0].riderName,
@@ -4063,6 +4311,24 @@ app.patch(
         deliveryArea: updated[0].deliveryArea,
         totalAmount: updated[0].totalAmount,
       });
+      broadcastNotificationEvent({
+        recipientUid: updated[0].customerUid,
+        roleTarget: 'customer',
+        title: `Order ${updated[0].orderNumber}: ${parsed.data.status.replace('_', ' ')}`,
+        message: parsed.data.note || `${updated[0].restaurantName} order updated.`,
+        type: 'order',
+        relatedOrderId: updated[0].id,
+      });
+      if (restOwnerRows[0]?.ownerUid) {
+        broadcastNotificationEvent({
+          recipientUid: restOwnerRows[0].ownerUid,
+          roleTarget: 'restaurant_owner',
+          title: `Order ${updated[0].orderNumber}: ${parsed.data.status.replace('_', ' ')}`,
+          message: `Order status updated to ${parsed.data.status.replace('_', ' ')}.`,
+          type: 'order',
+          relatedOrderId: updated[0].id,
+        });
+      }
 
       res.json({ order: updated[0] });
     } catch (error: any) {
@@ -4138,6 +4404,12 @@ app.patch(
         return updated[0];
       });
 
+      const restOwnerRows = await db
+        .select({ ownerUid: restaurants.ownerUid, email: restaurants.email })
+        .from(restaurants)
+        .where(eq(restaurants.id, result.restaurantId))
+        .limit(1);
+
       if (result.customerEmail) {
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
@@ -4149,6 +4421,12 @@ app.patch(
           restaurantName: result.restaurantName,
           deliveryArea: result.deliveryArea,
           deliveryAddress: result.deliveryAddress,
+          subtotal: result.subtotal,
+          discountAmount: result.discountAmount,
+          couponCode: result.couponCode,
+          deliveryFee: result.deliveryFee,
+          serviceFee: result.serviceFee,
+          taxAmount: result.taxAmount,
           totalAmount: result.totalAmount,
           paymentMethod: result.paymentMethod,
           paymentStatus: result.paymentStatus,
@@ -4157,15 +4435,38 @@ app.patch(
           statusNote: result.cancelReason || 'Order cancelled & refunded by Admin',
           riderName: result.riderName,
           etaMinutes: result.estimatedMinutes,
+          createdAt: result.createdAt,
           items: result.itemsSnapshotJson,
         });
       }
+
+      await sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: result.id,
+        orderNumber: result.orderNumber,
+        trackingToken: result.trackingToken,
+        eventKind: 'status_update',
+        restaurantName: result.restaurantName,
+        restaurantEmail: restOwnerRows[0]?.email || null,
+        customerName: result.customerName,
+        customerPhone: result.customerPhone,
+        deliveryArea: result.deliveryArea,
+        deliveryAddress: result.deliveryAddress,
+        totalAmount: result.totalAmount,
+        paymentMethod: result.paymentMethod,
+        paymentStatus: result.paymentStatus,
+        status: result.status,
+        statusNote: result.cancelReason || 'Order cancelled & refunded by Admin',
+        riderName: result.riderName,
+        items: result.itemsSnapshotJson,
+      }).catch(() => []);
 
       broadcastOrderEvent('order:updated', {
         orderId: result.id,
         orderNumber: result.orderNumber,
         restaurantId: result.restaurantId,
         restaurantName: result.restaurantName,
+        restaurantOwnerUid: restOwnerRows[0]?.ownerUid || null,
         customerUid: result.customerUid,
         riderUid: result.riderUid,
         riderName: result.riderName,
@@ -4174,6 +4475,24 @@ app.patch(
         deliveryArea: result.deliveryArea,
         totalAmount: result.totalAmount,
       });
+      broadcastNotificationEvent({
+        recipientUid: result.customerUid,
+        roleTarget: 'customer',
+        title: `Order ${result.orderNumber}: Cancelled & Refunded`,
+        message: result.cancelReason || `${result.restaurantName} order cancelled and refunded.`,
+        type: 'order',
+        relatedOrderId: result.id,
+      });
+      if (restOwnerRows[0]?.ownerUid) {
+        broadcastNotificationEvent({
+          recipientUid: restOwnerRows[0].ownerUid,
+          roleTarget: 'restaurant_owner',
+          title: `Order ${result.orderNumber}: Cancelled`,
+          message: result.cancelReason || 'Order cancelled and commission reversed by Admin.',
+          type: 'order',
+          relatedOrderId: result.id,
+        });
+      }
 
       res.json({ order: result });
     } catch (error: any) {
@@ -4730,6 +5049,8 @@ app.get(
       const sslActive =
         Boolean(connStr) && !connStr.includes('localhost') && !connStr.includes('127.0.0.1');
 
+      const emailStatus = await getEmailTransportStatus();
+
       res.json({
         ok: true,
         checkedAt: new Date().toISOString(),
@@ -4754,6 +5075,8 @@ app.get(
           pathaoLiveConfigured: Boolean(
             process.env.PATHAO_CLIENT_ID && process.env.PATHAO_CLIENT_SECRET
           ),
+          emailConfigured: emailStatus.configured,
+          emailProvider: emailStatus.provider,
         },
         tableCounts: {
           users: Number(usersCount[0]?.count ?? 0),
@@ -4769,6 +5092,89 @@ app.get(
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Database health check failed' });
+    }
+  }
+);
+
+app.get(
+  '/api/admin/email-settings',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (_req, res) => {
+    try {
+      const settings = await getAdminEmailSettingsView();
+      res.json({ settings });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to load email settings' });
+    }
+  }
+);
+
+app.put(
+  '/api/admin/email-settings',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      provider: z.enum(['gmail', 'smtp', 'resend']),
+      smtpHost: z.string().trim().max(200).optional(),
+      smtpPort: z.number().int().min(1).max(65535).optional(),
+      smtpSecure: z.boolean().optional(),
+      smtpUser: z.string().trim().max(200).optional(),
+      smtpPass: z.string().max(200).optional(),
+      fromAddress: z.string().trim().max(200).optional(),
+      notifyEmail: z.string().trim().email().or(z.literal('')).optional(),
+      resendApiKey: z.string().max(300).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid email transport configuration payload' });
+    }
+    try {
+      const saved = await saveAdminEmailSettings(parsed.data);
+      await db.insert(auditLogs).values({
+        actorUid: req.user!.uid,
+        action: 'email_settings_updated',
+        targetType: 'email_transport',
+        targetId: saved.provider,
+        details: `Updated email delivery provider to ${saved.provider} (configured: ${saved.configured})`,
+      });
+      res.json({ ok: true, settings: saved });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to save email settings' });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/email-settings/test',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      to: z.string().trim().email(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Please enter a valid recipient email address.' });
+    }
+    try {
+      const result = await sendTestEmail(parsed.data.to);
+      if (!result.ok) {
+        return res.status(400).json({
+          ok: false,
+          provider: result.provider,
+          status: result.status,
+          error: result.error || 'Failed to send test invoice email',
+        });
+      }
+      res.json({
+        ok: true,
+        provider: result.provider,
+        message: `Test invoice email sent to ${parsed.data.to} via ${result.provider.toUpperCase()}.`,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to send test email' });
     }
   }
 );

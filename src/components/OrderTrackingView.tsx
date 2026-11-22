@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  Bell,
   Bike,
   CheckCircle2,
   Clock,
@@ -15,6 +16,7 @@ import {
   ShieldCheck,
   Star,
   Truck,
+  X,
 } from 'lucide-react';
 import { apiFetch, getAuthToken } from '../lib/api';
 import {
@@ -23,7 +25,7 @@ import {
   computeOrderEtaSummary,
   formatBdt,
 } from '../lib/marketplace-logic';
-import { useRealtimeEvents } from '../lib/realtime';
+import { playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import type {
   Lang,
@@ -84,6 +86,8 @@ export function OrderTrackingView({
     distanceKm: number;
     drivingMinutes: number;
   } | null>(null);
+  const [liveStatusNotice, setLiveStatusNotice] = useState<string | null>(null);
+  const prevStatusRef = useRef<string | null>(null);
 
   const loadOrder = useCallback(async () => {
     try {
@@ -96,6 +100,17 @@ export function OrderTrackingView({
         emailLogs?: OrderEmailLog[];
         history: Array<{ id: number; status: string; note: string; createdAt: string }>;
       }>(`/api/orders/${orderId}${qs}`);
+      if (prevStatusRef.current && prevStatusRef.current !== res.order.status) {
+        void playOrderAlertChime('status_update', {
+          dedupKey: `order_status_${res.order.id}_${res.order.status}`,
+        });
+        setLiveStatusNotice(
+          lang === 'bn'
+            ? `লাইভ আপডেট: আপনার অর্ডার এখন "${res.order.status.replace(/_/g, ' ')}"`
+            : `Live update: Order is now "${res.order.status.replace(/_/g, ' ')}"`
+        );
+      }
+      prevStatusRef.current = res.order.status;
       setOrder(res.order);
       setRestaurant(res.restaurant);
       setRiderLocation(res.riderLocation ?? null);
@@ -110,9 +125,14 @@ export function OrderTrackingView({
     } finally {
       setLoading(false);
     }
-  }, [orderId, initialToken]);
+  }, [orderId, initialToken, lang]);
 
   const isTerminal = order?.status === 'delivered' || order?.status === 'cancelled';
+
+  useEffect(() => {
+    prevStatusRef.current = null;
+    setLiveStatusNotice(null);
+  }, [orderId]);
 
   useEffect(() => {
     loadOrder();
@@ -271,6 +291,26 @@ export function OrderTrackingView({
           <span>{lang === 'bn' ? 'আপডেট করুন' : 'Refresh Status'}</span>
         </button>
       </div>
+
+      {liveStatusNotice && (
+        <div
+          role="status"
+          className="rounded-2xl bg-[#FFF0F6] border border-[#E21B70]/40 p-3.5 flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2.5 text-xs font-bold text-[#2E3138]">
+            <Bell className="w-4 h-4 text-[#E21B70] shrink-0 animate-pulse" />
+            <span>{liveStatusNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setLiveStatusNotice(null)}
+            aria-label="Dismiss live tracking alert"
+            className="p-1 rounded hover:bg-white text-neutral-500"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Order Header & Online Payment Verification Action */}
       <div className="bg-white rounded-2xl border border-neutral-200 p-6">
@@ -654,15 +694,25 @@ export function OrderTrackingView({
 
         <div className="lg:col-span-5 space-y-6">
           <div className="bg-white rounded-2xl border border-neutral-200 p-5">
-            <h2 className="text-sm font-bold text-[#2E3138] mb-3">
-              {lang === 'bn' ? 'অর্ডার রসিদ' : 'Order Summary'}
-            </h2>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <h2 className="text-sm font-bold text-[#2E3138]">
+                {lang === 'bn' ? 'অর্ডার ইনভয়েস ও রসিদ' : 'Order Invoice & Receipt'}
+              </h2>
+              <span className="px-2 py-0.5 rounded bg-[#FFF0F6] text-[#E21B70] border border-[#E21B70]/20 text-[11px] font-mono-nums font-bold">
+                INV-{order.orderNumber}
+              </span>
+            </div>
             <div className="space-y-2.5 text-sm">
               {order.itemsSnapshotJson.map((item, idx) => (
                 <div key={idx} className="flex justify-between gap-2">
                   <span className="text-neutral-700">
                     {item.quantity}x {lang === 'bn' ? item.nameBn : item.name}
                     {item.variation ? ` (${item.variation})` : ''}
+                    {item.unitPrice > 0 ? (
+                      <span className="text-[11px] text-neutral-400 ml-1">
+                        @ {formatBdt(item.unitPrice, lang)}
+                      </span>
+                    ) : null}
                   </span>
                   <span className="font-semibold tabular-nums">{formatBdt(item.lineTotal, lang)}</span>
                 </div>
@@ -674,7 +724,10 @@ export function OrderTrackingView({
                 </div>
                 {order.discountAmount > 0 && (
                   <div className="flex justify-between text-emerald-700">
-                    <span>{lang === 'bn' ? 'ডিসকাউন্ট' : 'Discount'}</span>
+                    <span>
+                      {lang === 'bn' ? 'ডিসকাউন্ট' : 'Discount'}
+                      {order.couponCode ? ` (${order.couponCode})` : ''}
+                    </span>
                     <span>−{formatBdt(order.discountAmount, lang)}</span>
                   </div>
                 )}
@@ -686,8 +739,14 @@ export function OrderTrackingView({
                   <span>{lang === 'bn' ? 'সার্ভিস চার্জ' : 'Service Fee'}</span>
                   <span>{formatBdt(order.serviceFee, lang)}</span>
                 </div>
+                {order.taxAmount > 0 && (
+                  <div className="flex justify-between">
+                    <span>{lang === 'bn' ? 'ভ্যাট / ট্যাক্স' : 'VAT / Tax'}</span>
+                    <span>{formatBdt(order.taxAmount, lang)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between font-bold text-sm text-[#2E3138] pt-2 border-t border-neutral-100">
-                  <span>{lang === 'bn' ? 'মোট' : 'Total'}</span>
+                  <span>{lang === 'bn' ? 'সর্বমোট' : 'Total Paid / Payable'}</span>
                   <span className="text-[#E21B70]">{formatBdt(order.totalAmount, lang)}</span>
                 </div>
               </div>
@@ -753,10 +812,19 @@ export function OrderTrackingView({
               </p>
             )}
 
+            {emailLogs.some((l) => l.providerStatus !== 'sent') &&
+              !emailLogs.some((l) => l.providerStatus === 'sent') && (
+                <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-900">
+                  {lang === 'bn'
+                    ? 'ইনভয়েস তৈরি হয়ে ট্র্যাকিং ইনবক্সে সংরক্ষিত হয়েছে। সরাসরি Gmail/Email ইনবক্সে পাঠাতে Admin -> Backend Control থেকে Gmail SMTP বা Resend যুক্ত করুন।'
+                    : 'Invoice generated and saved in your Tracking Inbox. To deliver directly to Gmail/Email inboxes, configure Gmail SMTP or Resend in Admin -> Backend Control.'}
+                </div>
+              )}
+
             {emailLogs.length > 0 && (
               <div className="space-y-2 pt-2 border-t border-neutral-100">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
-                  Dispatched Email Updates ({emailLogs.length})
+                  Dispatched Invoice &amp; Email Updates ({emailLogs.length})
                 </p>
                 <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
                   {emailLogs.map((log) => (
@@ -773,12 +841,16 @@ export function OrderTrackingView({
                               className={
                                 log.providerStatus === 'sent'
                                   ? 'text-emerald-700 font-semibold'
-                                  : 'text-neutral-500'
+                                  : log.providerStatus.includes('error')
+                                  ? 'text-red-600 font-semibold'
+                                  : 'text-amber-700 font-medium'
                               }
                             >
                               {log.providerStatus === 'sent'
                                 ? `Sent (${log.deliveryProvider.toUpperCase()})`
-                                : 'Saved in Tracking Inbox'}
+                                : log.providerStatus === 'not_configured' || log.providerStatus === 'recorded'
+                                ? 'Saved in Tracking Inbox (SMTP not configured)'
+                                : `Email Failed (${log.providerStatus})`}
                             </span>
                           </p>
                         </div>

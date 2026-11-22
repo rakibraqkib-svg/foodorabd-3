@@ -13,14 +13,15 @@ import {
   X,
 } from 'lucide-react';
 import { apiFetch, getAuthToken, setAuthToken } from '../lib/api';
-import { BANGLADESH_AREAS } from '../lib/i18n';
+import { BANGLADESH_AREAS, DHAKA_DELIVERY_ZONES, getBangladeshAreaSelectPresets } from '../lib/i18n';
 import {
   advanceRiderAlongRoute,
   calculateLiveRiderEta,
+  detectOrderBatchChanges,
   formatBdt,
   VEHICLE_TYPE_PRESET_OPTIONS,
 } from '../lib/marketplace-logic';
-import { playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
+import { emitLocalRealtimeSignal, playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
 import type { AppUser, Lang, OrderRecord, RiderRecord } from '../types/marketplace';
@@ -85,8 +86,12 @@ export function RiderDashboard({
     (user!.role === 'rider' || user!.role === 'admin' || user!.role === 'super_admin');
 
   const [liveDeliveryAlert, setLiveDeliveryAlert] = useState<string | null>(null);
-  const knownAvailableIdsRef = useRef<Set<number>>(new Set());
-  const hasHydratedRef = useRef(false);
+  const availableSnapshotRef = useRef<Map<number, { status: string; paymentStatus?: string }> | null>(
+    null
+  );
+  const assignedSnapshotRef = useRef<Map<number, { status: string; paymentStatus?: string }> | null>(
+    null
+  );
 
   const loadWorkspace = useCallback(
     async (silent = false) => {
@@ -101,19 +106,46 @@ export function RiderDashboard({
           availableOrders: OrderRecord[];
           assignedOrders: OrderRecord[];
         }>('/api/rider/workspace');
-        if (hasHydratedRef.current) {
-          const freshReady = res.availableOrders.find((o) => !knownAvailableIdsRef.current.has(o.id));
-          if (freshReady) {
-            setLiveDeliveryAlert(
-              lang === 'bn'
-                ? `নতুন ডেলিভারি অর্ডার এসেছে: ${freshReady.orderNumber} (${freshReady.restaurantName})`
-                : `New delivery order available: ${freshReady.orderNumber} (${freshReady.restaurantName})`
-            );
-            playOrderAlertChime('new_order');
-          }
+
+        const availChanges = detectOrderBatchChanges(
+          availableSnapshotRef.current,
+          res.availableOrders
+        );
+        availableSnapshotRef.current = availChanges.nextMap;
+
+        const assignedChanges = detectOrderBatchChanges(
+          assignedSnapshotRef.current,
+          res.assignedOrders
+        );
+        assignedSnapshotRef.current = assignedChanges.nextMap;
+
+        if (availChanges.newOrders.length > 0) {
+          const freshReady = availChanges.newOrders[0];
+          setLiveDeliveryAlert(
+            lang === 'bn'
+              ? `নতুন ডেলিভারি অর্ডার এসেছে: ${freshReady.orderNumber} (${freshReady.restaurantName})`
+              : `New delivery order available: ${freshReady.orderNumber} (${freshReady.restaurantName})`
+          );
+          void playOrderAlertChime('new_order', { dedupKey: `order_created_${freshReady.id}` });
+        } else if (assignedChanges.newOrders.length > 0) {
+          const newlyAssigned = assignedChanges.newOrders[0];
+          setLiveDeliveryAlert(
+            lang === 'bn'
+              ? `নতুন ডেলিভারি অ্যাসাইন হয়েছে: ${newlyAssigned.orderNumber} (${newlyAssigned.restaurantName})`
+              : `New delivery assigned to you: ${newlyAssigned.orderNumber} (${newlyAssigned.restaurantName})`
+          );
+          void playOrderAlertChime('new_order', { dedupKey: `order_created_${newlyAssigned.id}` });
+        } else if (assignedChanges.updatedOrders.length > 0) {
+          const changed = assignedChanges.updatedOrders[0];
+          setLiveDeliveryAlert(
+            lang === 'bn'
+              ? `অর্ডার আপডেট: ${changed.orderNumber} (${changed.status.replace(/_/g, ' ')})`
+              : `Order update: ${changed.orderNumber} (${changed.status.replace(/_/g, ' ')})`
+          );
+          void playOrderAlertChime('status_update', {
+            dedupKey: `order_status_${changed.id}_${changed.status}`,
+          });
         }
-        knownAvailableIdsRef.current = new Set(res.availableOrders.map((o) => o.id));
-        hasHydratedRef.current = true;
 
         setRider(res.rider);
         setAvailableOrders(res.availableOrders);
@@ -128,16 +160,22 @@ export function RiderDashboard({
   );
 
   useEffect(() => {
+    availableSnapshotRef.current = null;
+    assignedSnapshotRef.current = null;
+    setLiveDeliveryAlert(null);
+  }, [user?.uid]);
+
+  useEffect(() => {
     loadWorkspace(false);
   }, [loadWorkspace]);
 
   useRealtimeEvents({
     enabled: canAccessRiderApi && !showJobForm,
     token: getAuthToken(),
-    pollFallbackMs: 8000,
+    pollFallbackMs: 6000,
     onSync: () => loadWorkspace(true),
     onEvent: (ev) => {
-      if (ev.type === 'order:created' || ev.type === 'order:updated') {
+      if (ev.type === 'order:created' || ev.type === 'order:updated' || ev.type === 'notification:created') {
         loadWorkspace(true);
       }
     },
@@ -265,6 +303,7 @@ export function RiderDashboard({
 
   const handleAcceptOrder = async (orderId: number) => {
     await apiFetch(`/api/rider/orders/${orderId}/accept`, { method: 'POST' });
+    emitLocalRealtimeSignal('order:updated', { orderId, status: 'rider_assigned' });
     await loadWorkspace(true);
   };
 
@@ -276,6 +315,7 @@ export function RiderDashboard({
       method: 'PATCH',
       body: JSON.stringify({ status }),
     });
+    emitLocalRealtimeSignal('order:updated', { orderId, status });
     await loadWorkspace(true);
   };
 
@@ -464,10 +504,7 @@ export function RiderDashboard({
                     ? '+ কাস্টম এলাকা যোগ করুন...'
                     : '+ Add Custom Area in Bangladesh...'
                 }
-                presets={BANGLADESH_AREAS.map((a) => ({
-                  value: a.name,
-                  label: `${a.name} (${a.division}) — ${a.nameBn}`,
-                }))}
+                presets={getBangladeshAreaSelectPresets(lang)}
                 onSelectPreset={(val) => {
                   const found = BANGLADESH_AREAS.find((a) => a.name === val);
                   if (found) setApplyCoords({ lat: found.lat, lng: found.lng });
@@ -667,11 +704,22 @@ export function RiderDashboard({
                     onChange={(e) => setSelectedSyncZone(e.target.value)}
                     className="px-3 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white font-semibold"
                   >
-                    {BANGLADESH_AREAS.map((a) => (
-                      <option key={a.name} value={a.name}>
-                        {a.name} ({a.division})
-                      </option>
+                    {DHAKA_DELIVERY_ZONES.map((z) => (
+                      <optgroup key={z.code} label={`${z.code} — ${z.name}`}>
+                        {z.areas.map((a) => (
+                          <option key={a.name} value={a.name}>
+                            {a.name} ({a.nameBn})
+                          </option>
+                        ))}
+                      </optgroup>
                     ))}
+                    <optgroup label={lang === 'bn' ? 'অন্যান্য বাংলাদেশ শহর' : 'Nationwide Bangladesh Cities'}>
+                      {BANGLADESH_AREAS.filter((a) => !a.zoneCode).map((a) => (
+                        <option key={a.name} value={a.name}>
+                          {a.name} ({a.division})
+                        </option>
+                      ))}
+                    </optgroup>
                     <option value="__custom__">Custom Area...</option>
                   </select>
                   {selectedSyncZone === '__custom__' && (

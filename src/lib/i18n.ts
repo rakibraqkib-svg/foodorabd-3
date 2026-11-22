@@ -105,49 +105,216 @@ export function localizeCouponTitle(code: string, dbTitle: string, lang: Lang): 
   return dbTitle;
 }
 
-export const DHAKA_AREAS = [
-  { name: 'Gulshan 2', nameBn: 'গুলশান ২', lat: 23.7949, lng: 90.4144 },
-  { name: 'Banani', nameBn: 'বনানী', lat: 23.7937, lng: 90.4066 },
-  { name: 'Dhanmondi 27', nameBn: 'ধানমন্ডি ২৭', lat: 23.7518, lng: 90.3712 },
-  { name: 'Gulshan 1', nameBn: 'গুলশান ১', lat: 23.7811, lng: 90.4167 },
-  { name: 'Uttara Sector 7', nameBn: 'উত্তরা সেক্টর ৭', lat: 23.8682, lng: 90.3991 },
-  { name: 'Mirpur 10', nameBn: 'মিরপুর ১০', lat: 23.8069, lng: 90.3687 },
-  { name: 'Bashundhara R/A', nameBn: 'বসুন্ধরা আবাসিক এলাকা', lat: 23.8191, lng: 90.4526 },
-  { name: 'Motijheel', nameBn: 'মতিঝিল', lat: 23.7272, lng: 90.4198 },
-];
-
 export interface BangladeshAreaPreset {
   name: string;
   nameBn: string;
   division: string;
+  zoneCode?: string;
+  zoneLabel?: string;
   lat: number;
   lng: number;
 }
 
-export const BANGLADESH_AREAS: BangladeshAreaPreset[] = [
-  { name: 'Gulshan 2', nameBn: 'গুলশান ২, ঢাকা', division: 'Dhaka', lat: 23.7949, lng: 90.4144 },
-  { name: 'Banani', nameBn: 'বনানী, ঢাকা', division: 'Dhaka', lat: 23.7937, lng: 90.4066 },
-  { name: 'Dhanmondi 27', nameBn: 'ধানমন্ডি ২৭, ঢাকা', division: 'Dhaka', lat: 23.7518, lng: 90.3712 },
-  { name: 'Gulshan 1', nameBn: 'গুলশান ১, ঢাকা', division: 'Dhaka', lat: 23.7811, lng: 90.4167 },
-  { name: 'Uttara Sector 7', nameBn: 'উত্তরা, ঢাকা', division: 'Dhaka', lat: 23.8682, lng: 90.3991 },
-  { name: 'Mirpur 10', nameBn: 'মিরপুর ১০, ঢাকা', division: 'Dhaka', lat: 23.8069, lng: 90.3687 },
-  { name: 'Bashundhara R/A', nameBn: 'বসুন্ধরা, ঢাকা', division: 'Dhaka', lat: 23.8191, lng: 90.4526 },
-  { name: 'Motijheel', nameBn: 'মতিঝিল, ঢাকা', division: 'Dhaka', lat: 23.7272, lng: 90.4198 },
-  { name: 'Chattogram (GEC / Agrabad)', nameBn: 'চট্টগ্রাম (জিইসি / আগ্রাবাদ)', division: 'Chattogram', lat: 22.3569, lng: 91.7832 },
-  { name: 'Sylhet (Zindabazar)', nameBn: 'সিলেট (জিন্দাবাজার)', division: 'Sylhet', lat: 24.8949, lng: 91.8687 },
-  { name: 'Rajshahi (Shaheb Bazar)', nameBn: 'রাজশাহী (সাহেব বাজার)', division: 'Rajshahi', lat: 24.3745, lng: 88.6042 },
-  { name: 'Khulna (Shib Bari)', nameBn: 'খুলনা (শিববাড়ী)', division: 'Khulna', lat: 22.8456, lng: 89.5403 },
-  { name: 'Barishal (Sadar)', nameBn: 'বরিশাল (সদর)', division: 'Barishal', lat: 22.701, lng: 90.3535 },
-  { name: 'Rangpur (Jahaj Company)', nameBn: 'রংপুর (জাহাজ কোম্পানি)', division: 'Rangpur', lat: 25.7439, lng: 89.2752 },
-  { name: 'Mymensingh (Town Hall)', nameBn: 'ময়মনসিংহ (টাউন হল)', division: 'Mymensingh', lat: 24.7471, lng: 90.4203 },
-  { name: 'Narayanganj (Chashara)', nameBn: 'নারায়ণগঞ্জ (চাষাঢ়া)', division: 'Dhaka', lat: 23.6238, lng: 90.5 },
-  { name: 'Gazipur (Joydebpur)', nameBn: 'গাজীপুর (জয়দেবপুর)', division: 'Dhaka', lat: 23.9999, lng: 90.4203 },
-  { name: 'Savar (City Center)', nameBn: 'সাভার (সিটি সেন্টার)', division: 'Dhaka', lat: 23.8583, lng: 90.2667 },
-  { name: 'Cumilla (Kandirpar)', nameBn: 'কুমিল্লা (কান্দিরপাড়)', division: 'Chattogram', lat: 23.4607, lng: 91.1809 },
-  { name: "Cox's Bazar (Kolatoli)", nameBn: 'কক্সবাজার (কলাতলী)', division: 'Chattogram', lat: 21.4272, lng: 92.0058 },
-  { name: 'Bogura (Satmatha)', nameBn: 'বগুড়া (সাতমাথা)', division: 'Rajshahi', lat: 24.8481, lng: 89.373 },
-  { name: 'Jashore (Town)', nameBn: 'যশোর (শহর)', division: 'Khulna', lat: 23.1664, lng: 89.2081 },
+export interface DhakaDeliveryZone {
+  code: string;
+  name: string;
+  nameBn: string;
+  summary: string;
+  areas: BangladeshAreaPreset[];
+}
+
+export const DHAKA_DELIVERY_ZONES: DhakaDeliveryZone[] = [
+  {
+    code: 'ZONE 01',
+    name: 'GULSHAN',
+    nameBn: 'গুলশান',
+    summary: 'Gulshan 1, Gulshan 2, Niketan, Shahjadpur',
+    areas: [
+      { name: 'Gulshan 2', nameBn: 'গুলশান ২', division: 'Dhaka', zoneCode: 'ZONE 01', zoneLabel: 'ZONE 01 — GULSHAN', lat: 23.7949, lng: 90.4144 },
+      { name: 'Gulshan 1', nameBn: 'গুলশান ১', division: 'Dhaka', zoneCode: 'ZONE 01', zoneLabel: 'ZONE 01 — GULSHAN', lat: 23.7811, lng: 90.4167 },
+      { name: 'Niketan', nameBn: 'নিকেতন', division: 'Dhaka', zoneCode: 'ZONE 01', zoneLabel: 'ZONE 01 — GULSHAN', lat: 23.7764, lng: 90.4098 },
+      { name: 'Shahjadpur', nameBn: 'শাহজাদপুর', division: 'Dhaka', zoneCode: 'ZONE 01', zoneLabel: 'ZONE 01 — GULSHAN', lat: 23.7985, lng: 90.4256 },
+    ],
+  },
+  {
+    code: 'ZONE 02',
+    name: 'BANANI',
+    nameBn: 'বনানী',
+    summary: 'Banani 1–27, Chairman Bari, Kakoli',
+    areas: [
+      { name: 'Banani', nameBn: 'বনানী', division: 'Dhaka', zoneCode: 'ZONE 02', zoneLabel: 'ZONE 02 — BANANI', lat: 23.7937, lng: 90.4066 },
+      { name: 'Banani 1–27', nameBn: 'বনানী ১–২৭', division: 'Dhaka', zoneCode: 'ZONE 02', zoneLabel: 'ZONE 02 — BANANI', lat: 23.7942, lng: 90.4045 },
+      { name: 'Chairman Bari', nameBn: 'চেয়ারম্যান বাড়ি', division: 'Dhaka', zoneCode: 'ZONE 02', zoneLabel: 'ZONE 02 — BANANI', lat: 23.7916, lng: 90.4021 },
+      { name: 'Kakoli', nameBn: 'কাকলী', division: 'Dhaka', zoneCode: 'ZONE 02', zoneLabel: 'ZONE 02 — BANANI', lat: 23.7983, lng: 90.4008 },
+    ],
+  },
+  {
+    code: 'ZONE 03',
+    name: 'DHANMONDI',
+    nameBn: 'ধানমন্ডি',
+    summary: 'Dhanmondi 1–32, Satmasjid Road, Jigatola, Kalabagan',
+    areas: [
+      { name: 'Dhanmondi 27', nameBn: 'ধানমন্ডি ২৭', division: 'Dhaka', zoneCode: 'ZONE 03', zoneLabel: 'ZONE 03 — DHANMONDI', lat: 23.7518, lng: 90.3712 },
+      { name: 'Dhanmondi 1–32', nameBn: 'ধানমন্ডি ১–৩২', division: 'Dhaka', zoneCode: 'ZONE 03', zoneLabel: 'ZONE 03 — DHANMONDI', lat: 23.7461, lng: 90.3742 },
+      { name: 'Satmasjid Road', nameBn: 'সাতমসজিদ রোড', division: 'Dhaka', zoneCode: 'ZONE 03', zoneLabel: 'ZONE 03 — DHANMONDI', lat: 23.7458, lng: 90.3698 },
+      { name: 'Jigatola', nameBn: 'জিগাতলা', division: 'Dhaka', zoneCode: 'ZONE 03', zoneLabel: 'ZONE 03 — DHANMONDI', lat: 23.7397, lng: 90.3728 },
+      { name: 'Kalabagan', nameBn: 'কলাবাগান', division: 'Dhaka', zoneCode: 'ZONE 03', zoneLabel: 'ZONE 03 — DHANMONDI', lat: 23.7495, lng: 90.3822 },
+    ],
+  },
+  {
+    code: 'ZONE 04',
+    name: 'MIRPUR',
+    nameBn: 'মিরপুর',
+    summary: 'Mirpur 1, 2, 6, 10, 11, 12, Pallabi, Kazipara',
+    areas: [
+      { name: 'Mirpur 10', nameBn: 'মিরপুর ১০', division: 'Dhaka', zoneCode: 'ZONE 04', zoneLabel: 'ZONE 04 — MIRPUR', lat: 23.8069, lng: 90.3687 },
+      { name: 'Mirpur 1', nameBn: 'মিরপুর ১', division: 'Dhaka', zoneCode: 'ZONE 04', zoneLabel: 'ZONE 04 — MIRPUR', lat: 23.7984, lng: 90.3536 },
+      { name: 'Mirpur 2', nameBn: 'মিরপুর ২', division: 'Dhaka', zoneCode: 'ZONE 04', zoneLabel: 'ZONE 04 — MIRPUR', lat: 23.8045, lng: 90.3612 },
+      { name: 'Mirpur 6', nameBn: 'মিরপুর ৬', division: 'Dhaka', zoneCode: 'ZONE 04', zoneLabel: 'ZONE 04 — MIRPUR', lat: 23.8124, lng: 90.3638 },
+      { name: 'Mirpur 11', nameBn: 'মিরপুর ১১', division: 'Dhaka', zoneCode: 'ZONE 04', zoneLabel: 'ZONE 04 — MIRPUR', lat: 23.8186, lng: 90.3652 },
+      { name: 'Mirpur 12', nameBn: 'মিরপুর ১২', division: 'Dhaka', zoneCode: 'ZONE 04', zoneLabel: 'ZONE 04 — MIRPUR', lat: 23.8286, lng: 90.3641 },
+      { name: 'Pallabi', nameBn: 'পল্লবী', division: 'Dhaka', zoneCode: 'ZONE 04', zoneLabel: 'ZONE 04 — MIRPUR', lat: 23.8256, lng: 90.3602 },
+      { name: 'Kazipara', nameBn: 'কাজীপাড়া', division: 'Dhaka', zoneCode: 'ZONE 04', zoneLabel: 'ZONE 04 — MIRPUR', lat: 23.7966, lng: 90.3735 },
+    ],
+  },
+  {
+    code: 'ZONE 05',
+    name: 'UTTARA',
+    nameBn: 'উত্তরা',
+    summary: 'Sectors 1–14, Rajlaxmi, Jashimuddin, Abdullahpur',
+    areas: [
+      { name: 'Uttara Sector 7', nameBn: 'উত্তরা সেক্টর ৭', division: 'Dhaka', zoneCode: 'ZONE 05', zoneLabel: 'ZONE 05 — UTTARA', lat: 23.8682, lng: 90.3991 },
+      { name: 'Uttara Sectors 1–14', nameBn: 'উত্তরা সেক্টর ১–১৪', division: 'Dhaka', zoneCode: 'ZONE 05', zoneLabel: 'ZONE 05 — UTTARA', lat: 23.8722, lng: 90.3965 },
+      { name: 'Rajlaxmi', nameBn: 'রাজলক্ষ্মী', division: 'Dhaka', zoneCode: 'ZONE 05', zoneLabel: 'ZONE 05 — UTTARA', lat: 23.8618, lng: 90.4003 },
+      { name: 'Jashimuddin', nameBn: 'জসিমউদ্দীন', division: 'Dhaka', zoneCode: 'ZONE 05', zoneLabel: 'ZONE 05 — UTTARA', lat: 23.8602, lng: 90.4009 },
+      { name: 'Abdullahpur', nameBn: 'আব্দুল্লাহপুর', division: 'Dhaka', zoneCode: 'ZONE 05', zoneLabel: 'ZONE 05 — UTTARA', lat: 23.8794, lng: 90.4012 },
+    ],
+  },
+  {
+    code: 'ZONE 06',
+    name: 'MOHAMMADPUR',
+    nameBn: 'মোহাম্মদপুর',
+    summary: 'Mohammadpur, Town Hall, Bosila, Adabor, Shyamoli',
+    areas: [
+      { name: 'Mohammadpur', nameBn: 'মোহাম্মদপুর', division: 'Dhaka', zoneCode: 'ZONE 06', zoneLabel: 'ZONE 06 — MOHAMMADPUR', lat: 23.7658, lng: 90.3586 },
+      { name: 'Town Hall', nameBn: 'টাউন হল', division: 'Dhaka', zoneCode: 'ZONE 06', zoneLabel: 'ZONE 06 — MOHAMMADPUR', lat: 23.7662, lng: 90.3621 },
+      { name: 'Bosila', nameBn: 'বসিলা', division: 'Dhaka', zoneCode: 'ZONE 06', zoneLabel: 'ZONE 06 — MOHAMMADPUR', lat: 23.7484, lng: 90.3435 },
+      { name: 'Adabor', nameBn: 'আদাবর', division: 'Dhaka', zoneCode: 'ZONE 06', zoneLabel: 'ZONE 06 — MOHAMMADPUR', lat: 23.7704, lng: 90.3568 },
+      { name: 'Shyamoli', nameBn: 'শ্যামলী', division: 'Dhaka', zoneCode: 'ZONE 06', zoneLabel: 'ZONE 06 — MOHAMMADPUR', lat: 23.7745, lng: 90.3654 },
+    ],
+  },
+  {
+    code: 'ZONE 07',
+    name: 'BASHUNDHARA',
+    nameBn: 'বসুন্ধরা',
+    summary: 'Bashundhara R/A, Jamuna Future Park, Kuril, Vatara',
+    areas: [
+      { name: 'Bashundhara R/A', nameBn: 'বসুন্ধরা আবাসিক এলাকা', division: 'Dhaka', zoneCode: 'ZONE 07', zoneLabel: 'ZONE 07 — BASHUNDHARA', lat: 23.8191, lng: 90.4526 },
+      { name: 'Jamuna Future Park', nameBn: 'যমুনা ফিউচার পার্ক', division: 'Dhaka', zoneCode: 'ZONE 07', zoneLabel: 'ZONE 07 — BASHUNDHARA', lat: 23.8135, lng: 90.4242 },
+      { name: 'Kuril', nameBn: 'কুড়িল', division: 'Dhaka', zoneCode: 'ZONE 07', zoneLabel: 'ZONE 07 — BASHUNDHARA', lat: 23.8204, lng: 90.4215 },
+      { name: 'Vatara', nameBn: 'ভাটারা', division: 'Dhaka', zoneCode: 'ZONE 07', zoneLabel: 'ZONE 07 — BASHUNDHARA', lat: 23.8062, lng: 90.4285 },
+    ],
+  },
+  {
+    code: 'ZONE 08',
+    name: 'BADDA',
+    nameBn: 'বাড্ডা',
+    summary: 'Badda, Merul Badda, Rampura, Aftabnagar',
+    areas: [
+      { name: 'Badda', nameBn: 'বাড্ডা', division: 'Dhaka', zoneCode: 'ZONE 08', zoneLabel: 'ZONE 08 — BADDA', lat: 23.7805, lng: 90.4267 },
+      { name: 'Merul Badda', nameBn: 'মেরুল বাড্ডা', division: 'Dhaka', zoneCode: 'ZONE 08', zoneLabel: 'ZONE 08 — BADDA', lat: 23.7712, lng: 90.4252 },
+      { name: 'Rampura', nameBn: 'রামপুরা', division: 'Dhaka', zoneCode: 'ZONE 08', zoneLabel: 'ZONE 08 — BADDA', lat: 23.7615, lng: 90.4208 },
+      { name: 'Aftabnagar', nameBn: 'আফতাবনগর', division: 'Dhaka', zoneCode: 'ZONE 08', zoneLabel: 'ZONE 08 — BADDA', lat: 23.7654, lng: 90.4328 },
+    ],
+  },
+  {
+    code: 'ZONE 09',
+    name: 'MOTIJHEEL',
+    nameBn: 'মতিঝিল',
+    summary: 'Motijheel, Paltan, Fakirapool, Arambagh, Kamalapur',
+    areas: [
+      { name: 'Motijheel', nameBn: 'মতিঝিল', division: 'Dhaka', zoneCode: 'ZONE 09', zoneLabel: 'ZONE 09 — MOTIJHEEL', lat: 23.7272, lng: 90.4198 },
+      { name: 'Paltan', nameBn: 'পল্টন', division: 'Dhaka', zoneCode: 'ZONE 09', zoneLabel: 'ZONE 09 — MOTIJHEEL', lat: 23.7336, lng: 90.4119 },
+      { name: 'Fakirapool', nameBn: 'ফকিরাপুল', division: 'Dhaka', zoneCode: 'ZONE 09', zoneLabel: 'ZONE 09 — MOTIJHEEL', lat: 23.7332, lng: 90.4178 },
+      { name: 'Arambagh', nameBn: 'আরামবাগ', division: 'Dhaka', zoneCode: 'ZONE 09', zoneLabel: 'ZONE 09 — MOTIJHEEL', lat: 23.7311, lng: 90.4221 },
+      { name: 'Kamalapur', nameBn: 'কমলাপুর', division: 'Dhaka', zoneCode: 'ZONE 09', zoneLabel: 'ZONE 09 — MOTIJHEEL', lat: 23.7318, lng: 90.4264 },
+    ],
+  },
+  {
+    code: 'ZONE 10',
+    name: 'OLD DHAKA',
+    nameBn: 'পুরান ঢাকা',
+    summary: 'Chawkbazar, Bangshal, Lalbagh, Wari, Sutrapur',
+    areas: [
+      { name: 'Chawkbazar', nameBn: 'চকবাজার', division: 'Dhaka', zoneCode: 'ZONE 10', zoneLabel: 'ZONE 10 — OLD DHAKA', lat: 23.7158, lng: 90.3962 },
+      { name: 'Bangshal', nameBn: 'বংশাল', division: 'Dhaka', zoneCode: 'ZONE 10', zoneLabel: 'ZONE 10 — OLD DHAKA', lat: 23.7186, lng: 90.4046 },
+      { name: 'Lalbagh', nameBn: 'লালবাগ', division: 'Dhaka', zoneCode: 'ZONE 10', zoneLabel: 'ZONE 10 — OLD DHAKA', lat: 23.7189, lng: 90.3881 },
+      { name: 'Wari', nameBn: 'ওয়ারী', division: 'Dhaka', zoneCode: 'ZONE 10', zoneLabel: 'ZONE 10 — OLD DHAKA', lat: 23.7178, lng: 90.4176 },
+      { name: 'Sutrapur', nameBn: 'সূত্রাপুর', division: 'Dhaka', zoneCode: 'ZONE 10', zoneLabel: 'ZONE 10 — OLD DHAKA', lat: 23.7095, lng: 90.4138 },
+    ],
+  },
+  {
+    code: 'ZONE 11',
+    name: 'TEJGAON / FARMGATE',
+    nameBn: 'তেজগাঁও / ফার্মগেট',
+    summary: 'Tejgaon, Farmgate, Karwan Bazar, Kawran Bazar',
+    areas: [
+      { name: 'Tejgaon', nameBn: 'তেজগাঁও', division: 'Dhaka', zoneCode: 'ZONE 11', zoneLabel: 'ZONE 11 — TEJGAON / FARMGATE', lat: 23.7612, lng: 90.3964 },
+      { name: 'Farmgate', nameBn: 'ফার্মগেট', division: 'Dhaka', zoneCode: 'ZONE 11', zoneLabel: 'ZONE 11 — TEJGAON / FARMGATE', lat: 23.7561, lng: 90.3872 },
+      { name: 'Karwan Bazar', nameBn: 'কারওয়ান বাজার', division: 'Dhaka', zoneCode: 'ZONE 11', zoneLabel: 'ZONE 11 — TEJGAON / FARMGATE', lat: 23.7514, lng: 90.3931 },
+      { name: 'Kawran Bazar', nameBn: 'কাওরান বাজার', division: 'Dhaka', zoneCode: 'ZONE 11', zoneLabel: 'ZONE 11 — TEJGAON / FARMGATE', lat: 23.7521, lng: 90.3936 },
+    ],
+  },
+  {
+    code: 'ZONE 12',
+    name: 'KHILGAON',
+    nameBn: 'খিলগাঁও',
+    summary: 'Khilgaon, Taltola, Malibagh, Goran & custom area',
+    areas: [
+      { name: 'Khilgaon', nameBn: 'খিলগাঁও', division: 'Dhaka', zoneCode: 'ZONE 12', zoneLabel: 'ZONE 12 — KHILGAON', lat: 23.7506, lng: 90.4254 },
+      { name: 'Taltola', nameBn: 'তালতলা', division: 'Dhaka', zoneCode: 'ZONE 12', zoneLabel: 'ZONE 12 — KHILGAON', lat: 23.7532, lng: 90.4235 },
+      { name: 'Malibagh', nameBn: 'মালিবাগ', division: 'Dhaka', zoneCode: 'ZONE 12', zoneLabel: 'ZONE 12 — KHILGAON', lat: 23.7478, lng: 90.4126 },
+      { name: 'Goran', nameBn: 'গোরান', division: 'Dhaka', zoneCode: 'ZONE 12', zoneLabel: 'ZONE 12 — KHILGAON', lat: 23.7492, lng: 90.4335 },
+    ],
+  },
 ];
+
+export const DHAKA_AREAS = DHAKA_DELIVERY_ZONES.map((z) => ({
+  name: z.areas[0].name,
+  nameBn: z.areas[0].nameBn,
+  lat: z.areas[0].lat,
+  lng: z.areas[0].lng,
+}));
+
+const NATIONWIDE_BD_AREAS: BangladeshAreaPreset[] = [
+  { name: 'Chattogram (GEC / Agrabad)', nameBn: 'চট্টগ্রাম (জিইসি / আগ্রাবাদ)', division: 'Chattogram', zoneLabel: 'Nationwide Bangladesh Cities', lat: 22.3569, lng: 91.7832 },
+  { name: 'Sylhet (Zindabazar)', nameBn: 'সিলেট (জিন্দাবাজার)', division: 'Sylhet', zoneLabel: 'Nationwide Bangladesh Cities', lat: 24.8949, lng: 91.8687 },
+  { name: 'Rajshahi (Shaheb Bazar)', nameBn: 'রাজশাহী (সাহেব বাজার)', division: 'Rajshahi', zoneLabel: 'Nationwide Bangladesh Cities', lat: 24.3745, lng: 88.6042 },
+  { name: 'Khulna (Shib Bari)', nameBn: 'খুলনা (শিববাড়ী)', division: 'Khulna', zoneLabel: 'Nationwide Bangladesh Cities', lat: 22.8456, lng: 89.5403 },
+  { name: 'Barishal (Sadar)', nameBn: 'বরিশাল (সদর)', division: 'Barishal', zoneLabel: 'Nationwide Bangladesh Cities', lat: 22.701, lng: 90.3535 },
+  { name: 'Rangpur (Jahaj Company)', nameBn: 'রংপুর (জাহাজ কোম্পানি)', division: 'Rangpur', zoneLabel: 'Nationwide Bangladesh Cities', lat: 25.7439, lng: 89.2752 },
+  { name: 'Mymensingh (Town Hall)', nameBn: 'ময়মনসিংহ (টাউন হল)', division: 'Mymensingh', zoneLabel: 'Nationwide Bangladesh Cities', lat: 24.7471, lng: 90.4203 },
+  { name: 'Narayanganj (Chashara)', nameBn: 'নারায়ণগঞ্জ (চাষাঢ়া)', division: 'Dhaka', zoneLabel: 'Nationwide Bangladesh Cities', lat: 23.6238, lng: 90.5 },
+  { name: 'Gazipur (Joydebpur)', nameBn: 'গাজীপুর (জয়দেবপুর)', division: 'Dhaka', zoneLabel: 'Nationwide Bangladesh Cities', lat: 23.9999, lng: 90.4203 },
+  { name: 'Savar (City Center)', nameBn: 'সাভার (সিটি সেন্টার)', division: 'Dhaka', zoneLabel: 'Nationwide Bangladesh Cities', lat: 23.8583, lng: 90.2667 },
+  { name: 'Cumilla (Kandirpar)', nameBn: 'কুমিল্লা (কান্দিরপাড়)', division: 'Chattogram', zoneLabel: 'Nationwide Bangladesh Cities', lat: 23.4607, lng: 91.1809 },
+  { name: "Cox's Bazar (Kolatoli)", nameBn: 'কক্সবাজার (কলাতলী)', division: 'Chattogram', zoneLabel: 'Nationwide Bangladesh Cities', lat: 21.4272, lng: 92.0058 },
+  { name: 'Bogura (Satmatha)', nameBn: 'বগুড়া (সাতমাথা)', division: 'Rajshahi', zoneLabel: 'Nationwide Bangladesh Cities', lat: 24.8481, lng: 89.373 },
+  { name: 'Jashore (Town)', nameBn: 'যশোর (শহর)', division: 'Khulna', zoneLabel: 'Nationwide Bangladesh Cities', lat: 23.1664, lng: 89.2081 },
+];
+
+export const BANGLADESH_AREAS: BangladeshAreaPreset[] = [
+  ...DHAKA_DELIVERY_ZONES.flatMap((z) => z.areas),
+  ...NATIONWIDE_BD_AREAS,
+];
+
+export function getBangladeshAreaSelectPresets(lang: Lang) {
+  return BANGLADESH_AREAS.map((a) => ({
+    value: a.name,
+    label: lang === 'bn' ? `${a.nameBn} (${a.name})` : `${a.name} — ${a.nameBn}`,
+    group: a.zoneLabel || `${a.division} Division`,
+  }));
+}
 
 export const CUISINE_CATEGORIES = [
   { id: 'All', labelBn: 'সবগুলো', labelEn: 'All', img: '/src/assets/images/hero_dhaka_feast_1794831374659.jpg' },

@@ -1,4 +1,10 @@
-import { haversineDistanceKm, mapOpenMeteoWeather } from '../lib/marketplace-logic.ts';
+import {
+  cleanMapAddressSegments,
+  haversineDistanceKm,
+  mapOpenMeteoWeather,
+  matchCanonicalAreaFromHints,
+} from '../lib/marketplace-logic.ts';
+import { BANGLADESH_AREAS } from '../lib/i18n.ts';
 
 interface CacheEntry<T> {
   value: T;
@@ -131,13 +137,13 @@ export async function reverseOsmGeocode(
   lng: number,
   lang: 'en' | 'bn' = 'en'
 ): Promise<{ displayName: string; areaName: string; source: string }> {
-  const key = `osm-rev:${lang}:${lat.toFixed(4)},${lng.toFixed(4)}`;
+  const key = `osm-rev-v2:${lang}:${lat.toFixed(4)},${lng.toFixed(4)}`;
   const cached = getCached<{ displayName: string; areaName: string; source: string }>(key);
   if (cached) return cached;
 
   try {
-    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=${
-      lang === 'bn' ? 'bn,en' : 'en,bn'
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&addressdetails=1&zoom=18&accept-language=${
+      lang === 'bn' ? 'bn,en' : 'en'
     }`;
     const res = await fetch(url, {
       headers: { 'User-Agent': 'FoodoraBD-Marketplace/1.0' },
@@ -146,11 +152,15 @@ export async function reverseOsmGeocode(
     if (!res.ok) throw new Error(`Nominatim reverse HTTP ${res.status}`);
     const data = (await res.json()) as {
       display_name?: string;
+      name?: string;
       address?: {
+        amenity?: string;
+        building?: string;
+        house_number?: string;
+        road?: string;
         neighbourhood?: string;
         quarter?: string;
         suburb?: string;
-        road?: string;
         city?: string;
         town?: string;
         village?: string;
@@ -161,30 +171,39 @@ export async function reverseOsmGeocode(
       };
     };
     const addr = data.address;
-    const primaryLocal =
-      addr?.neighbourhood ||
-      addr?.quarter ||
-      addr?.suburb ||
-      addr?.village ||
-      addr?.town ||
-      addr?.road;
-    const cityPart =
-      addr?.city ||
-      addr?.city_district ||
-      addr?.county ||
-      addr?.state_district ||
-      addr?.state;
+    const houseOrBuilding = [addr?.house_number, addr?.road].filter(Boolean).join(' ').trim();
+    const localHood =
+      addr?.neighbourhood || addr?.quarter || addr?.suburb || addr?.village || addr?.town || '';
+    const cityPart = addr?.city || addr?.town || addr?.county || '';
 
-    const areaName =
-      primaryLocal && cityPart && primaryLocal !== cityPart
-        ? `${primaryLocal}, ${cityPart}`
-        : primaryLocal || cityPart || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-    const displayName = data.display_name || `${areaName}, Bangladesh`;
+    const areaName = matchCanonicalAreaFromHints(
+      [localHood, addr?.road || '', data.name || '', data.display_name || '', cityPart],
+      lat,
+      lng,
+      BANGLADESH_AREAS
+    );
+
+    const structuredCandidates = [
+      data.name || addr?.amenity || addr?.building || '',
+      houseOrBuilding,
+      localHood,
+      areaName,
+      cityPart,
+    ].filter(Boolean);
+    const cleanedSegments = cleanMapAddressSegments(
+      structuredCandidates.length > 0 ? structuredCandidates.join(', ') : data.display_name || ''
+    );
+
+    const displayName =
+      cleanedSegments.length > 0
+        ? `${cleanedSegments.slice(0, 4).join(', ')}, Bangladesh`
+        : `${areaName}, Bangladesh`;
     return setCached(key, { displayName, areaName, source: 'OpenStreetMap' }, 10 * 60 * 1000);
   } catch {
+    const areaName = matchCanonicalAreaFromHints([], lat, lng, BANGLADESH_AREAS);
     return {
-      displayName: `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}, Bangladesh`,
-      areaName: `Pinned (${lat.toFixed(3)}, ${lng.toFixed(3)})`,
+      displayName: `${areaName}, Bangladesh`,
+      areaName,
       source: 'Fallback',
     };
   }

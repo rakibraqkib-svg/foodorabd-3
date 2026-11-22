@@ -27,7 +27,7 @@ export interface VerifiedSupabaseUser {
 export async function verifySupabaseAccessToken(
   token: string
 ): Promise<VerifiedSupabaseUser | null> {
-  if (!token || token.startsWith('sbx.')) return null;
+  if (!token || token.startsWith('sbx.') || token.startsWith('fbd.')) return null;
   try {
     const { data, error } = await supabaseServer.auth.getUser(token);
     if (error || !data?.user) {

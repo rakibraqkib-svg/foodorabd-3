@@ -137,11 +137,37 @@ export function SelectWithCustom({
           'w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white text-[#2E3138]'
         }
       >
-        {knownOptions.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
+        {(() => {
+          const ungrouped: typeof knownOptions = [];
+          const groups = new Map<string, typeof knownOptions>();
+          for (const opt of knownOptions) {
+            if (opt.group) {
+              const bucket = groups.get(opt.group) || [];
+              bucket.push(opt);
+              groups.set(opt.group, bucket);
+            } else {
+              ungrouped.push(opt);
+            }
+          }
+          return (
+            <>
+              {ungrouped.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+              {Array.from(groups.entries()).map(([groupLabel, items]) => (
+                <optgroup key={groupLabel} label={groupLabel}>
+                  {items.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </>
+          );
+        })()}
         <option value={CUSTOM_SENTINEL}>
           {customOptionLabel ||
             (lang === 'bn' ? '+ কাস্টম / নতুন যোগ করুন...' : '+ Custom / Add New...')}

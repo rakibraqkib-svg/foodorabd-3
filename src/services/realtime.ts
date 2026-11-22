@@ -195,7 +195,9 @@ export async function attachSseRealtimeClient(
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
+  res.write('retry: 2000\n: stream-ready\n\n');
 
   const meta: RealtimeClientMeta = {
     id: clientId,
@@ -289,16 +291,23 @@ export function broadcastNotificationEvent(payload: RealtimeNotificationPayload)
     payload,
     ts: Date.now(),
   });
+  const recipient = String(payload.recipientUid || '').trim();
+  const isGlobalBroadcast = recipient === 'broadcast-all' || (!recipient && payload.roleTarget === 'all');
+  const isExplicitRoleBroadcast =
+    Boolean(payload.roleTarget) &&
+    (!recipient || recipient.startsWith('role-') || recipient === 'demo-admin-uid');
+
   for (const client of clients.values()) {
-    const matchesUid = Boolean(
-      payload.recipientUid && client.uid && client.uid === payload.recipientUid
+    const matchesUid = Boolean(recipient && client.uid && client.uid === recipient);
+    const matchesRoleBroadcast = Boolean(
+      isExplicitRoleBroadcast &&
+        payload.roleTarget &&
+        client.role &&
+        (client.role === payload.roleTarget ||
+          ((client.role === 'admin' || client.role === 'super_admin') &&
+            (payload.roleTarget === 'admin' || payload.roleTarget === 'super_admin')))
     );
-    const matchesRole = Boolean(
-      payload.roleTarget &&
-        (payload.roleTarget === 'all' || (client.role && client.role === payload.roleTarget))
-    );
-    const isAdmin = client.role === 'admin' || client.role === 'super_admin';
-    if (matchesUid || matchesRole || (isAdmin && payload.roleTarget === 'super_admin')) {
+    if (matchesUid || isGlobalBroadcast || matchesRoleBroadcast) {
       try {
         client.send(serialized);
       } catch {

@@ -37,14 +37,16 @@ import {
   YAxis,
 } from 'recharts';
 import { apiFetch, getAuthToken } from '../lib/api';
-import { BANGLADESH_AREAS } from '../lib/i18n';
-import { playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
+import { BANGLADESH_AREAS, getBangladeshAreaSelectPresets } from '../lib/i18n';
+import { emitLocalRealtimeSignal, playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
 import {
   buildVendorAnalytics,
   CUISINE_PRESET_OPTIONS,
   DeliveryMode,
+  detectOrderBatchChanges,
   FOOD_CATEGORY_PRESET_OPTIONS,
   formatBdt,
+  formatResolvedMapAddress,
 } from '../lib/marketplace-logic';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
@@ -99,8 +101,9 @@ export function VendorDashboard({
     customerName: string;
     totalAmount: number;
   } | null>(null);
-  const knownOrderIdsRef = useRef<Set<number>>(new Set());
-  const hasHydratedOrdersRef = useRef(false);
+  const orderSnapshotMapRef = useRef<Map<number, { status: string; paymentStatus?: string }> | null>(
+    null
+  );
 
   // Multi-step onboarding state
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -229,19 +232,27 @@ export function VendorDashboard({
         setOwnRestaurantIds(res.ownRestaurantIds || []);
         setMenuItems(res.menuItems);
 
-        if (hasHydratedOrdersRef.current) {
-          const freshNew = res.orders.find((o) => !knownOrderIdsRef.current.has(o.id));
-          if (freshNew) {
-            setLiveNewOrderAlert({
-              orderNumber: freshNew.orderNumber,
-              customerName: freshNew.customerName,
-              totalAmount: freshNew.totalAmount,
-            });
-            playOrderAlertChime('new_order');
-          }
+        const changes = detectOrderBatchChanges(orderSnapshotMapRef.current, res.orders);
+        orderSnapshotMapRef.current = changes.nextMap;
+        if (changes.newOrders.length > 0) {
+          const freshNew = changes.newOrders[0];
+          setLiveNewOrderAlert({
+            orderNumber: freshNew.orderNumber,
+            customerName: freshNew.customerName,
+            totalAmount: freshNew.totalAmount,
+          });
+          void playOrderAlertChime('new_order', { dedupKey: `order_created_${freshNew.id}` });
+        } else if (changes.updatedOrders.length > 0) {
+          const changed = changes.updatedOrders[0];
+          setFeedback(
+            lang === 'bn'
+              ? `অর্ডার আপডেট হয়েছে: ${changed.orderNumber} (${changed.status.replace(/_/g, ' ')})`
+              : `Order updated: ${changed.orderNumber} (${changed.status.replace(/_/g, ' ')})`
+          );
+          void playOrderAlertChime('status_update', {
+            dedupKey: `order_status_${changed.id}_${changed.status}`,
+          });
         }
-        knownOrderIdsRef.current = new Set(res.orders.map((o) => o.id));
-        hasHydratedOrdersRef.current = true;
 
         setOrders(res.orders);
         setLedger(res.ledger);
@@ -283,7 +294,7 @@ export function VendorDashboard({
         if (!silent) setLoading(false);
       }
     },
-    [canAccessVendorApi, selectedRestaurantId]
+    [canAccessVendorApi, selectedRestaurantId, lang]
   );
 
   useEffect(() => {
@@ -297,25 +308,46 @@ export function VendorDashboard({
   }, [initialRestaurantId, selectedRestaurantId]);
 
   useEffect(() => {
+    orderSnapshotMapRef.current = null;
+    setLiveNewOrderAlert(null);
+  }, [user.uid, selectedRestaurantId]);
+
+  useEffect(() => {
     loadWorkspace(selectedRestaurantId, false);
   }, [loadWorkspace, selectedRestaurantId]);
 
   useRealtimeEvents({
     enabled: canAccessVendorApi,
     token: getAuthToken(),
-    pollFallbackMs: 8000,
+    pollFallbackMs: 6000,
     onSync: () => {
       loadWorkspace(selectedRestaurantId, true);
     },
     onEvent: (ev) => {
-      if (ev.type === 'order:created' || ev.type === 'order:updated') {
-        if (ev.type === 'order:created') {
+      if (
+        ev.type === 'order:created' ||
+        ev.type === 'order:updated' ||
+        ev.type === 'notification:created'
+      ) {
+        const restId = Number(ev.payload.restaurantId);
+        const ownerMatch =
+          user.role === 'admin' ||
+          user.role === 'super_admin' ||
+          ev.payload.restaurantOwnerUid === user.uid ||
+          (Number.isInteger(restId) && ownRestaurantIds.includes(restId));
+        if (ev.type === 'order:created' && ownerMatch) {
           setLiveNewOrderAlert({
             orderNumber: String(ev.payload.orderNumber || 'New Order'),
             customerName: String(ev.payload.customerName || 'Customer'),
             totalAmount: Number(ev.payload.totalAmount || 0),
           });
-          playOrderAlertChime('new_order');
+          void playOrderAlertChime('new_order', {
+            dedupKey: `order_created_${String(ev.payload.orderId || ev.payload.orderNumber || '')}`,
+          });
+        } else if (ev.type === 'order:updated' && ownerMatch) {
+          void playOrderAlertChime('status_update', {
+            dedupKey: `order_status_${String(ev.payload.orderId || '')}_${String(ev.payload.status || '')}`,
+          });
         }
         loadWorkspace(selectedRestaurantId, true);
       }
@@ -383,7 +415,12 @@ export function VendorDashboard({
       method: 'PATCH',
       body: JSON.stringify({ status }),
     });
-    await loadWorkspace();
+    emitLocalRealtimeSignal('order:updated', {
+      orderId,
+      status,
+      restaurantId: restaurant?.id,
+    });
+    await loadWorkspace(selectedRestaurantId, true);
   };
 
   const uploadProductPhoto = async (file: File, onSuccess: (url: string) => void) => {
@@ -945,13 +982,18 @@ export function VendorDashboard({
                           ? '+ কাস্টম এলাকা যোগ করুন (ঢাকা/বাংলাদেশ)...'
                           : '+ Add Custom Area (Dhaka / All Bangladesh)...'
                       }
-                      presets={BANGLADESH_AREAS.map((a) => ({
-                        value: a.name,
-                        label: `${a.name} — ${a.division} (${a.nameBn})`,
-                      }))}
+                      presets={getBangladeshAreaSelectPresets(lang)}
                       onSelectPreset={(val) => {
                         const found = BANGLADESH_AREAS.find((a) => a.name === val);
-                        if (found) setCoords({ lat: found.lat, lng: found.lng });
+                        if (found) {
+                          setCoords({ lat: found.lat, lng: found.lng });
+                          const formatted = formatResolvedMapAddress({
+                            areaName: found.name,
+                            lat: found.lat,
+                            lng: found.lng,
+                          });
+                          if (formatted) setAddress(formatted);
+                        }
                       }}
                     />
                   </div>
@@ -994,6 +1036,13 @@ export function VendorDashboard({
                   onSelectLocation={(c) => {
                     setCoords({ lat: c.lat, lng: c.lng });
                     if (c.areaName) setArea(c.areaName);
+                    const formatted = formatResolvedMapAddress({
+                      displayName: c.displayName,
+                      areaName: c.areaName,
+                      lat: c.lat,
+                      lng: c.lng,
+                    });
+                    if (formatted) setAddress(formatted);
                   }}
                 />
 
@@ -2339,13 +2388,18 @@ export function VendorDashboard({
                         ? '+ কাস্টম এলাকা যোগ করুন...'
                         : '+ Add Custom Area in Bangladesh...'
                     }
-                    presets={BANGLADESH_AREAS.map((a) => ({
-                      value: a.name,
-                      label: `${a.name} — ${a.division} (${a.nameBn})`,
-                    }))}
+                    presets={getBangladeshAreaSelectPresets(lang)}
                     onSelectPreset={(val) => {
                       const found = BANGLADESH_AREAS.find((a) => a.name === val);
-                      if (found) setEditCoords({ lat: found.lat, lng: found.lng });
+                      if (found) {
+                        setEditCoords({ lat: found.lat, lng: found.lng });
+                        const formatted = formatResolvedMapAddress({
+                          areaName: found.name,
+                          lat: found.lat,
+                          lng: found.lng,
+                        });
+                        if (formatted) setEditAddress(formatted);
+                      }
                     }}
                   />
                 </div>
@@ -2371,6 +2425,13 @@ export function VendorDashboard({
                     onSelectLocation={(c) => {
                       setEditCoords({ lat: c.lat, lng: c.lng });
                       if (c.areaName) setEditArea(c.areaName);
+                      const formatted = formatResolvedMapAddress({
+                        displayName: c.displayName,
+                        areaName: c.areaName,
+                        lat: c.lat,
+                        lng: c.lng,
+                      });
+                      if (formatted) setEditAddress(formatted);
                     }}
                   />
                 </div>

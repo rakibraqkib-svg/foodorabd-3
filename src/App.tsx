@@ -44,8 +44,14 @@ import { RiderDashboard } from './components/RiderDashboard';
 import { VendorDashboard } from './components/VendorDashboard';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { apiFetch, getAuthToken } from './lib/api';
-import { BANGLADESH_AREAS, CUISINE_CATEGORIES, localizeCouponTitle, t } from './lib/i18n';
-import { playOrderAlertChime, useOrderSoundSetting, useRealtimeEvents } from './lib/realtime';
+import { BANGLADESH_AREAS, CUISINE_CATEGORIES, DHAKA_DELIVERY_ZONES, localizeCouponTitle, t } from './lib/i18n';
+import {
+  emitLocalRealtimeSignal,
+  playOrderAlertChime,
+  useAudioUnlockPrompt,
+  useOrderSoundSetting,
+  useRealtimeEvents,
+} from './lib/realtime';
 import {
   buildRestaurantUnavailableMessage,
   canAddToSingleRestaurantCart,
@@ -162,18 +168,23 @@ function MarketplaceApp() {
   const [loadingDetail, setLoadingDetail] = useState(false);
 
   // Selected delivery area (Anywhere in Bangladesh)
-  const [selectedArea, setSelectedArea] = useState<{ name: string; nameBn: string; lat: number; lng: number }>(
-    () => {
-      try {
-        const raw = localStorage.getItem(STORAGE_AREA_KEY);
-        if (raw) return JSON.parse(raw);
-      } catch {
-        // ignore
-      }
-      return BANGLADESH_AREAS[0];
+  const [selectedArea, setSelectedArea] = useState<{
+    name: string;
+    nameBn: string;
+    lat: number;
+    lng: number;
+    displayName?: string;
+  }>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_AREA_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch {
+      // ignore
     }
-  );
+    return BANGLADESH_AREAS[0];
+  });
   const [locationModalOpen, setLocationModalOpen] = useState(false);
+  const [locationZoneFilter, setLocationZoneFilter] = useState<string>('all');
   const [customAreaInput, setCustomAreaInput] = useState('');
   const [emailTrackModalOpen, setEmailTrackModalOpen] = useState(false);
   const [trackEmailInput, setTrackEmailInput] = useState('');
@@ -233,6 +244,9 @@ function MarketplaceApp() {
   // Favorites, Notifications, Auth Modal, Toast
   const [favoriteIds, setFavoriteIds] = useState<number[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const knownNotifIdsRef = useRef<Set<number>>(new Set());
+  const hasHydratedNotifsRef = useRef<boolean>(false);
+  const { needsUnlock: audioNeedsUnlock, unlockAudio } = useAudioUnlockPrompt();
   const [notifOpen, setNotifOpen] = useState(false);
   const notifContainerRef = useRef<HTMLDivElement | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -634,8 +648,45 @@ function MarketplaceApp() {
   }, [storefrontProducts, restaurants, sc, lang, view, detailData]);
 
   // Load favorites, notifications & latest active order when user session is active
+  const prevUserUidRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const nextUid = user?.uid || null;
+    if (prevUserUidRef.current !== nextUid) {
+      prevUserUidRef.current = nextUid;
+      setFavoriteIds([]);
+      setNotifications([]);
+      knownNotifIdsRef.current = new Set();
+      hasHydratedNotifsRef.current = false;
+      if (nextUid) {
+        setLastTrackedOrder(null);
+      }
+    }
+  }, [user?.uid]);
+
+  const refreshPublicBanner = useCallback(async () => {
+    try {
+      const cfgRes = await apiFetch<{
+        featuredActiveOrder?: TrackedOrderShortcut | null;
+        settings?: PlatformSettings | null;
+      }>('/api/public-config');
+      setFeaturedActiveOrder(cfgRes.featuredActiveOrder || null);
+      if (cfgRes.settings) {
+        setPublicSettings(cfgRes.settings);
+      }
+    } catch {
+      // ignore non-critical background refresh
+    }
+  }, []);
+
   const loadUserSignals = useCallback(async () => {
-    if (!user) return;
+    if (!user) {
+      setFavoriteIds([]);
+      setNotifications([]);
+      knownNotifIdsRef.current = new Set();
+      hasHydratedNotifsRef.current = false;
+      return;
+    }
     try {
       const [favRes, notifRes, ordersRes] = await Promise.all([
         apiFetch<{ favorites: Array<{ restaurantId: number }> }>('/api/customer/favorites'),
@@ -652,7 +703,27 @@ function MarketplaceApp() {
         }>('/api/customer/orders').catch(() => ({ orders: [] })),
       ]);
       setFavoriteIds(favRes.favorites.map((f) => f.restaurantId));
+
+      if (hasHydratedNotifsRef.current) {
+        const freshOrderNotif = notifRes.notifications.find(
+          (n) => !n.isRead && !knownNotifIdsRef.current.has(n.id) && n.type === 'order'
+        );
+        if (freshOrderNotif) {
+          const isNewOrder = freshOrderNotif.title.toLowerCase().includes('new order');
+          const dKey =
+            isNewOrder && freshOrderNotif.relatedOrderId
+              ? `order_created_${freshOrderNotif.relatedOrderId}`
+              : `notif_${freshOrderNotif.id}`;
+          void playOrderAlertChime(isNewOrder ? 'new_order' : 'status_update', {
+            dedupKey: dKey,
+          });
+          showToast(freshOrderNotif.title);
+        }
+      }
+      knownNotifIdsRef.current = new Set(notifRes.notifications.map((n) => n.id));
+      hasHydratedNotifsRef.current = true;
       setNotifications(notifRes.notifications);
+
       if (!user.isSandbox) {
         const activeOrder = ordersRes.orders.find(
           (o) => o.status !== 'delivered' && o.status !== 'cancelled'
@@ -665,12 +736,14 @@ function MarketplaceApp() {
             restaurantName: activeOrder.restaurantName,
             estimatedMinutes: activeOrder.estimatedMinutes,
           });
+        } else {
+          setLastTrackedOrder((prev) => (prev && !prev.isSandbox ? null : prev));
         }
       }
     } catch {
       // ignore if guest
     }
-  }, [user]);
+  }, [user, showToast]);
 
   useEffect(() => {
     loadUserSignals();
@@ -681,28 +754,43 @@ function MarketplaceApp() {
     token: getAuthToken(),
     orderId: lastTrackedOrder?.orderId ?? null,
     trackingToken: lastTrackedOrder?.trackingToken ?? null,
-    pollFallbackMs: 12000,
-    onSync: loadUserSignals,
+    pollFallbackMs: 8000,
+    onSync: () => {
+      void loadUserSignals();
+      void refreshPublicBanner();
+    },
     onEvent: (ev) => {
       if (ev.type === 'order:created') {
+        const isOwnerMatch =
+          user?.role === 'restaurant_owner' &&
+          (!ev.payload.restaurantOwnerUid || ev.payload.restaurantOwnerUid === user.uid);
         if (
-          user?.role === 'restaurant_owner' ||
+          isOwnerMatch ||
           user?.role === 'rider' ||
           user?.role === 'admin' ||
           user?.role === 'super_admin'
         ) {
-          playOrderAlertChime('new_order');
+          void playOrderAlertChime('new_order', {
+            dedupKey: `order_created_${String(ev.payload.orderId || ev.payload.orderNumber || '')}`,
+          });
           showToast(
             lang === 'bn'
               ? `নতুন অর্ডার এসেছে: ${String(ev.payload.orderNumber || '')}`
               : `New order arrived: ${String(ev.payload.orderNumber || '')}`
           );
         }
-        loadUserSignals();
+        void loadUserSignals();
+        void refreshPublicBanner();
       } else if (ev.type === 'order:updated') {
         const ordNum = String(ev.payload.orderNumber || '');
         const st = String(ev.payload.status || '').replace(/_/g, ' ');
-        if (ordNum && st) {
+        const isMyTrackedOrder =
+          (lastTrackedOrder?.orderId && lastTrackedOrder.orderId === Number(ev.payload.orderId)) ||
+          (user?.uid && ev.payload.customerUid === user.uid);
+        if (ordNum && st && isMyTrackedOrder) {
+          void playOrderAlertChime('status_update', {
+            dedupKey: `order_status_${String(ev.payload.orderId || '')}_${String(ev.payload.status || '')}`,
+          });
           showToast(
             lang === 'bn'
               ? `অর্ডার ${ordNum} আপডেট: ${st}`
@@ -712,12 +800,21 @@ function MarketplaceApp() {
         if (ev.payload.status === 'delivered' && lastTrackedOrder?.orderId === Number(ev.payload.orderId)) {
           setLastTrackedOrder(null);
         }
-        loadUserSignals();
+        void loadUserSignals();
+        void refreshPublicBanner();
       } else if (ev.type === 'notification:created') {
         if (ev.payload.title) {
-          showToast(String(ev.payload.title));
+          const titleStr = String(ev.payload.title);
+          const isNewOrder = titleStr.toLowerCase().includes('new order');
+          void playOrderAlertChime(isNewOrder ? 'new_order' : 'status_update', {
+            dedupKey:
+              isNewOrder && ev.payload.relatedOrderId
+                ? `order_created_${String(ev.payload.relatedOrderId)}`
+                : `notif_rt_${titleStr}`,
+          });
+          showToast(titleStr);
         }
-        loadUserSignals();
+        void loadUserSignals();
       }
     },
   });
@@ -798,6 +895,7 @@ function MarketplaceApp() {
             nameBn: res.areaName || 'বাংলাদেশ',
             lat,
             lng,
+            displayName: res.displayName,
           });
           showToast(
             lang === 'bn' ? `অবস্থান সেট হয়েছে: ${res.areaName}` : `Location set: ${res.areaName}`
@@ -1788,6 +1886,10 @@ function MarketplaceApp() {
               mapsApiKey={mapsApiKey}
               currentUser={user}
               onRestaurantsMutated={loadStorefront}
+              onTrackOrder={(orderId) => {
+                setView({ type: 'tracking', orderId });
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
               onOpenVendorStore={(restaurantId) => {
                 setView({ type: 'vendor', restaurantId });
                 window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2008,7 +2110,7 @@ function MarketplaceApp() {
             {/* Main Storefront Column */}
             <div className="flex-1 min-w-0 space-y-8">
               {/* Active Order Live Rider Tracking Shortcut Banner */}
-              {(lastTrackedOrder || featuredActiveOrder) && (() => {
+              {sc.showActiveDeliveryBar !== false && (lastTrackedOrder || featuredActiveOrder) && (() => {
                 const bannerOrder = (lastTrackedOrder || featuredActiveOrder)!;
                 return (
                   <div
@@ -2806,8 +2908,16 @@ function MarketplaceApp() {
             estimatedMinutes: meta?.estimatedMinutes,
             isSandbox: Boolean(user?.isSandbox),
           });
+          void playOrderAlertChime('status_update', { dedupKey: `placed_${orderId}` });
+          emitLocalRealtimeSignal('order:created', {
+            orderId,
+            orderNumber: meta?.orderNumber,
+            restaurantName: meta?.restaurantName,
+            customerUid: user?.uid || '',
+          });
           setView({ type: 'tracking', orderId, token: trackingToken });
-          loadUserSignals();
+          void loadUserSignals();
+          void refreshPublicBanner();
         }}
       />
 
@@ -2964,6 +3074,7 @@ function MarketplaceApp() {
                         nameBn: p.shortName,
                         lat: p.lat,
                         lng: p.lng,
+                        displayName: p.displayName,
                       });
                       setOsmPlaces([]);
                     }}
@@ -2976,8 +3087,71 @@ function MarketplaceApp() {
               </div>
             )}
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-40 overflow-y-auto pr-1">
-              {BANGLADESH_AREAS.map((a) => {
+            {/* Dhaka Restaurant Delivery Zone Structure (ZONE 01 – ZONE 12 + BD Cities) */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-neutral-500">
+                  {lang === 'bn'
+                    ? 'ঢাকা রেস্টুরেন্ট ডেলিভারি জোন (ZONE 01 – 12)'
+                    : 'Dhaka Restaurant Delivery Zone Structure (ZONE 01 – 12)'}
+                </p>
+                {locationZoneFilter !== 'all' && (
+                  <button
+                    type="button"
+                    onClick={() => setLocationZoneFilter('all')}
+                    className="text-[11px] font-semibold text-[#E21B70] hover:underline"
+                  >
+                    {lang === 'bn' ? 'সব দেখুন' : 'Show All'}
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto pr-1">
+                <button
+                  type="button"
+                  onClick={() => setLocationZoneFilter('all')}
+                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors ${
+                    locationZoneFilter === 'all'
+                      ? 'bg-[#2E3138] text-white border-[#2E3138]'
+                      : 'bg-white text-neutral-700 border-neutral-200 hover:border-neutral-300'
+                  }`}
+                >
+                  {lang === 'bn' ? 'সব জোন' : 'All Zones'}
+                </button>
+                {DHAKA_DELIVERY_ZONES.map((z) => (
+                  <button
+                    key={z.code}
+                    type="button"
+                    onClick={() => setLocationZoneFilter(z.code)}
+                    title={z.summary}
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors ${
+                      locationZoneFilter === z.code
+                        ? 'bg-[#E21B70] text-white border-[#E21B70]'
+                        : 'bg-[#FFF9FB] text-neutral-700 border-neutral-200 hover:border-[#E21B70]/50'
+                    }`}
+                  >
+                    {z.code} — {lang === 'bn' ? z.nameBn : z.name}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setLocationZoneFilter('NATIONWIDE')}
+                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors ${
+                    locationZoneFilter === 'NATIONWIDE'
+                      ? 'bg-[#E21B70] text-white border-[#E21B70]'
+                      : 'bg-white text-neutral-700 border-neutral-200 hover:border-neutral-300'
+                  }`}
+                >
+                  {lang === 'bn' ? 'অন্যান্য জেলা' : 'BD Cities'}
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-44 overflow-y-auto pr-1">
+              {BANGLADESH_AREAS.filter((a) => {
+                if (locationZoneFilter === 'all') return true;
+                if (locationZoneFilter === 'NATIONWIDE') return !a.zoneCode;
+                return a.zoneCode === locationZoneFilter;
+              }).map((a) => {
                 const isExactPreset =
                   Math.abs(a.lat - selectedArea.lat) < 0.005 &&
                   Math.abs(a.lng - selectedArea.lng) < 0.005;
@@ -2985,7 +3159,12 @@ function MarketplaceApp() {
                   <button
                     key={a.name}
                     type="button"
-                    onClick={() => setSelectedArea(a)}
+                    onClick={() =>
+                      setSelectedArea({
+                        ...a,
+                        displayName: `${a.name}, ${a.division}, Bangladesh`,
+                      })
+                    }
                     className={`px-3 py-2 rounded-xl border text-xs font-semibold text-left ${
                       isExactPreset
                         ? 'border-[#E21B70] bg-[#FFF0F6] text-[#E21B70]'
@@ -2993,7 +3172,9 @@ function MarketplaceApp() {
                     }`}
                   >
                     <span className="block truncate">{lang === 'bn' ? a.nameBn : a.name}</span>
-                    <span className="block text-[10px] text-neutral-400 font-normal">{a.division}</span>
+                    <span className="block text-[10px] text-neutral-400 font-normal truncate">
+                      {a.zoneCode ? `${a.zoneCode} · ${a.division}` : a.division}
+                    </span>
                   </button>
                 );
               })}
@@ -3023,6 +3204,7 @@ function MarketplaceApp() {
                   nameBn: nextNameBn,
                   lat: c.lat,
                   lng: c.lng,
+                  displayName: c.displayName,
                 });
               }}
             />
@@ -3040,6 +3222,11 @@ function MarketplaceApp() {
                       {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}
                     </span>
                   </p>
+                  {selectedArea.displayName && (
+                    <p className="text-[11px] text-neutral-700 truncate">
+                      {selectedArea.displayName}
+                    </p>
+                  )}
                   <p className="text-[11px] text-neutral-500 font-mono-nums">
                     GPS: {selectedArea.lat.toFixed(5)}, {selectedArea.lng.toFixed(5)}
                   </p>
@@ -4140,6 +4327,22 @@ function MarketplaceApp() {
         activeOrderNumber={lastTrackedOrder?.orderNumber}
         accentColor={sc.accentColor}
       />
+
+      {/* Audio Autoplay Unlock Prompt (only appears if browser blocked alert sound before click) */}
+      {audioNeedsUnlock && orderSoundEnabled && (
+        <button
+          type="button"
+          onClick={() => void unlockAudio()}
+          className="fixed bottom-20 right-6 z-50 px-4 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold shadow-lg inline-flex items-center gap-2 animate-pulse"
+        >
+          <Volume2 className="w-4 h-4" />
+          <span>
+            {lang === 'bn'
+              ? 'নতুন অর্ডার সাউন্ড চালু করতে ক্লিক করুন'
+              : 'Tap to play Order Alert Sound'}
+          </span>
+        </button>
+      )}
 
       {/* Toast Notification */}
       {toastMsg && (

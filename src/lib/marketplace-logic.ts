@@ -1065,6 +1065,304 @@ export function doesEmailMatchOrder(orderEmail: string | null | undefined, query
   return Boolean(a && b && a === b);
 }
 
+export function isGooglePlusCodeSegment(segment: string): boolean {
+  const clean = String(segment || '').trim();
+  if (!clean) return false;
+  // Matches Google Open Location Code / Plus Codes such as "Q9R7+M24", "Q9W8+XR Dhaka", "7MQ8Q9W8+3J"
+  return /^[23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,4}(?:\s|$)/i.test(clean);
+}
+
+export function isAdministrativeNoiseSegment(segment: string): boolean {
+  const clean = String(segment || '').trim();
+  if (!clean) return true;
+  if (isGooglePlusCodeSegment(clean)) return true;
+  const lower = clean.toLowerCase();
+  if (
+    lower === 'bangladesh' ||
+    clean === 'বাংলাদেশ' ||
+    lower === 'unnamed road' ||
+    lower === 'road' ||
+    /^ward[\s-]*(no\.?\s*)?\d+/i.test(clean) ||
+    /^ওয়ার্ড[\s-]*(নং\.?\s*)?[\d০-৯]+/.test(clean) ||
+    /city corporation/i.test(clean) ||
+    /সিটি কর্পোরেশন/.test(clean) ||
+    /\bmetropolitan\b/i.test(clean) ||
+    /\bdistrict\b/i.test(clean) ||
+    /\bdivision\b/i.test(clean) ||
+    /(জেলা|বিভাগ|মহানগর)$/.test(clean) ||
+    /^\d{4}$/.test(clean)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function stripTrailingPostalCode(segment: string): string {
+  return String(segment || '')
+    .replace(/\bDhaka\s+\d{4}\b/gi, 'Dhaka')
+    .replace(/[\s,-]+\d{4}$/, '')
+    .trim();
+}
+
+export function cleanMapAddressSegments(rawAddress: string): string[] {
+  const parts = String(rawAddress || '')
+    .split(',')
+    .map((p) => stripTrailingPostalCode(p))
+    .filter(Boolean)
+    .filter((p) => !isAdministrativeNoiseSegment(p));
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const part of parts) {
+    const key = part.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(part);
+    }
+  }
+  return unique;
+}
+
+const AREA_ALIAS_RULES: Array<{ pattern: RegExp; canonical: string }> = [
+  { pattern: /\bgulshan[\s-]*2\b|গুলশান[\s-]*২/i, canonical: 'Gulshan 2' },
+  { pattern: /\bgulshan[\s-]*1\b|গুলশান[\s-]*১/i, canonical: 'Gulshan 1' },
+  { pattern: /\bniketan\b|নিকেতন/i, canonical: 'Niketan' },
+  { pattern: /\bshahjadpur\b|শাহজাদপুর/i, canonical: 'Shahjadpur' },
+  { pattern: /\bchairman\s*bari\b|চেয়ারম্যান\s*বাড়ি/i, canonical: 'Chairman Bari' },
+  { pattern: /\bkakoli\b|কাকলী/i, canonical: 'Kakoli' },
+  { pattern: /\bbanani\b|বনানী/i, canonical: 'Banani' },
+  { pattern: /\bsatmasjid\b|সাতমসজিদ/i, canonical: 'Satmasjid Road' },
+  { pattern: /\bjigatola\b|\bzhigatola\b|জিগাতলা/i, canonical: 'Jigatola' },
+  { pattern: /\bkalabagan\b|কলাবাগান/i, canonical: 'Kalabagan' },
+  { pattern: /\bdhanmondi\s*(?:27|16)\b|ধানমন্ডি\s*(?:২৭|১৬)/i, canonical: 'Dhanmondi 27' },
+  { pattern: /\bdhanmondi\b|ধানমন্ডি/i, canonical: 'Dhanmondi 1–32' },
+  { pattern: /\bpallabi\b|পল্লবী/i, canonical: 'Pallabi' },
+  { pattern: /\bkazipara\b|কাজীপাড়া/i, canonical: 'Kazipara' },
+  { pattern: /\bmirpur[\s-]*10\b|মিরপুর[\s-]*১০/i, canonical: 'Mirpur 10' },
+  { pattern: /\bmirpur[\s-]*11\b|মিরপুর[\s-]*১১/i, canonical: 'Mirpur 11' },
+  { pattern: /\bmirpur[\s-]*12\b|মিরপুর[\s-]*১২/i, canonical: 'Mirpur 12' },
+  { pattern: /\bmirpur[\s-]*1\b|মিরপুর[\s-]*১/i, canonical: 'Mirpur 1' },
+  { pattern: /\bmirpur[\s-]*2\b|মিরপুর[\s-]*২/i, canonical: 'Mirpur 2' },
+  { pattern: /\bmirpur[\s-]*6\b|মিরপুর[\s-]*৬/i, canonical: 'Mirpur 6' },
+  { pattern: /\brajlaxmi\b|রাজলক্ষ্মী/i, canonical: 'Rajlaxmi' },
+  { pattern: /\bjashimuddin\b|জসিমউদ্দীন/i, canonical: 'Jashimuddin' },
+  { pattern: /\babdullahpur\b|আব্দুল্লাহপুর/i, canonical: 'Abdullahpur' },
+  { pattern: /\buttara\b|উত্তরা/i, canonical: 'Uttara Sector 7' },
+  { pattern: /\btown\s*hall\b|টাউন\s*হল/i, canonical: 'Town Hall' },
+  { pattern: /\bbosila\b|\bbashila\b|বসিলা/i, canonical: 'Bosila' },
+  { pattern: /\badabor\b|আদাবর/i, canonical: 'Adabor' },
+  { pattern: /\bshyamoli\b|শ্যামলী/i, canonical: 'Shyamoli' },
+  { pattern: /\bmohammadpur\b|মোহাম্মদপুর/i, canonical: 'Mohammadpur' },
+  { pattern: /\bjamuna\s*future\s*park\b|যমুনা\s*ফিউচার/i, canonical: 'Jamuna Future Park' },
+  { pattern: /\bkuril\b|কুড়িল/i, canonical: 'Kuril' },
+  { pattern: /\bvatara\b|\bbhatara\b|ভাটারা/i, canonical: 'Vatara' },
+  { pattern: /\bbashundhara\b|বসুন্ধরা/i, canonical: 'Bashundhara R/A' },
+  { pattern: /\bmerul\s*badda\b|মেরুল\s*বাড্ডা/i, canonical: 'Merul Badda' },
+  { pattern: /\brampura\b|রামপুরা/i, canonical: 'Rampura' },
+  { pattern: /\baftabnagar\b|আফতাবনগর/i, canonical: 'Aftabnagar' },
+  { pattern: /\bbadda\b|বাড্ডা/i, canonical: 'Badda' },
+  { pattern: /\bpaltan\b|\bpurana\s*paltan\b|\bnaya\s*paltan\b|পল্টন/i, canonical: 'Paltan' },
+  { pattern: /\bfakirapool\b|ফকিরাপুল/i, canonical: 'Fakirapool' },
+  { pattern: /\barambagh\b|আরামবাগ/i, canonical: 'Arambagh' },
+  { pattern: /\bkamalapur\b|কমলাপুর/i, canonical: 'Kamalapur' },
+  { pattern: /\bmotijheel\b|মতিঝিল/i, canonical: 'Motijheel' },
+  { pattern: /\bchawkbazar\b|চকবাজার/i, canonical: 'Chawkbazar' },
+  { pattern: /\bbangshal\b|বংশাল/i, canonical: 'Bangshal' },
+  { pattern: /\blalbagh\b|লালবাগ/i, canonical: 'Lalbagh' },
+  { pattern: /\bwari\b|ওয়ারী/i, canonical: 'Wari' },
+  { pattern: /\bsutrapur\b|সূত্রাপুর/i, canonical: 'Sutrapur' },
+  { pattern: /\bkarwan\s*bazar\b|কারওয়ান\s*বাজার/i, canonical: 'Karwan Bazar' },
+  { pattern: /\bkawran\s*bazar\b|কাওরান\s*বাজার/i, canonical: 'Kawran Bazar' },
+  { pattern: /\bfarmgate\b|ফার্মগেট/i, canonical: 'Farmgate' },
+  { pattern: /\btejgaon\b|তেজগাঁও/i, canonical: 'Tejgaon' },
+  { pattern: /\btaltola\b|তালতলা/i, canonical: 'Taltola' },
+  { pattern: /\bmalibagh\b|মালিবাগ/i, canonical: 'Malibagh' },
+  { pattern: /\bgoran\b|গোরান/i, canonical: 'Goran' },
+  { pattern: /\bkhilgaon\b|খিলগাঁও/i, canonical: 'Khilgaon' },
+];
+
+export function matchCanonicalAreaFromHints(
+  hints: ReadonlyArray<string | null | undefined>,
+  lat: number,
+  lng: number,
+  presets: readonly { name: string; nameBn?: string; lat: number; lng: number }[]
+): string {
+  const cleanedHints = hints
+    .flatMap((h) => String(h || '').split(','))
+    .map((h) => stripTrailingPostalCode(h))
+    .filter((h) => h && !isAdministrativeNoiseSegment(h) && !/^Pinned\s*\(/i.test(h));
+
+  // 1. Direct match against preset names
+  for (const hint of cleanedHints) {
+    const lowerHint = hint.toLowerCase();
+    const direct = presets.find(
+      (p) => p.name.toLowerCase() === lowerHint || (p.nameBn && p.nameBn.toLowerCase() === lowerHint)
+    );
+    if (direct) return direct.name;
+  }
+
+  // 2. Alias match (e.g. "Gulshan" + coords near Gulshan 1 vs 2, or "Banani Model Town" -> "Banani")
+  const combined = cleanedHints.join(' , ');
+  for (const rule of AREA_ALIAS_RULES) {
+    if (rule.pattern.test(combined)) {
+      const matched = presets.find((p) => p.name.toLowerCase() === rule.canonical.toLowerCase());
+      if (matched) return matched.name;
+      return rule.canonical;
+    }
+  }
+  if (/\bgulshan\b|গুলশান/i.test(combined)) {
+    const gulshanOnly = presets.filter((p) => /gulshan/i.test(p.name));
+    if (gulshanOnly.length > 0) {
+      return resolveNearestAreaFromList(lat, lng, gulshanOnly).area?.name || 'Gulshan 2';
+    }
+  }
+  if (/\bmirpur\b|মিরপুর/i.test(combined)) {
+    const mirpurOnly = presets.filter((p) => /mirpur/i.test(p.name));
+    if (mirpurOnly.length > 0) {
+      return resolveNearestAreaFromList(lat, lng, mirpurOnly).area?.name || 'Mirpur 10';
+    }
+  }
+
+  // 3. Nearest preset if coordinate is close (<= 2.2 km) and no distinct local suburb name exists
+  const nearest = resolveNearestAreaFromList(lat, lng, presets);
+  const specificHint = cleanedHints.find(
+    (h) => !/^(dhaka|chattogram|sylhet|rajshahi|khulna|barishal|rangpur|mymensingh|ঢাকা)$/i.test(h)
+  );
+  if (specificHint) {
+    return specificHint;
+  }
+  if (nearest.area && nearest.distanceKm <= 6) {
+    return nearest.area.name;
+  }
+  return cleanedHints[0] || nearest.area?.name || `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+}
+
+export interface GoogleGeocodeResultLike {
+  formatted_address?: string;
+  types?: string[];
+  address_components?: Array<{ long_name: string; short_name?: string; types: string[] }>;
+}
+
+export function extractCleanGoogleGeocodeAddress(
+  results: readonly GoogleGeocodeResultLike[],
+  lat: number,
+  lng: number,
+  presets: readonly { name: string; nameBn?: string; lat: number; lng: number }[]
+): { areaName: string; displayName: string } {
+  if (!results || results.length === 0) {
+    const nearest = resolveNearestAreaFromList(lat, lng, presets);
+    const fallbackArea =
+      nearest.area && nearest.distanceKm <= 5
+        ? nearest.area.name
+        : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+    return {
+      areaName: fallbackArea,
+      displayName: `${fallbackArea}, Bangladesh`,
+    };
+  }
+
+  // Prefer non-plus-code results (street_address, premise, route, sublocality, neighborhood)
+  const preferred =
+    results.find(
+      (r) =>
+        r.formatted_address &&
+        !r.types?.includes('plus_code') &&
+        !isGooglePlusCodeSegment(r.formatted_address.split(',')[0] || '')
+    ) ||
+    results.find(
+      (r) =>
+        r.address_components &&
+        r.address_components.some(
+          (c) =>
+            c.types.includes('route') ||
+            c.types.includes('sublocality_level_1') ||
+            c.types.includes('neighborhood')
+        )
+    ) ||
+    results[0];
+
+  const allComponents = results.flatMap((r) => r.address_components || []);
+  const pickComponent = (types: string[]) =>
+    allComponents.find((c) => types.some((t) => c.types.includes(t)))?.long_name || '';
+
+  const premise = pickComponent(['premise', 'point_of_interest', 'establishment']);
+  const streetNum = pickComponent(['street_number']);
+  const route = pickComponent(['route']);
+  const neighborhood = pickComponent(['neighborhood', 'sublocality_level_2']);
+  const sublocality = pickComponent(['sublocality_level_1', 'sublocality']);
+  const locality = pickComponent(['locality', 'administrative_area_level_2']);
+
+  const canonicalArea = matchCanonicalAreaFromHints(
+    [neighborhood, sublocality, route, preferred?.formatted_address || '', locality],
+    lat,
+    lng,
+    presets
+  );
+
+  const structuredParts: string[] = [];
+  if (premise && !isAdministrativeNoiseSegment(premise)) structuredParts.push(premise);
+  const roadPart = [streetNum, route].filter(Boolean).join(' ').trim();
+  if (roadPart && !isAdministrativeNoiseSegment(roadPart)) structuredParts.push(roadPart);
+  if (neighborhood && !isAdministrativeNoiseSegment(neighborhood)) structuredParts.push(neighborhood);
+  if (sublocality && !isAdministrativeNoiseSegment(sublocality)) structuredParts.push(sublocality);
+  if (canonicalArea && !/^Pinned\s*\(/i.test(canonicalArea)) structuredParts.push(canonicalArea);
+  if (locality && !isAdministrativeNoiseSegment(locality)) structuredParts.push(locality);
+
+  const formattedSegments = cleanMapAddressSegments(preferred?.formatted_address || '');
+  const mergedSegments = formattedSegments.length >= 2 ? formattedSegments : structuredParts;
+
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const seg of mergedSegments) {
+    const cleanSeg = stripTrailingPostalCode(seg);
+    if (!cleanSeg || isAdministrativeNoiseSegment(cleanSeg)) continue;
+    const key = cleanSeg.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(cleanSeg);
+    }
+  }
+
+  const displayName =
+    deduped.length > 0
+      ? `${deduped.slice(0, 4).join(', ')}, Bangladesh`
+      : `${canonicalArea}, Bangladesh`;
+
+  return {
+    areaName: canonicalArea,
+    displayName,
+  };
+}
+
+export function formatResolvedMapAddress(input: {
+  displayName?: string | null;
+  areaName?: string | null;
+  lat?: number;
+  lng?: number;
+}): string {
+  const cleanDisplay = String(input.displayName || '').trim();
+  if (cleanDisplay) {
+    const cleaned = cleanMapAddressSegments(cleanDisplay);
+    if (cleaned.length > 0) {
+      return `${cleaned.slice(0, 4).join(', ')}, Bangladesh`;
+    }
+  }
+  const cleanArea = String(input.areaName || '').trim();
+  if (
+    cleanArea &&
+    !cleanArea.startsWith('Pinned (') &&
+    cleanArea.toLowerCase() !== 'current gps'
+  ) {
+    const areaCleaned = cleanMapAddressSegments(cleanArea);
+    if (areaCleaned.length > 0) {
+      return `${areaCleaned.join(', ')}, Bangladesh`;
+    }
+  }
+  if (typeof input.lat === 'number' && Number.isFinite(input.lat) && typeof input.lng === 'number' && Number.isFinite(input.lng)) {
+    return `Pinned (${input.lat.toFixed(4)}, ${input.lng.toFixed(4)}), Bangladesh`;
+  }
+  return '';
+}
+
 export function buildOrderTrackingEmailPayload(input: {
   origin: string;
   orderId: number;
@@ -1075,6 +1373,12 @@ export function buildOrderTrackingEmailPayload(input: {
   restaurantName: string;
   deliveryArea: string;
   deliveryAddress?: string | null;
+  subtotal?: number | null;
+  discountAmount?: number | null;
+  couponCode?: string | null;
+  deliveryFee?: number | null;
+  serviceFee?: number | null;
+  taxAmount?: number | null;
   totalAmount: number;
   paymentMethod: string;
   paymentStatus?: string | null;
@@ -1083,7 +1387,16 @@ export function buildOrderTrackingEmailPayload(input: {
   riderName?: string | null;
   riderPhone?: string | null;
   etaMinutes?: number | null;
-  items?: Array<{ name: string; nameBn?: string; quantity: number; lineTotal: number }>;
+  createdAt?: string | Date | null;
+  items?: Array<{
+    name: string;
+    nameBn?: string;
+    quantity: number;
+    unitPrice?: number;
+    variation?: string;
+    addons?: Array<{ name: string; price: number }>;
+    lineTotal: number;
+  }>;
 }): {
   subject: string;
   trackingUrl: string;
@@ -1092,8 +1405,9 @@ export function buildOrderTrackingEmailPayload(input: {
 } {
   const trackingUrl = buildOrderTrackingUrl(input.origin, input.orderId, input.trackingToken);
   const niceStatus = input.status.replace(/_/g, ' ').toUpperCase();
+  const invoiceNumber = `INV-${input.orderNumber}`;
   const statusDisplayMap: Record<string, { en: string; bn: string; step: number }> = {
-    confirmed: { en: 'Order Confirmed', bn: 'অর্ডার কনফার্ম হয়েছে', step: 1 },
+    confirmed: { en: 'Order Confirmed & Invoice Ready', bn: 'অর্ডার কনফার্ম ও ইনভয়েস তৈরি হয়েছে', step: 1 },
     accepted: { en: 'Accepted by Kitchen', bn: 'রেস্টুরেন্ট অর্ডার গ্রহণ করেছে', step: 2 },
     preparing: { en: 'Preparing Food', bn: 'খাবার তৈরি হচ্ছে', step: 2 },
     ready: { en: 'Ready for Pickup', bn: 'পিকআপের জন্য প্রস্তুত', step: 3 },
@@ -1104,7 +1418,7 @@ export function buildOrderTrackingEmailPayload(input: {
     cancelled: { en: 'Order Cancelled', bn: 'অর্ডার বাতিল হয়েছে', step: 0 },
   };
   const info = statusDisplayMap[input.status] || { en: niceStatus, bn: niceStatus, step: 1 };
-  const subject = `Foodora BD Order ${input.orderNumber} — ${niceStatus}`;
+  const subject = `Foodora BD Invoice ${invoiceNumber} (${input.orderNumber}) — ${niceStatus}`;
   const riderLine = input.riderName
     ? `<p style="margin:4px 0;"><strong>Assigned Rider:</strong> ${escapeXml(input.riderName)}${
         input.riderPhone ? ` (${escapeXml(input.riderPhone)})` : ''
@@ -1119,19 +1433,72 @@ export function buildOrderTrackingEmailPayload(input: {
     : '';
   const noteLine = input.statusNote ? `<p style="margin:4px 0;"><strong>Update:</strong> ${escapeXml(input.statusNote)}</p>` : '';
   const paymentBadge = input.paymentStatus ? ` · ${escapeXml(input.paymentStatus.toUpperCase())}` : '';
+  const issuedAt = input.createdAt ? new Date(input.createdAt).toLocaleString('en-BD') : new Date().toLocaleString('en-BD');
+
+  const itemsList = Array.isArray(input.items) ? input.items : [];
+  const computedSubtotal =
+    typeof input.subtotal === 'number' && Number.isFinite(input.subtotal)
+      ? input.subtotal
+      : itemsList.reduce((sum, it) => sum + (Number(it.lineTotal) || 0), 0);
+  const discountVal = Math.max(0, Number(input.discountAmount || 0));
+  const deliveryFeeVal = Math.max(0, Number(input.deliveryFee ?? 0));
+  const serviceFeeVal = Math.max(0, Number(input.serviceFee ?? 0));
+  const taxVal = Math.max(0, Number(input.taxAmount ?? 0));
+
   const itemsBlock =
-    Array.isArray(input.items) && input.items.length > 0
+    itemsList.length > 0
       ? `<div style="border-top:1px solid #F3F4F6;padding-top:10px;margin-top:10px;">
-           <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#4B5563;">Ordered Items:</p>
-           ${input.items
-             .slice(0, 10)
-             .map(
-               (it) =>
-                 `<p style="margin:2px 0;font-size:12px;color:#374151;">${it.quantity}× ${escapeXml(
-                   it.name
-                 )} — ৳${it.lineTotal}</p>`
-             )
-             .join('')}
+           <p style="margin:0 0 8px;font-size:12px;font-weight:bold;color:#2E3138;">Itemized Invoice (${escapeXml(invoiceNumber)}):</p>
+           <table style="width:100%;border-collapse:collapse;font-size:12px;color:#374151;">
+             <thead>
+               <tr style="border-bottom:1px solid #F3F4F6;text-align:left;color:#6B7280;">
+                 <th style="padding:4px 0;">Item</th>
+                 <th style="padding:4px 0;text-align:center;">Qty</th>
+                 <th style="padding:4px 0;text-align:right;">Total</th>
+               </tr>
+             </thead>
+             <tbody>
+               ${itemsList
+                 .slice(0, 20)
+                 .map((it) => {
+                   const varPart = it.variation ? ` (${escapeXml(it.variation)})` : '';
+                   const unitPart =
+                     typeof it.unitPrice === 'number' && it.unitPrice > 0
+                       ? ` <span style="color:#6B7280;font-size:11px;">@ ৳${it.unitPrice}</span>`
+                       : '';
+                   return `<tr style="border-bottom:1px solid #F9FAFB;">
+                     <td style="padding:5px 0;">${escapeXml(it.name)}${varPart}${unitPart}</td>
+                     <td style="padding:5px 0;text-align:center;">${it.quantity}</td>
+                     <td style="padding:5px 0;text-align:right;font-weight:bold;">৳${it.lineTotal}</td>
+                   </tr>`;
+                 })
+                 .join('')}
+             </tbody>
+           </table>
+           <div style="border-top:1px solid #FBCFE8;margin-top:8px;padding-top:8px;font-size:12px;color:#374151;">
+             <p style="margin:2px 0;"><span>Subtotal:</span> <strong style="float:right;">৳${computedSubtotal}</strong></p>
+             ${
+               discountVal > 0
+                 ? `<p style="margin:2px 0;color:#059669;"><span>Discount${input.couponCode ? ` (${escapeXml(input.couponCode)})` : ''}:</span> <strong style="float:right;">-৳${discountVal}</strong></p>`
+                 : ''
+             }
+             ${
+               typeof input.deliveryFee === 'number'
+                 ? `<p style="margin:2px 0;"><span>Delivery Fee:</span> <strong style="float:right;">৳${deliveryFeeVal}</strong></p>`
+                 : ''
+             }
+             ${
+               typeof input.serviceFee === 'number'
+                 ? `<p style="margin:2px 0;"><span>Service Fee:</span> <strong style="float:right;">৳${serviceFeeVal}</strong></p>`
+                 : ''
+             }
+             ${
+               taxVal > 0
+                 ? `<p style="margin:2px 0;"><span>VAT / Tax:</span> <strong style="float:right;">৳${taxVal}</strong></p>`
+                 : ''
+             }
+             <p style="margin:6px 0 0;padding-top:6px;border-top:1px dashed #FBCFE8;font-size:13px;color:#E21B70;"><span><strong>Total Payable:</strong></span> <strong style="float:right;">৳${input.totalAmount}</strong></p>
+           </div>
          </div>`
       : '';
 
@@ -1163,16 +1530,17 @@ export function buildOrderTrackingEmailPayload(input: {
 <html>
   <body style="font-family:Arial,sans-serif;background:#f7f7f7;padding:24px;color:#2E3138;">
     <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;padding:24px;border:1px solid #e5e7eb;">
-      <p style="margin:0 0 4px;font-size:11px;font-weight:bold;letter-spacing:0.06em;text-transform:uppercase;color:#E21B70;">Foodora BD · Live Order Update</p>
+      <p style="margin:0 0 4px;font-size:11px;font-weight:bold;letter-spacing:0.06em;text-transform:uppercase;color:#E21B70;">Foodora BD · Order Invoice &amp; Live Tracking</p>
       <h2 style="margin:0 0 6px;color:#2E3138;font-size:20px;">${escapeXml(info.en)}</h2>
-      <p style="margin:0 0 14px;font-size:13px;color:#E21B70;font-weight:bold;">${escapeXml(info.bn)}</p>
+      <p style="margin:0 0 10px;font-size:13px;color:#E21B70;font-weight:bold;">${escapeXml(info.bn)}</p>
+      <p style="margin:0 0 10px;font-size:12px;color:#6B7280;">Invoice: <strong>${escapeXml(invoiceNumber)}</strong> · Issued: ${escapeXml(issuedAt)}</p>
       <p style="margin:0 0 10px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
       <p style="margin:0 0 12px;font-size:14px;">Your order <strong>${escapeXml(input.orderNumber)}</strong> from <strong>${escapeXml(input.restaurantName)}</strong> is now <strong>${escapeXml(niceStatus)}</strong>.</p>
       ${progressHtml}
       <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
         <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
         ${addressLine}
-        <p style="margin:4px 0;"><strong>Total Payable:</strong> ৳${input.totalAmount} (${escapeXml(input.paymentMethod.toUpperCase())}${paymentBadge})</p>
+        <p style="margin:4px 0;"><strong>Payment:</strong> ${escapeXml(input.paymentMethod.toUpperCase())}${paymentBadge} · <strong>Total: ৳${input.totalAmount}</strong></p>
         ${etaLine}
         ${riderLine}
         ${noteLine}
@@ -1184,9 +1552,21 @@ export function buildOrderTrackingEmailPayload(input: {
   </body>
 </html>`;
 
-  const text = `Foodora BD — Order ${input.orderNumber} (${info.en} / ${info.bn})
+  const itemsText =
+    itemsList.length > 0
+      ? `\nItems:\n${itemsList
+          .slice(0, 20)
+          .map((it) => `- ${it.quantity}x ${it.name}${it.variation ? ` (${it.variation})` : ''}: BDT ${it.lineTotal}`)
+          .join('\n')}\nSubtotal: BDT ${computedSubtotal}${
+          discountVal > 0 ? `\nDiscount: -BDT ${discountVal}` : ''
+        }${typeof input.deliveryFee === 'number' ? `\nDelivery Fee: BDT ${deliveryFeeVal}` : ''}${
+          typeof input.serviceFee === 'number' ? `\nService Fee: BDT ${serviceFeeVal}` : ''
+        }`
+      : '';
+
+  const text = `Foodora BD — Invoice ${invoiceNumber} | Order ${input.orderNumber} (${info.en} / ${info.bn})
 Restaurant: ${input.restaurantName}
-Delivery Area: ${input.deliveryArea}${input.deliveryAddress ? `\nAddress: ${input.deliveryAddress}` : ''}
+Delivery Area: ${input.deliveryArea}${input.deliveryAddress ? `\nAddress: ${input.deliveryAddress}` : ''}${itemsText}
 Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()}${input.paymentStatus ? ` · ${input.paymentStatus}` : ''})
 ${input.etaMinutes ? `Estimated Arrival: ~${input.etaMinutes} mins\n` : ''}${
     input.riderName
@@ -1237,6 +1617,7 @@ export const VEHICLE_TYPE_PRESET_OPTIONS: readonly string[] = [
 export interface SelectOptionItem {
   value: string;
   label: string;
+  group?: string;
 }
 
 export function normalizeCustomOptionValue(raw: string): string {
@@ -1259,7 +1640,11 @@ export function mergeCustomSelectOptions(
     const key = cleanVal.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ value: cleanVal, label: item.label || cleanVal });
+    out.push({
+      value: cleanVal,
+      label: item.label || cleanVal,
+      ...(item.group ? { group: item.group } : {}),
+    });
   }
 
   for (const rawCustom of customValues) {
@@ -1567,6 +1952,197 @@ export function shouldRestoreTrackedOrderShortcut(
   if (orderNum && SEEDED_DEMO_ORDER_NUMBERS.has(orderNum)) return false;
   return true;
 }
+
+export function shouldPlayDedupedOrderChime(
+  key: string | null | undefined,
+  cache: Map<string, number>,
+  nowMs: number = Date.now(),
+  windowMs: number = 4000
+): boolean {
+  const cleanKey = String(key || '').trim();
+  if (!cleanKey) return true;
+  const lastPlayed = cache.get(cleanKey);
+  if (typeof lastPlayed === 'number' && nowMs - lastPlayed < windowMs) {
+    return false;
+  }
+  cache.set(cleanKey, nowMs);
+  if (cache.size > 100) {
+    for (const [k, ts] of cache.entries()) {
+      if (nowMs - ts >= windowMs) {
+        cache.delete(k);
+      }
+    }
+  }
+  return true;
+}
+
+export function collectMerchantOrderAlertRecipients(input: {
+  restaurantEmail?: string | null;
+  ownerEmail?: string | null;
+  adminNotifyEmail?: string | null;
+  fallbackAdminEmails?: readonly string[];
+}): string[] {
+  const seen = new Set<string>();
+  const candidates: Array<string | null | undefined> = [
+    input.restaurantEmail,
+    input.ownerEmail,
+    input.adminNotifyEmail,
+    ...(input.fallbackAdminEmails || [PRIMARY_SUPER_ADMIN_EMAIL]),
+  ];
+
+  const out: string[] = [];
+  for (const raw of candidates) {
+    const clean = String(raw || '').trim().toLowerCase();
+    if (!clean || !clean.includes('@') || !clean.includes('.')) continue;
+    if (clean.endsWith('@foodora.bd')) continue; // skip synthetic demo sandbox addresses
+    if (seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}
+
+export function buildMerchantOrderAlertEmailPayload(input: {
+  origin: string;
+  orderId: number;
+  orderNumber: string;
+  trackingToken?: string | null;
+  eventKind: 'new_order' | 'status_update';
+  restaurantName: string;
+  customerName: string;
+  customerPhone?: string | null;
+  deliveryArea: string;
+  deliveryAddress?: string | null;
+  totalAmount: number;
+  paymentMethod: string;
+  paymentStatus?: string | null;
+  status: string;
+  statusNote?: string;
+  riderName?: string | null;
+  items?: Array<{
+    name: string;
+    quantity: number;
+    variation?: string;
+    lineTotal: number;
+  }>;
+}): {
+  subject: string;
+  trackingUrl: string;
+  html: string;
+  text: string;
+} {
+  const trackingUrl = buildOrderTrackingUrl(input.origin, input.orderId, input.trackingToken);
+  const niceStatus = input.status.replace(/_/g, ' ').toUpperCase();
+  const isNew = input.eventKind === 'new_order';
+  const headlineEn = isNew
+    ? `New Order Received: ${input.orderNumber}`
+    : `Order Update (${input.orderNumber}): ${niceStatus}`;
+  const headlineBn = isNew
+    ? `নতুন অর্ডার এসেছে: ${input.orderNumber}`
+    : `অর্ডার স্ট্যাটাস আপডেট: ${niceStatus}`;
+  const subject = isNew
+    ? `🔔 Foodora BD New Order Alert ${input.orderNumber} (৳${input.totalAmount}) — ${input.restaurantName}`
+    : `📦 Foodora BD Order Update ${input.orderNumber} — ${niceStatus}`;
+
+  const itemsList = Array.isArray(input.items) ? input.items : [];
+  const itemsHtml =
+    itemsList.length > 0
+      ? `<ul style="margin:8px 0 0;padding-left:18px;font-size:12px;color:#374151;">
+          ${itemsList
+            .slice(0, 20)
+            .map(
+              (it) =>
+                `<li style="margin:3px 0;"><strong>${it.quantity}x</strong> ${escapeXml(it.name)}${
+                  it.variation ? ` (${escapeXml(it.variation)})` : ''
+                } — <strong>৳${it.lineTotal}</strong></li>`
+            )
+            .join('')}
+        </ul>`
+      : '';
+
+  const html = `<!doctype html>
+<html>
+  <body style="font-family:Arial,sans-serif;background:#f7f7f7;padding:24px;color:#2E3138;">
+    <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;padding:24px;border:1px solid #e5e7eb;">
+      <p style="margin:0 0 4px;font-size:11px;font-weight:bold;letter-spacing:0.06em;text-transform:uppercase;color:#E21B70;">Foodora BD · Store &amp; Admin Live Order Alert</p>
+      <h2 style="margin:0 0 4px;color:#2E3138;font-size:20px;">${escapeXml(headlineEn)}</h2>
+      <p style="margin:0 0 12px;font-size:13px;color:#E21B70;font-weight:bold;">${escapeXml(headlineBn)}</p>
+      <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
+        <p style="margin:4px 0;"><strong>Restaurant:</strong> ${escapeXml(input.restaurantName)}</p>
+        <p style="margin:4px 0;"><strong>Customer:</strong> ${escapeXml(input.customerName)}${
+          input.customerPhone ? ` (${escapeXml(input.customerPhone)})` : ''
+        }</p>
+        <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
+        ${
+          input.deliveryAddress
+            ? `<p style="margin:4px 0;"><strong>Address:</strong> ${escapeXml(input.deliveryAddress)}</p>`
+            : ''
+        }
+        <p style="margin:4px 0;"><strong>Status:</strong> ${escapeXml(niceStatus)} · <strong>Total: ৳${input.totalAmount}</strong> (${escapeXml(
+          input.paymentMethod.toUpperCase()
+        )}${input.paymentStatus ? ` · ${escapeXml(input.paymentStatus.toUpperCase())}` : ''})</p>
+        ${input.riderName ? `<p style="margin:4px 0;"><strong>Rider:</strong> ${escapeXml(input.riderName)}</p>` : ''}
+        ${input.statusNote ? `<p style="margin:4px 0;"><strong>Note:</strong> ${escapeXml(input.statusNote)}</p>` : ''}
+        ${itemsHtml}
+      </div>
+      <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Open Live Order View · অর্ডার দেখুন</a>
+      <p style="margin:14px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Direct link: ${escapeXml(trackingUrl)}</p>
+    </div>
+  </body>
+</html>`;
+
+  const itemsText =
+    itemsList.length > 0
+      ? `\nItems:\n${itemsList
+          .slice(0, 20)
+          .map((it) => `- ${it.quantity}x ${it.name}: BDT ${it.lineTotal}`)
+          .join('\n')}`
+      : '';
+
+  const text = `${headlineEn} (${headlineBn})
+Restaurant: ${input.restaurantName}
+Customer: ${input.customerName}${input.customerPhone ? ` (${input.customerPhone})` : ''}
+Area: ${input.deliveryArea}${input.deliveryAddress ? `\nAddress: ${input.deliveryAddress}` : ''}
+Status: ${niceStatus} | Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()})${
+    input.riderName ? `\nRider: ${input.riderName}` : ''
+  }${input.statusNote ? `\nNote: ${input.statusNote}` : ''}${itemsText}
+View live order: ${trackingUrl}`;
+
+  return { subject, trackingUrl, html, text };
+}
+
+export interface OrderSnapshotItem {
+  id: number;
+  status: string;
+  paymentStatus?: string;
+}
+
+export function detectOrderBatchChanges<T extends OrderSnapshotItem>(
+  prevMap: Map<number, { status: string; paymentStatus?: string }> | null,
+  nextOrders: readonly T[]
+): {
+  newOrders: T[];
+  updatedOrders: T[];
+  nextMap: Map<number, { status: string; paymentStatus?: string }>;
+} {
+  const nextMap = new Map<number, { status: string; paymentStatus?: string }>();
+  const newOrders: T[] = [];
+  const updatedOrders: T[] = [];
+
+  for (const ord of nextOrders) {
+    nextMap.set(ord.id, { status: ord.status, paymentStatus: ord.paymentStatus });
+    if (!prevMap) continue;
+    const prev = prevMap.get(ord.id);
+    if (!prev) {
+      newOrders.push(ord);
+    } else if (prev.status !== ord.status || prev.paymentStatus !== ord.paymentStatus) {
+      updatedOrders.push(ord);
+    }
+  }
+
+  return { newOrders, updatedOrders, nextMap };
+}
+
 
 
 

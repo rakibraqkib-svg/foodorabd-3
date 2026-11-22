@@ -11,11 +11,12 @@ import {
   DEFAULT_PAYMENT_GATEWAYS,
   type DeliveryMode,
   formatBdt,
+  formatResolvedMapAddress,
   isGatewaySelectableAtCheckout,
   type PaymentMethod,
   toPublicPaymentGatewayView,
 } from '../lib/marketplace-logic';
-import { BANGLADESH_AREAS } from '../lib/i18n';
+import { BANGLADESH_AREAS, getBangladeshAreaSelectPresets } from '../lib/i18n';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
 import type { Lang, PublicPaymentGateway, Restaurant } from '../types/marketplace';
@@ -28,7 +29,7 @@ interface CartCheckoutDrawerProps {
   lang: Lang;
   mapsApiKey: string;
   paymentGateways?: PublicPaymentGateway[];
-  selectedArea: { name: string; lat: number; lng: number };
+  selectedArea: { name: string; lat: number; lng: number; displayName?: string };
   customerName: string;
   customerEmail?: string;
   onUpdateQty: (idx: number, delta: number) => void;
@@ -81,7 +82,15 @@ export function CartCheckoutDrawer({
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState(customerEmail || '');
   const [area, setArea] = useState(selectedArea.name);
-  const [addressLine, setAddressLine] = useState(`House 24, Road 5, ${selectedArea.name}, Bangladesh`);
+  const [addressLine, setAddressLine] = useState(
+    () =>
+      formatResolvedMapAddress({
+        displayName: selectedArea.displayName,
+        areaName: selectedArea.name,
+        lat: selectedArea.lat,
+        lng: selectedArea.lng,
+      }) || `${selectedArea.name}, Bangladesh`
+  );
   const [coords, setCoords] = useState({ lat: selectedArea.lat, lng: selectedArea.lng });
   const [instructions, setInstructions] = useState('');
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>(restaurant?.deliveryMode || 'platform');
@@ -103,9 +112,15 @@ export function CartCheckoutDrawer({
   useEffect(() => {
     setArea(selectedArea.name);
     setCoords({ lat: selectedArea.lat, lng: selectedArea.lng });
-    setAddressLine((prev) =>
-      prev.startsWith('House 24, Road ') ? `House 24, Road 5, ${selectedArea.name}, Bangladesh` : prev
-    );
+    const resolved = formatResolvedMapAddress({
+      displayName: selectedArea.displayName,
+      areaName: selectedArea.name,
+      lat: selectedArea.lat,
+      lng: selectedArea.lng,
+    });
+    if (resolved) {
+      setAddressLine(resolved);
+    }
   }, [selectedArea]);
 
   useEffect(() => {
@@ -591,13 +606,18 @@ export function CartCheckoutDrawer({
                       ? '+ কাস্টম এলাকা / উপজেলা যোগ করুন...'
                       : '+ Add Custom Area in Bangladesh...'
                   }
-                  presets={BANGLADESH_AREAS.map((a) => ({
-                    value: a.name,
-                    label: `${a.name} (${a.division}) — ${a.nameBn}`,
-                  }))}
+                  presets={getBangladeshAreaSelectPresets(lang)}
                   onSelectPreset={(val) => {
                     const found = BANGLADESH_AREAS.find((a) => a.name === val);
-                    if (found) setCoords({ lat: found.lat, lng: found.lng });
+                    if (found) {
+                      setCoords({ lat: found.lat, lng: found.lng });
+                      const formatted = formatResolvedMapAddress({
+                        areaName: found.name,
+                        lat: found.lat,
+                        lng: found.lng,
+                      });
+                      if (formatted) setAddressLine(formatted);
+                    }
                   }}
                 />
               </div>
@@ -633,8 +653,14 @@ export function CartCheckoutDrawer({
                     if (c.areaName) {
                       setArea(c.areaName);
                     }
-                    if (c.displayName) {
-                      setAddressLine(c.displayName.split(',').slice(0, 4).join(', '));
+                    const formatted = formatResolvedMapAddress({
+                      displayName: c.displayName,
+                      areaName: c.areaName,
+                      lat: c.lat,
+                      lng: c.lng,
+                    });
+                    if (formatted) {
+                      setAddressLine(formatted);
                     }
                   }}
                 />

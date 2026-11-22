@@ -78,10 +78,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let mounted = true;
 
     async function bootstrapSession() {
+      let hasOAuthCallbackParams = false;
       try {
         if (typeof window !== 'undefined') {
           const searchParams = new URLSearchParams(window.location.search);
           const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+          hasOAuthCallbackParams = Boolean(
+            searchParams.get('code') ||
+              hashParams.get('access_token') ||
+              searchParams.get('type') === 'recovery' ||
+              hashParams.get('type') === 'recovery'
+          );
           const oauthErrDesc =
             searchParams.get('error_description') ||
             hashParams.get('error_description') ||
@@ -92,30 +99,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             window.history.replaceState({}, document.title, window.location.pathname);
           }
         }
-        // 1. Check active Supabase OAuth / session first
-        const { data: sessionData } = await supabase.auth.getSession();
-        const supaToken = sessionData.session?.access_token;
-        if (supaToken) {
-          await syncTokenWithBackend(supaToken);
-          // Clean PKCE ?code= query parameter from address bar once exchanged
-          if (typeof window !== 'undefined' && window.location.search.includes('code=')) {
-            window.history.replaceState({}, document.title, window.location.pathname);
-          }
-          if (mounted) setLoading(false);
-          return;
-        }
       } catch (err) {
-        console.warn('Supabase session check failed:', err);
+        console.warn('OAuth callback URL parse failed:', err);
       }
 
-      // 2. Respect explicit sign-out
+      // 1. Respect explicit sign-out unless user just returned from an OAuth callback
       let explicitlySignedOut = false;
       try {
         explicitlySignedOut = sessionStorage.getItem(SIGNED_OUT_FLAG) === '1';
       } catch {
         explicitlySignedOut = false;
       }
-      if (explicitlySignedOut) {
+      if (explicitlySignedOut && !hasOAuthCallbackParams) {
         if (mounted) {
           setUser(null);
           setLoading(false);
@@ -123,9 +118,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // 3. Restore saved real email/password token only (never auto-restore demo/sandbox tokens)
+      // 2. If user is not mid-OAuth-callback and has a saved real email/password (fbd.) token, restore it FIRST
       const savedToken = getAuthToken();
-      if (savedToken && !isSandboxAuthToken(savedToken)) {
+      if (!hasOAuthCallbackParams && savedToken && !isSandboxAuthToken(savedToken)) {
         try {
           const res = await apiFetch<{ user: AppUser }>('/api/auth/sync', { method: 'POST' });
           if (res.user && !res.user.isSandbox) {
@@ -139,11 +134,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         } catch {
           setAuthToken(null);
         }
-      } else if (savedToken) {
+      } else if (savedToken && isSandboxAuthToken(savedToken)) {
+        // Never auto-restore demo/sandbox tokens across page loads
         setAuthToken(null);
       }
 
-      // 4. Start as Guest when no real or explicit session exists (never auto-login demo accounts)
+      // 3. Check active Supabase OAuth / session (e.g., fresh Google OAuth login or saved Google session)
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const supaToken = sessionData.session?.access_token;
+        if (supaToken) {
+          await syncTokenWithBackend(supaToken);
+          if (typeof window !== 'undefined' && window.location.search.includes('code=')) {
+            window.history.replaceState({}, document.title, window.location.pathname);
+          }
+          if (mounted) setLoading(false);
+          return;
+        }
+      } catch (err) {
+        console.warn('Supabase session check failed:', err);
+      }
+
+      // 4. Start as Guest when no real session exists (never auto-login demo accounts)
       if (mounted) {
         setUser(null);
         setLoading(false);
@@ -156,6 +168,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!mounted) return;
       if (event === 'PASSWORD_RECOVERY') {
         setPasswordRecoveryPending(true);
+      }
+      // Do not overwrite an active local email/PIN/sandbox token with background Supabase token refreshes
+      const currentToken = getAuthToken();
+      if (
+        event !== 'PASSWORD_RECOVERY' &&
+        currentToken &&
+        (currentToken.startsWith('fbd.') || currentToken.startsWith('sbx.'))
+      ) {
+        return;
       }
       if (
         session?.access_token &&
@@ -219,6 +240,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signInWithEmail = useCallback(async (email: string, password: string): Promise<AppUser> => {
     setError(null);
     try {
+      await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
       const res = await apiFetch<{ token: string; user: AppUser }>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ email, password }),
@@ -247,6 +269,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     ): Promise<AppUser> => {
       setError(null);
       try {
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
         const res = await apiFetch<{ token: string; user: AppUser }>('/api/auth/register', {
           method: 'POST',
           body: JSON.stringify({ fullName, email, password, role }),
@@ -271,6 +294,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const unlockAdminWithPin = useCallback(async (pin: string, email?: string): Promise<AppUser> => {
     setError(null);
     try {
+      await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
       const res = await apiFetch<{ token: string; user: AppUser }>('/api/auth/admin-pin', {
         method: 'POST',
         body: JSON.stringify({ pin, email: email?.trim() || undefined }),
@@ -315,6 +339,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async (email: string, code: string, newPassword: string): Promise<AppUser> => {
       setError(null);
       try {
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
         const res = await apiFetch<{ ok: boolean; token: string; user: AppUser }>(
           '/api/auth/reset-password',
           {
@@ -364,6 +389,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signInSandboxPersona = useCallback(
     async (role: 'customer' | 'restaurant_owner' | 'rider') => {
       setError(null);
+      await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
       try {
         sessionStorage.removeItem(SIGNED_OUT_FLAG);
       } catch {

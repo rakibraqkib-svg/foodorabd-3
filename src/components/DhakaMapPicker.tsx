@@ -12,7 +12,13 @@ import {
 import { Bike, LocateFixed, MapPin } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { BANGLADESH_AREAS, DHAKA_AREAS } from '../lib/i18n';
-import { haversineDistanceKm, resolveNearestAreaFromList } from '../lib/marketplace-logic';
+import {
+  extractCleanGoogleGeocodeAddress,
+  type GoogleGeocodeResultLike,
+  haversineDistanceKm,
+  matchCanonicalAreaFromHints,
+  resolveNearestAreaFromList,
+} from '../lib/marketplace-logic';
 import type { Lang } from '../types/marketplace';
 
 export interface ExtraRiderMapPin {
@@ -296,40 +302,94 @@ function GoogleMapInner({
     }
     const nearest = resolveNearestAreaFromList(lat, lng, BANGLADESH_AREAS);
     const immediateName =
-      nearest.area && nearest.distanceKm <= 0.8
+      nearest.area && nearest.distanceKm <= 6
         ? nearest.area.name
         : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+    const immediateDisplayName =
+      nearest.area && nearest.distanceKm <= 6
+        ? `${nearest.area.name}, Bangladesh`
+        : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)}), Bangladesh`;
 
     onSelectLocation({
       lat,
       lng,
       areaName: immediateName,
+      displayName: immediateDisplayName,
     });
 
     const seq = ++reverseSeqRef.current;
     setResolving(true);
-    apiFetch<{ displayName: string; areaName: string }>(
-      `/api/free/reverse-geocode?lat=${lat}&lng=${lng}&lang=${lang}`
-    )
-      .then((res) => {
-        if (seq !== reverseSeqRef.current) return;
-        const resolvedName = res.areaName?.trim() || immediateName;
-        skipPanRef.current = { lat, lng };
-        onSelectLocation({
-          lat,
-          lng,
-          areaName: resolvedName,
-          displayName: res.displayName,
+
+    const resolveViaBackend = () =>
+      apiFetch<{ displayName: string; areaName: string }>(
+        `/api/free/reverse-geocode?lat=${lat}&lng=${lng}&lang=${lang}`
+      )
+        .then((res) => {
+          if (seq !== reverseSeqRef.current) return;
+          const cleanArea = matchCanonicalAreaFromHints(
+            [res.areaName, res.displayName],
+            lat,
+            lng,
+            BANGLADESH_AREAS
+          );
+          skipPanRef.current = { lat, lng };
+          onSelectLocation({
+            lat,
+            lng,
+            areaName: cleanArea || immediateName,
+            displayName: res.displayName || immediateDisplayName,
+          });
+        })
+        .catch(() => {
+          // Keep immediate canonical nearest area/label if reverse geocode is unavailable
+        })
+        .finally(() => {
+          if (seq === reverseSeqRef.current) {
+            setResolving(false);
+          }
         });
-      })
-      .catch(() => {
-        // Keep immediate pinned coordinates/label if reverse geocode is unavailable
-      })
-      .finally(() => {
-        if (seq === reverseSeqRef.current) {
-          setResolving(false);
-        }
-      });
+
+    try {
+      const gMaps = (window as unknown as {
+        google?: {
+          maps?: {
+            Geocoder?: new () => {
+              geocode: (
+                req: { location: { lat: number; lng: number }; language?: string },
+                cb: (
+                  results: GoogleGeocodeResultLike[] | null,
+                  status: string
+                ) => void
+              ) => void;
+            };
+          };
+        };
+      }).google?.maps;
+      if (gMaps?.Geocoder) {
+        const geocoder = new gMaps.Geocoder();
+        geocoder.geocode({ location: { lat, lng }, language: lang }, (results, geoStatus) => {
+          if (seq !== reverseSeqRef.current) return;
+          if (geoStatus === 'OK' && results && results.length > 0) {
+            const parsed = extractCleanGoogleGeocodeAddress(results, lat, lng, BANGLADESH_AREAS);
+            skipPanRef.current = { lat, lng };
+            onSelectLocation({
+              lat,
+              lng,
+              areaName: parsed.areaName,
+              displayName: parsed.displayName,
+            });
+            setResolving(false);
+          } else {
+            void resolveViaBackend();
+          }
+        });
+        return;
+      }
+    } catch {
+      // fall through to backend reverse geocode
+    }
+
+    void resolveViaBackend();
   };
 
   if (status === APILoadingStatus.FAILED || status === APILoadingStatus.AUTH_FAILURE) {
@@ -518,17 +578,25 @@ function FallbackDhakaMap({
     return { x, y };
   };
 
-  const emitFallbackPoint = (lat: number, lng: number) => {
+  const emitFallbackPoint = (lat: number, lng: number, preferredAreaName?: string) => {
     if (!onSelectLocation) return;
     const nearest = resolveNearestAreaFromList(lat, lng, BANGLADESH_AREAS);
     const immediateName =
-      nearest.area && nearest.distanceKm <= 0.8
+      preferredAreaName ||
+      (nearest.area && nearest.distanceKm <= 6
         ? nearest.area.name
-        : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+        : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
+    const immediateDisplayName =
+      preferredAreaName
+        ? `${preferredAreaName}, Bangladesh`
+        : nearest.area && nearest.distanceKm <= 6
+        ? `${nearest.area.name}, Bangladesh`
+        : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)}), Bangladesh`;
     onSelectLocation({
       lat,
       lng,
       areaName: immediateName,
+      displayName: immediateDisplayName,
     });
     const seq = ++reverseSeqRef.current;
     apiFetch<{ displayName: string; areaName: string }>(
@@ -536,11 +604,15 @@ function FallbackDhakaMap({
     )
       .then((res) => {
         if (seq !== reverseSeqRef.current) return;
+        const cleanArea =
+          preferredAreaName ||
+          matchCanonicalAreaFromHints([res.areaName, res.displayName], lat, lng, BANGLADESH_AREAS) ||
+          immediateName;
         onSelectLocation({
           lat,
           lng,
-          areaName: res.areaName?.trim() || immediateName,
-          displayName: res.displayName,
+          areaName: cleanArea,
+          displayName: res.displayName || immediateDisplayName,
         });
       })
       .catch(() => {});
@@ -630,7 +702,7 @@ function FallbackDhakaMap({
               type="button"
               onClick={(ev) => {
                 ev.stopPropagation();
-                onSelectLocation?.({ lat: area.lat, lng: area.lng, areaName: area.name });
+                emitFallbackPoint(area.lat, area.lng, area.name);
               }}
               style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
               className={`absolute -translate-x-1/2 -translate-y-1/2 px-2 py-0.5 rounded-md text-[10px] font-semibold transition-colors ${
@@ -719,19 +791,11 @@ function FallbackDhakaMap({
               ev.stopPropagation();
               if (navigator.geolocation) {
                 navigator.geolocation.getCurrentPosition(
-                  (pos) =>
-                    onSelectLocation?.({
-                      lat: pos.coords.latitude,
-                      lng: pos.coords.longitude,
-                      areaName: 'Current GPS',
-                    }),
-                  () =>
-                    onSelectLocation?.({
-                      lat: 23.7949,
-                      lng: 90.4144,
-                      areaName: 'Gulshan 2',
-                    })
+                  (pos) => emitFallbackPoint(pos.coords.latitude, pos.coords.longitude),
+                  () => emitFallbackPoint(23.7949, 90.4144, 'Gulshan 2')
                 );
+              } else {
+                emitFallbackPoint(23.7949, 90.4144, 'Gulshan 2');
               }
             }}
             className="inline-flex items-center gap-1 text-[#E21B70] font-semibold hover:underline whitespace-nowrap shrink-0"

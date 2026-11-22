@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   ArrowLeft,
@@ -17,6 +17,7 @@ import {
   KeyRound,
   LayoutTemplate,
   LocateFixed,
+  Mail,
   MapPin,
   Package,
   Pencil,
@@ -24,6 +25,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Send,
   Server,
   Settings,
   Shield,
@@ -37,16 +39,18 @@ import {
   X,
 } from 'lucide-react';
 import { apiFetch, getAuthToken } from '../lib/api';
-import { BANGLADESH_AREAS } from '../lib/i18n';
-import { playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
+import { BANGLADESH_AREAS, DHAKA_DELIVERY_ZONES, getBangladeshAreaSelectPresets } from '../lib/i18n';
+import { emitLocalRealtimeSignal, playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
 import {
   ADMIN_PIN_DEFAULT_EMAIL,
   canActorModifyUserAccount,
   CUISINE_PRESET_OPTIONS,
+  detectOrderBatchChanges,
   FOOD_CATEGORY_PRESET_OPTIONS,
   formatBdt,
+  formatResolvedMapAddress,
   isOwnerRestaurant,
   isProtectedSuperAdminEmail,
   OrderStatus,
@@ -55,6 +59,7 @@ import {
 } from '../lib/marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from '../lib/storefront-config';
 import type {
+  AdminEmailSettingsView,
   AdminPaymentGateway,
   AppUser,
   AuditLogItem,
@@ -86,6 +91,7 @@ interface AdminDashboardProps {
   currentUser: AppUser;
   onRestaurantsMutated: () => Promise<void>;
   onOpenVendorStore?: (restaurantId: number) => void;
+  onTrackOrder?: (orderId: number) => void;
   onBack: () => void;
 }
 
@@ -163,6 +169,7 @@ export function AdminDashboard({
   currentUser,
   onRestaurantsMutated,
   onOpenVendorStore,
+  onTrackOrder,
   onBack,
 }: AdminDashboardProps) {
   const [tab, setTab] = useState<
@@ -223,9 +230,31 @@ export function AdminDashboard({
   const [runningReseed, setRunningReseed] = useState(false);
   const [downloadingBackup, setDownloadingBackup] = useState(false);
 
+  // Order Invoice Email (Gmail SMTP / Custom SMTP / Resend) State
+  const [emailSettings, setEmailSettings] = useState<AdminEmailSettingsView | null>(null);
+  const [emailProviderMode, setEmailProviderMode] = useState<'gmail' | 'smtp' | 'resend'>('gmail');
+  const [emailSmtpHost, setEmailSmtpHost] = useState('smtp.gmail.com');
+  const [emailSmtpPort, setEmailSmtpPort] = useState('465');
+  const [emailSmtpSecure, setEmailSmtpSecure] = useState(true);
+  const [emailSmtpUser, setEmailSmtpUser] = useState('');
+  const [emailSmtpPass, setEmailSmtpPass] = useState('');
+  const [emailFromAddress, setEmailFromAddress] = useState('');
+  const [emailNotifyEmail, setEmailNotifyEmail] = useState(PRIMARY_SUPER_ADMIN_EMAIL);
+  const [emailResendKey, setEmailResendKey] = useState('');
+  const [savingEmailSettings, setSavingEmailSettings] = useState(false);
+  const [testingEmail, setTestingEmail] = useState(false);
+  const [testEmailRecipient, setTestEmailRecipient] = useState(currentUser.email || '');
+  const orderSnapshotMapRef = useRef<Map<number, { status: string; paymentStatus?: string }> | null>(
+    null
+  );
+
   // Frontend / Storefront Customization Form
   const [storefrontForm, setStorefrontForm] = useState<StorefrontConfig>(DEFAULT_STOREFRONT_CONFIG);
   const [savingFrontend, setSavingFrontend] = useState(false);
+  const [savingActiveBarToggle, setSavingActiveBarToggle] = useState(false);
+
+  // Order & Dispatch Filter
+  const [orderFilter, setOrderFilter] = useState<'all' | 'active' | 'closed'>('all');
 
   // Product Catalog Filter & Modal
   const [productSearch, setProductSearch] = useState('');
@@ -233,6 +262,7 @@ export function AdminDashboard({
   const [productVisibilityFilter, setProductVisibilityFilter] = useState<'all' | 'visible' | 'hidden'>('all');
   const [productOwnershipFilter, setProductOwnershipFilter] = useState<'all' | 'own' | 'partner'>('all');
   const [restaurantOwnershipFilter, setRestaurantOwnershipFilter] = useState<'all' | 'own' | 'partner'>('all');
+  const [restaurantZoneFilter, setRestaurantZoneFilter] = useState<string>('all');
   const [productModal, setProductModal] = useState<ProductFormState | null>(null);
   const [savingProduct, setSavingProduct] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
@@ -270,8 +300,22 @@ export function AdminDashboard({
   const loadBackendStatus = useCallback(async () => {
     setLoadingBackend(true);
     try {
-      const statusRes = await apiFetch<BackendStatusSummary>('/api/admin/backend/status');
+      const [statusRes, emailRes] = await Promise.all([
+        apiFetch<BackendStatusSummary>('/api/admin/backend/status'),
+        apiFetch<{ settings: AdminEmailSettingsView }>('/api/admin/email-settings').catch(() => null),
+      ]);
       setBackendStatus(statusRes);
+      if (emailRes?.settings) {
+        const s = emailRes.settings;
+        setEmailSettings(s);
+        setEmailProviderMode(s.provider);
+        setEmailSmtpHost(s.smtpHost || 'smtp.gmail.com');
+        setEmailSmtpPort(String(s.smtpPort || 465));
+        setEmailSmtpSecure(Boolean(s.smtpSecure));
+        setEmailSmtpUser(s.smtpUser || '');
+        setEmailFromAddress(s.fromAddress || '');
+        setEmailNotifyEmail(s.notifyEmail || PRIMARY_SUPER_ADMIN_EMAIL);
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to load backend status');
     } finally {
@@ -297,6 +341,31 @@ export function AdminDashboard({
       }>('/api/admin/workspace');
       setRestaurants(res.restaurants);
       setProducts(res.products || []);
+
+      const changes = detectOrderBatchChanges(orderSnapshotMapRef.current, res.orders);
+      orderSnapshotMapRef.current = changes.nextMap;
+      if (silent && changes.newOrders.length > 0) {
+        const newest = changes.newOrders[0];
+        void playOrderAlertChime('new_order', {
+          dedupKey: `order_created_${String(newest.id)}`,
+        });
+        setFeedback(
+          lang === 'bn'
+            ? `নতুন অর্ডার এসেছে: ${newest.orderNumber} (${newest.restaurantName})`
+            : `New order received: ${newest.orderNumber} (${newest.restaurantName})`
+        );
+      } else if (silent && changes.updatedOrders.length > 0) {
+        const changed = changes.updatedOrders[0];
+        void playOrderAlertChime('status_update', {
+          dedupKey: `order_status_${String(changed.id)}_${changed.status}`,
+        });
+        setFeedback(
+          lang === 'bn'
+            ? `অর্ডার আপডেট হয়েছে: ${changed.orderNumber} (${changed.status.replace(/_/g, ' ')})`
+            : `Order updated: ${changed.orderNumber} (${changed.status.replace(/_/g, ' ')})`
+        );
+      }
+
       setOrders(res.orders);
       setUsers(res.users);
       setLedger(res.ledger);
@@ -331,7 +400,7 @@ export function AdminDashboard({
     } finally {
       if (!silent) setLoading(false);
     }
-  }, []);
+  }, [lang]);
 
   useEffect(() => {
     loadAdmin(false);
@@ -340,17 +409,23 @@ export function AdminDashboard({
   useRealtimeEvents({
     enabled: Boolean(currentUser?.uid),
     token: getAuthToken(),
-    pollFallbackMs: 10000,
+    pollFallbackMs: 6000,
     onSync: () => loadAdmin(true),
     onEvent: (ev) => {
-      if (ev.type === 'order:created' || ev.type === 'order:updated') {
+      if (ev.type === 'order:created' || ev.type === 'order:updated' || ev.type === 'notification:created') {
         if (ev.type === 'order:created') {
-          playOrderAlertChime('new_order');
+          void playOrderAlertChime('new_order', {
+            dedupKey: `order_created_${String(ev.payload.orderId || ev.payload.orderNumber || '')}`,
+          });
           setFeedback(
             lang === 'bn'
               ? `নতুন অর্ডার এসেছে: ${String(ev.payload.orderNumber || '')}`
               : `New order received: ${String(ev.payload.orderNumber || '')}`
           );
+        } else if (ev.type === 'order:updated') {
+          void playOrderAlertChime('status_update', {
+            dedupKey: `order_status_${String(ev.payload.orderId || '')}_${String(ev.payload.status || '')}`,
+          });
         }
         loadAdmin(true);
       }
@@ -374,14 +449,36 @@ export function AdminDashboard({
   );
 
   const filteredRestaurants = useMemo(() => {
-    if (restaurantOwnershipFilter === 'own') {
-      return restaurants.filter((r) => myRestaurantIds.has(r.id));
-    }
-    if (restaurantOwnershipFilter === 'partner') {
-      return restaurants.filter((r) => !myRestaurantIds.has(r.id));
-    }
-    return restaurants;
-  }, [restaurants, restaurantOwnershipFilter, myRestaurantIds]);
+    return restaurants.filter((r) => {
+      if (restaurantOwnershipFilter === 'own' && !myRestaurantIds.has(r.id)) return false;
+      if (restaurantOwnershipFilter === 'partner' && myRestaurantIds.has(r.id)) return false;
+      if (restaurantZoneFilter !== 'all') {
+        const restAreaLower = String(r.area || '').trim().toLowerCase();
+        const zoneObj = DHAKA_DELIVERY_ZONES.find((z) => z.code === restaurantZoneFilter);
+        if (zoneObj) {
+          const matchesZone =
+            restAreaLower.includes(zoneObj.name.toLowerCase()) ||
+            zoneObj.areas.some(
+              (a) =>
+                restAreaLower === a.name.toLowerCase() ||
+                restAreaLower.includes(a.name.toLowerCase()) ||
+                a.name.toLowerCase().includes(restAreaLower)
+            );
+          if (!matchesZone) return false;
+        } else if (restaurantZoneFilter === 'NATIONWIDE') {
+          const inAnyDhakaZone = DHAKA_DELIVERY_ZONES.some((z) =>
+            z.areas.some(
+              (a) =>
+                restAreaLower === a.name.toLowerCase() ||
+                restAreaLower.includes(a.name.toLowerCase())
+            )
+          );
+          if (inAnyDhakaZone) return false;
+        }
+      }
+      return true;
+    });
+  }, [restaurants, restaurantOwnershipFilter, restaurantZoneFilter, myRestaurantIds]);
 
   const restaurantNameMap = useMemo(() => {
     const map = new Map<number, string>();
@@ -567,6 +664,29 @@ export function AdminDashboard({
     }
   };
 
+  const handleQuickStorefrontPatch = async (
+    patch: Partial<StorefrontConfig>,
+    successMsg: string
+  ) => {
+    setSavingActiveBarToggle(true);
+    setErrorMsg(null);
+    try {
+      const nextConfig: StorefrontConfig = { ...storefrontForm, ...patch };
+      setStorefrontForm(nextConfig);
+      await apiFetch('/api/admin/settings', {
+        method: 'PATCH',
+        body: JSON.stringify({ storefrontConfig: nextConfig }),
+      });
+      setFeedback(successMsg);
+      await loadAdmin(true);
+      await onRestaurantsMutated();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to update Active Delivery Bar setting');
+    } finally {
+      setSavingActiveBarToggle(false);
+    }
+  };
+
   const handleToggleSetting = async (key: keyof PlatformSettings, val: boolean) => {
     setErrorMsg(null);
     try {
@@ -610,6 +730,67 @@ export function AdminDashboard({
       setErrorMsg(err instanceof Error ? err.message : 'Failed to send broadcast');
     } finally {
       setSendingBroadcast(false);
+    }
+  };
+
+  const handleSaveEmailSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    setFeedback(null);
+    setSavingEmailSettings(true);
+    try {
+      const res = await apiFetch<{ ok: boolean; settings: AdminEmailSettingsView }>(
+        '/api/admin/email-settings',
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            provider: emailProviderMode,
+            smtpHost: emailProviderMode === 'gmail' ? 'smtp.gmail.com' : emailSmtpHost.trim(),
+            smtpPort: Number(emailSmtpPort) || 465,
+            smtpSecure: emailSmtpSecure,
+            smtpUser: emailSmtpUser.trim(),
+            smtpPass: emailSmtpPass.trim() || undefined,
+            fromAddress: emailFromAddress.trim() || undefined,
+            notifyEmail: emailNotifyEmail.trim() || undefined,
+            resendApiKey: emailResendKey.trim() || undefined,
+          }),
+        }
+      );
+      setEmailSettings(res.settings);
+      setEmailNotifyEmail(res.settings.notifyEmail || PRIMARY_SUPER_ADMIN_EMAIL);
+      setEmailSmtpPass('');
+      setEmailResendKey('');
+      setFeedback(
+        res.settings.configured
+          ? lang === 'bn'
+            ? 'ইমেইল ইনভয়েস ডেলিভারি সেটিংস সংরক্ষণ হয়েছে।'
+            : `Email invoice transport saved (${res.settings.activeProvider.toUpperCase()} active).`
+          : 'Settings saved — enter your Gmail App Password or Resend API key to enable live inbox delivery.'
+      );
+      await loadBackendStatus();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to save email settings');
+    } finally {
+      setSavingEmailSettings(false);
+    }
+  };
+
+  const handleSendTestEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!testEmailRecipient.trim()) return;
+    setErrorMsg(null);
+    setFeedback(null);
+    setTestingEmail(true);
+    try {
+      const res = await apiFetch<{ ok: boolean; message: string }>('/api/admin/email-settings/test', {
+        method: 'POST',
+        body: JSON.stringify({ to: testEmailRecipient.trim() }),
+      });
+      setFeedback(res.message);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Test email failed');
+    } finally {
+      setTestingEmail(false);
     }
   };
 
@@ -1044,8 +1225,9 @@ export function AdminDashboard({
       method: 'PATCH',
       body: JSON.stringify(patch),
     });
+    emitLocalRealtimeSignal('order:updated', { orderId, status: patch.status });
     setFeedback(`Order #${orderId} updated.`);
-    await loadAdmin();
+    await loadAdmin(true);
   };
 
   const handleRefundOrder = async (orderId: number) => {
@@ -1053,12 +1235,13 @@ export function AdminDashboard({
       method: 'PATCH',
       body: JSON.stringify({ reason: 'Cancelled & refunded by Super Admin' }),
     });
+    emitLocalRealtimeSignal('order:updated', { orderId, status: 'cancelled' });
     setFeedback(
       lang === 'bn'
         ? 'অর্ডার বাতিল ও কমিশন রিভার্সাল সম্পন্ন হয়েছে।'
         : 'Order cancelled and commission reversed in ledger.'
     );
-    await loadAdmin();
+    await loadAdmin(true);
   };
 
   const handlePayoutDecision = async (id: number, status: 'paid' | 'rejected') => {
@@ -1159,9 +1342,18 @@ export function AdminDashboard({
   };
 
   const selectedRider = riders.find((r) => r.id === selectedRiderId) || riders[0] || null;
-  const assignableOrders = orders.filter(
-    (o) => o.status !== 'delivered' && o.status !== 'cancelled'
+  const activeDeliveryOrders = useMemo(
+    () => orders.filter((o) => o.status !== 'delivered' && o.status !== 'cancelled'),
+    [orders]
   );
+  const assignableOrders = activeDeliveryOrders;
+  const filteredOrders = useMemo(() => {
+    if (orderFilter === 'active') return activeDeliveryOrders;
+    if (orderFilter === 'closed') {
+      return orders.filter((o) => o.status === 'delivered' || o.status === 'cancelled');
+    }
+    return orders;
+  }, [orders, orderFilter, activeDeliveryOrders]);
 
   const gmv = orders
     .filter((o) => o.status !== 'cancelled')
@@ -1241,7 +1433,7 @@ export function AdminDashboard({
       )}
 
       {/* Platform KPI Strip */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 tabular-nums">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 tabular-nums">
         <div className="bg-white rounded-2xl border border-neutral-200 p-4">
           <p className="text-xs text-neutral-500">{lang === 'bn' ? 'মোট GMV' : 'Gross Merchandise Value'}</p>
           <p className="text-2xl font-bold text-[#2E3138] mt-1">{formatBdt(gmv, lang)}</p>
@@ -1250,6 +1442,20 @@ export function AdminDashboard({
           <p className="text-xs text-neutral-500">{lang === 'bn' ? 'প্ল্যাটফর্ম কমিশন' : 'Net Commission'}</p>
           <p className="text-2xl font-bold text-[#E21B70] mt-1">{formatBdt(netCommission, lang)}</p>
         </div>
+        <button
+          type="button"
+          onClick={() => {
+            setTab('orders');
+            setOrderFilter('active');
+          }}
+          className="text-left bg-gradient-to-br from-[#FFF0F6] to-white rounded-2xl border border-[#E21B70]/30 hover:border-[#E21B70] p-4 transition-colors"
+        >
+          <p className="text-xs text-[#E21B70] font-semibold flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span>{lang === 'bn' ? 'অ্যাক্টিভ ডেলিভারি অর্ডার' : 'Active Delivery Orders'}</span>
+          </p>
+          <p className="text-2xl font-bold text-[#2E3138] mt-1">{activeDeliveryOrders.length}</p>
+        </button>
         <div className="bg-white rounded-2xl border border-neutral-200 p-4">
           <p className="text-xs text-neutral-500">{lang === 'bn' ? 'মোট পণ্য (মেনু)' : 'Total Menu Products'}</p>
           <p className="text-2xl font-bold text-[#2E3138] mt-1">{products.length}</p>
@@ -1272,7 +1478,12 @@ export function AdminDashboard({
           { id: 'backend' as const, labelBn: 'ব্যাকএন্ড কন্ট্রোল', labelEn: 'Backend Control', icon: Server },
           { id: 'products' as const, labelBn: 'প্রোডাক্ট আপলোড ও এডিট', labelEn: 'Products & Catalog', icon: Package },
           { id: 'restaurants' as const, labelBn: 'রেস্টুরেন্ট ও অনুমোদন', labelEn: 'Restaurants', icon: Store },
-          { id: 'orders' as const, labelBn: 'অর্ডার ও ডিসপ্যাচ', labelEn: 'Orders & Dispatch', icon: RotateCcw },
+          {
+            id: 'orders' as const,
+            labelBn: `অর্ডার ও ডিসপ্যাচ (${activeDeliveryOrders.length})`,
+            labelEn: `Orders & Dispatch (${activeDeliveryOrders.length})`,
+            icon: RotateCcw,
+          },
           { id: 'finance' as const, labelBn: 'কমিশন ও পেআউট', labelEn: 'Ledger & Payouts', icon: Wallet },
           { id: 'coupons' as const, labelBn: 'কুপন ম্যানেজমেন্ট', labelEn: 'Coupons', icon: Tag },
           { id: 'users' as const, labelBn: 'ইউজার ও রাইডার', labelEn: 'Users & Riders', icon: Users },
@@ -1836,6 +2047,11 @@ export function AdminDashboard({
                       ready: backendStatus.integrations.pathaoLiveConfigured,
                       fallbackText: 'Sandbox Simulation',
                     },
+                    {
+                      label: 'Order Invoice Email (Gmail SMTP / Resend)',
+                      ready: Boolean(backendStatus.integrations.emailConfigured),
+                      fallbackText: 'Tracking Inbox Only',
+                    },
                   ].map((item) => (
                     <div
                       key={item.label}
@@ -1946,6 +2162,206 @@ export function AdminDashboard({
                   : 'Send Server Broadcast'}
               </button>
             </form>
+
+            {/* Gmail SMTP / Custom SMTP / Resend Order Invoice Email Delivery */}
+            <div className="lg:col-span-6 bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                  <Mail className="w-4 h-4 text-[#E21B70]" />
+                  <span>
+                    {lang === 'bn'
+                      ? 'অর্ডার ইনভয়েস ইমেইল ডেলিভারি (Gmail SMTP / Resend)'
+                      : 'Order Invoice Email Setup (Gmail SMTP / Resend)'}
+                  </span>
+                </h3>
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    emailSettings?.configured
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      : 'bg-amber-50 text-amber-700 border border-amber-200'
+                  }`}
+                >
+                  {emailSettings?.configured
+                    ? `Live (${emailSettings.activeProvider.toUpperCase()})`
+                    : 'Not Configured'}
+                </span>
+              </div>
+              <p className="text-xs text-neutral-500">
+                {lang === 'bn'
+                  ? 'কাস্টমারদের Gmail/ইমেইলে স্বয়ংক্রিয়ভাবে অর্ডার ইনভয়েস (INV-) ও লাইভ আপডেট পাঠাতে আপনার Gmail + App Password অথবা Resend API Key যুক্ত করুন।'
+                  : 'Connect a Gmail + Google App Password (recommended) or Resend API key so every order sends a real itemized invoice (INV-) directly to customer Gmail inboxes.'}
+              </p>
+
+              <form onSubmit={handleSaveEmailSettings} className="space-y-3 text-xs">
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { id: 'gmail', label: 'Gmail SMTP' },
+                      { id: 'smtp', label: 'Custom SMTP' },
+                      { id: 'resend', label: 'Resend API' },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        setEmailProviderMode(opt.id);
+                        if (opt.id === 'gmail') {
+                          setEmailSmtpHost('smtp.gmail.com');
+                          setEmailSmtpPort('465');
+                          setEmailSmtpSecure(true);
+                        }
+                      }}
+                      className={`py-2 px-2.5 rounded-lg border font-bold transition-colors ${
+                        emailProviderMode === opt.id
+                          ? 'border-[#E21B70] bg-[#FFF0F6] text-[#E21B70]'
+                          : 'border-neutral-200 text-neutral-600 hover:border-neutral-300'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                {emailProviderMode === 'resend' ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div className="sm:col-span-2">
+                      <label className="block font-semibold text-neutral-700 mb-1">
+                        Resend API Key {emailSettings?.hasResendKey ? `(${emailSettings.resendKeyPreview})` : ''}
+                      </label>
+                      <input
+                        type="password"
+                        value={emailResendKey}
+                        onChange={(e) => setEmailResendKey(e.target.value)}
+                        placeholder={emailSettings?.hasResendKey ? 'Leave blank to keep saved key' : 're_xxxxxxxxx'}
+                        className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="block font-semibold text-neutral-700 mb-1">From Address</label>
+                      <input
+                        value={emailFromAddress}
+                        onChange={(e) => setEmailFromAddress(e.target.value)}
+                        placeholder="Foodora BD <onboarding@resend.dev>"
+                        className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {emailProviderMode === 'smtp' && (
+                      <>
+                        <div>
+                          <label className="block font-semibold text-neutral-700 mb-1">SMTP Host</label>
+                          <input
+                            value={emailSmtpHost}
+                            onChange={(e) => setEmailSmtpHost(e.target.value)}
+                            placeholder="smtp.example.com"
+                            className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-semibold text-neutral-700 mb-1">Port</label>
+                          <input
+                            type="number"
+                            value={emailSmtpPort}
+                            onChange={(e) => setEmailSmtpPort(e.target.value)}
+                            placeholder="465"
+                            className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                          />
+                        </div>
+                      </>
+                    )}
+                    <div>
+                      <label className="block font-semibold text-neutral-700 mb-1">
+                        {emailProviderMode === 'gmail' ? 'Gmail Address' : 'SMTP Username'}
+                      </label>
+                      <input
+                        type="email"
+                        value={emailSmtpUser}
+                        onChange={(e) => setEmailSmtpUser(e.target.value)}
+                        placeholder="your-store@gmail.com"
+                        className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-neutral-700 mb-1">
+                        {emailProviderMode === 'gmail' ? 'Gmail App Password' : 'SMTP Password'}
+                        {emailSettings?.hasSmtpPass ? ` (${emailSettings.smtpPassPreview})` : ''}
+                      </label>
+                      <input
+                        type="password"
+                        value={emailSmtpPass}
+                        onChange={(e) => setEmailSmtpPass(e.target.value)}
+                        placeholder={
+                          emailSettings?.hasSmtpPass
+                            ? 'Leave blank to keep saved password'
+                            : '16-char Google App Password'
+                        }
+                        className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="block font-semibold text-neutral-700 mb-1">
+                        Sender Name &amp; Email (Optional)
+                      </label>
+                      <input
+                        value={emailFromAddress}
+                        onChange={(e) => setEmailFromAddress(e.target.value)}
+                        placeholder={`Foodora BD <${emailSmtpUser || 'orders@foodora.bd'}>`}
+                        className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block font-semibold text-neutral-700 mb-1">
+                    {lang === 'bn'
+                      ? 'অ্যাডমিন / স্টোর অর্ডার অ্যালার্ট ইমেইল (নতুন অর্ডার ও আপডেট)'
+                      : 'Admin / Owner Order Alert Email (Receives New Orders & Updates)'}
+                  </label>
+                  <input
+                    type="email"
+                    value={emailNotifyEmail}
+                    onChange={(e) => setEmailNotifyEmail(e.target.value)}
+                    placeholder={PRIMARY_SUPER_ADMIN_EMAIL}
+                    className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={savingEmailSettings}
+                  className="px-4 py-2 rounded-xl bg-[#2E3138] hover:bg-black text-white font-semibold disabled:opacity-50"
+                >
+                  {savingEmailSettings
+                    ? 'Saving...'
+                    : lang === 'bn'
+                    ? 'ইমেইল সেটিংস সংরক্ষণ করুন'
+                    : 'Save Email Settings'}
+                </button>
+              </form>
+
+              <form onSubmit={handleSendTestEmail} className="pt-2 border-t border-neutral-100 flex gap-2 text-xs">
+                <input
+                  type="email"
+                  required
+                  value={testEmailRecipient}
+                  onChange={(e) => setTestEmailRecipient(e.target.value)}
+                  placeholder="test-recipient@gmail.com"
+                  className="flex-1 min-w-0 px-3 py-2 border border-neutral-200 rounded-lg"
+                />
+                <button
+                  type="submit"
+                  disabled={testingEmail}
+                  className="px-3.5 py-2 rounded-lg border border-[#E21B70] text-[#E21B70] hover:bg-[#FFF0F6] font-bold inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>{testingEmail ? 'Sending...' : 'Send Test Invoice'}</span>
+                </button>
+              </form>
+            </div>
 
             {/* Gateway Modes + Extensible Payment API Integrations */}
             <div className="lg:col-span-12 bg-white rounded-2xl border border-neutral-200 p-5 space-y-4">
@@ -2328,6 +2744,7 @@ export function AdminDashboard({
                 {[
                   { key: 'showTopPartnerBar' as const, label: 'Top Partner / Rider / Admin Bar' },
                   { key: 'announcementBarEnabled' as const, label: 'Top Flash Announcement Bar' },
+                  { key: 'showActiveDeliveryBar' as const, label: 'Active Delivery Order Tracking Bar' },
                   { key: 'showPickupTab' as const, label: 'Pickup Tab in Sub-Navigation' },
                   { key: 'showHero' as const, label: 'Homepage Hero Promotional Banner' },
                   { key: 'showPromoTicket' as const, label: 'Left Sidebar Promo Code Card' },
@@ -2356,6 +2773,34 @@ export function AdminDashboard({
                     </div>
                   );
                 })}
+                <div className="p-2.5 rounded-xl border border-neutral-200 space-y-1.5 bg-[#FFF9FB]">
+                  <label className="block font-semibold text-[#2E3138]">
+                    {lang === 'bn'
+                      ? 'স্টোরফ্রন্ট পিনড অ্যাক্টিভ ডেলিভারি অর্ডার'
+                      : 'Featured Storefront Active Delivery Order'}
+                  </label>
+                  <select
+                    value={storefrontForm.featuredActiveOrderId || ''}
+                    onChange={(e) =>
+                      setStorefrontForm({
+                        ...storefrontForm,
+                        featuredActiveOrderId: e.target.value,
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 border border-neutral-200 rounded-lg bg-white text-xs font-medium"
+                  >
+                    <option value="">
+                      {lang === 'bn'
+                        ? 'অটো — সর্বশেষ অ্যাক্টিভ ডেলিভারি অর্ডার'
+                        : 'Auto — Latest Active Delivery Order'}
+                    </option>
+                    {activeDeliveryOrders.map((o) => (
+                      <option key={o.id} value={String(o.id)}>
+                        {o.orderNumber} · {o.restaurantName} ({o.deliveryArea})
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
 
@@ -2957,6 +3402,65 @@ export function AdminDashboard({
             </button>
           </div>
 
+          {/* Dhaka Restaurant Delivery Zone Structure Filter (ZONE 01 - ZONE 12) */}
+          <div className="bg-white rounded-2xl border border-neutral-200 p-3.5 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-neutral-500">
+                {lang === 'bn'
+                  ? 'ঢাকা রেস্টুরেন্ট ডেলিভারি জোন কাঠামো (ZONE 01 – ZONE 12)'
+                  : 'Dhaka Restaurant Delivery Zone Structure (ZONE 01 – ZONE 12)'}
+              </p>
+              {restaurantZoneFilter !== 'all' && (
+                <button
+                  type="button"
+                  onClick={() => setRestaurantZoneFilter('all')}
+                  className="text-[11px] font-semibold text-[#E21B70] hover:underline"
+                >
+                  {lang === 'bn' ? 'সব জোন দেখান' : 'Reset Zone Filter'}
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                onClick={() => setRestaurantZoneFilter('all')}
+                className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors ${
+                  restaurantZoneFilter === 'all'
+                    ? 'bg-[#2E3138] text-white border-[#2E3138]'
+                    : 'bg-white text-neutral-700 border-neutral-200 hover:border-neutral-300'
+                }`}
+              >
+                {lang === 'bn' ? 'সব জোন' : 'All Zones'}
+              </button>
+              {DHAKA_DELIVERY_ZONES.map((z) => (
+                <button
+                  key={z.code}
+                  type="button"
+                  onClick={() => setRestaurantZoneFilter(z.code)}
+                  title={z.summary}
+                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors ${
+                    restaurantZoneFilter === z.code
+                      ? 'bg-[#E21B70] text-white border-[#E21B70]'
+                      : 'bg-[#FFF9FB] text-neutral-700 border-neutral-200 hover:border-[#E21B70]/50'
+                  }`}
+                >
+                  {z.code} — {lang === 'bn' ? z.nameBn : z.name}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setRestaurantZoneFilter('NATIONWIDE')}
+                className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors ${
+                  restaurantZoneFilter === 'NATIONWIDE'
+                    ? 'bg-[#E21B70] text-white border-[#E21B70]'
+                    : 'bg-white text-neutral-700 border-neutral-200 hover:border-neutral-300'
+                }`}
+              >
+                {lang === 'bn' ? 'অন্যান্য জেলা / কাস্টম' : 'Other / Custom Area'}
+              </button>
+            </div>
+          </div>
+
           <div className="space-y-3">
             {filteredRestaurants.map((rest) => {
               const isMine = myRestaurantIds.has(rest.id);
@@ -3100,85 +3604,306 @@ export function AdminDashboard({
           </div>
         </div>
       ) : tab === 'orders' ? (
-        <div className="bg-white rounded-2xl border border-neutral-200 p-5 overflow-x-auto">
-          <table className="w-full text-xs text-left tabular-nums">
-            <thead>
-              <tr className="border-b border-neutral-200 text-neutral-500">
-                <th className="py-2">Order</th>
-                <th className="py-2">Restaurant</th>
-                <th className="py-2">Customer</th>
-                <th className="py-2">Status Control</th>
-                <th className="py-2">Assign Rider</th>
-                <th className="py-2 text-right">Total</th>
-                <th className="py-2 text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orders.map((o) => (
-                <tr key={o.id} className="border-b border-neutral-100">
-                  <td className="py-2.5 font-mono-nums font-semibold">
-                    {o.orderNumber}
-                    <div className="text-[11px] text-neutral-400">
-                      {o.paymentMethod.toUpperCase()} ({o.paymentStatus})
+        <div className="space-y-5">
+          {/* Active Delivery Order Control Center */}
+          <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <span className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                  <Bike className="w-4 h-4" />
+                </span>
+                <div>
+                  <h2 className="text-sm font-bold text-[#2E3138] flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span>
+                      {lang === 'bn'
+                        ? `অ্যাক্টিভ ডেলিভারি অর্ডার কন্ট্রোল (${activeDeliveryOrders.length})`
+                        : `Active Delivery Order Control (${activeDeliveryOrders.length})`}
+                    </span>
+                  </h2>
+                  <p className="text-xs text-neutral-500">
+                    {lang === 'bn'
+                      ? 'চলমান ডেলিভারি অর্ডার মনিটর করুন, রাইডার অ্যাসাইন করুন এবং হোমপেজ লাইভ ট্র্যাকিং বার নিয়ন্ত্রণ করুন।'
+                      : 'Monitor live delivery orders, assign riders, track ETA on map, and control the Storefront Active Delivery Order bar.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={savingActiveBarToggle}
+                  onClick={() =>
+                    handleQuickStorefrontPatch(
+                      { showActiveDeliveryBar: !storefrontForm.showActiveDeliveryBar },
+                      !storefrontForm.showActiveDeliveryBar
+                        ? lang === 'bn'
+                          ? 'স্টোরফ্রন্টে Active Delivery Order বার চালু করা হয়েছে।'
+                          : 'Storefront Active Delivery Order bar enabled.'
+                        : lang === 'bn'
+                        ? 'স্টোরফ্রন্টে Active Delivery Order বার বন্ধ করা হয়েছে।'
+                        : 'Storefront Active Delivery Order bar hidden.'
+                    )
+                  }
+                  className={`px-3 py-1.5 rounded-xl border text-xs font-bold transition-colors ${
+                    storefrontForm.showActiveDeliveryBar
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                      : 'bg-neutral-100 text-neutral-600 border-neutral-200 hover:bg-neutral-200'
+                  }`}
+                >
+                  {lang === 'bn'
+                    ? `হোমপেজ Active Delivery Bar: ${storefrontForm.showActiveDeliveryBar ? 'ON' : 'OFF'}`
+                    : `Storefront Active Delivery Bar: ${storefrontForm.showActiveDeliveryBar ? 'ON' : 'OFF'}`}
+                </button>
+              </div>
+            </div>
+
+            {activeDeliveryOrders.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-neutral-200 bg-neutral-50 p-4 text-xs text-neutral-500 text-center">
+                {lang === 'bn'
+                  ? 'এই মুহূর্তে কোনো চলমান ডেলিভারি অর্ডার নেই।'
+                  : 'No active delivery orders in progress right now.'}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {activeDeliveryOrders.map((o) => {
+                  const isPinned = String(storefrontForm.featuredActiveOrderId || '') === String(o.id);
+                  return (
+                    <div
+                      key={o.id}
+                      className={`rounded-xl border p-3.5 space-y-2.5 text-xs ${
+                        isPinned
+                          ? 'border-[#E21B70] bg-gradient-to-br from-[#FFF0F6] via-white to-emerald-50'
+                          : 'border-emerald-200/80 bg-[#F9FFFC]'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-mono-nums font-bold text-[#2E3138] flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                            <span>{o.orderNumber}</span>
+                          </p>
+                          <p className="font-semibold text-neutral-700 truncate mt-0.5">
+                            {o.restaurantName}
+                          </p>
+                          <p className="text-[11px] text-neutral-500 truncate">
+                            {o.customerName} · {o.deliveryArea} · ~{o.estimatedMinutes || 25} min ETA
+                          </p>
+                        </div>
+                        <span className="font-bold text-[#E21B70] shrink-0">
+                          {formatBdt(o.totalAmount, lang)}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <select
+                          value={o.status}
+                          aria-label={`Active order status for ${o.orderNumber}`}
+                          onChange={(e) =>
+                            handleOrderOverride(o.id, { status: e.target.value as OrderStatus })
+                          }
+                          className="px-2 py-1 border border-neutral-200 rounded-lg bg-white font-semibold text-[#2E3138]"
+                        >
+                          {ORDER_STATUS_OPTIONS.map((st) => (
+                            <option key={st} value={st}>
+                              {st.replace(/_/g, ' ')}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          value={o.riderUid || ''}
+                          aria-label={`Assign rider for active ${o.orderNumber}`}
+                          onChange={(e) =>
+                            handleOrderOverride(o.id, {
+                              status: o.status === 'ready' && e.target.value ? 'rider_assigned' : o.status,
+                              riderUid: e.target.value || null,
+                            })
+                          }
+                          className="px-2 py-1 border border-neutral-200 rounded-lg bg-white"
+                        >
+                          <option value="">Unassigned</option>
+                          {riders.map((r) => (
+                            <option key={r.uid} value={r.uid}>
+                              {r.fullName} ({r.zone})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          disabled={savingActiveBarToggle}
+                          onClick={() =>
+                            handleQuickStorefrontPatch(
+                              {
+                                showActiveDeliveryBar: true,
+                                featuredActiveOrderId: isPinned ? '' : String(o.id),
+                              },
+                              isPinned
+                                ? 'Unpinned active order (auto mode restored).'
+                                : `Pinned ${o.orderNumber} to Storefront Active Delivery Bar.`
+                            )
+                          }
+                          className={`px-2.5 py-1 rounded-lg border font-semibold transition-colors ${
+                            isPinned
+                              ? 'bg-[#E21B70] text-white border-[#E21B70]'
+                              : 'bg-white text-neutral-700 border-neutral-200 hover:border-[#E21B70]'
+                          }`}
+                        >
+                          {isPinned
+                            ? lang === 'bn'
+                              ? 'স্টোরফ্রন্টে পিনড'
+                              : 'Pinned to Bar'
+                            : lang === 'bn'
+                            ? 'বার-এ পিন করুন'
+                            : 'Pin to Storefront'}
+                        </button>
+                        {onTrackOrder && (
+                          <button
+                            type="button"
+                            onClick={() => onTrackOrder(o.id)}
+                            className="px-2.5 py-1 rounded-lg bg-[#2E3138] hover:bg-black text-white font-semibold inline-flex items-center gap-1"
+                          >
+                            <LocateFixed className="w-3 h-3" />
+                            <span>{lang === 'bn' ? 'লাইভ ট্র্যাক' : 'Track Live'}</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </td>
-                  <td className="py-2.5">{o.restaurantName}</td>
-                  <td className="py-2.5">
-                    {o.customerName}
-                    <div className="text-neutral-400">{o.deliveryArea}</div>
-                  </td>
-                  <td className="py-2.5">
-                    <select
-                      value={o.status}
-                      aria-label={`Order status for ${o.orderNumber}`}
-                      onChange={(e) =>
-                        handleOrderOverride(o.id, { status: e.target.value as OrderStatus })
-                      }
-                      className="px-2 py-1 border border-neutral-200 rounded bg-white font-semibold text-[#2E3138]"
-                    >
-                      {ORDER_STATUS_OPTIONS.map((st) => (
-                        <option key={st} value={st}>
-                          {st.replace(/_/g, ' ')}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="py-2.5">
-                    <select
-                      value={o.riderUid || ''}
-                      aria-label={`Assign rider for ${o.orderNumber}`}
-                      onChange={(e) =>
-                        handleOrderOverride(o.id, {
-                          status: o.status === 'ready' && e.target.value ? 'rider_assigned' : o.status,
-                          riderUid: e.target.value || null,
-                        })
-                      }
-                      className="px-2 py-1 border border-neutral-200 rounded bg-white"
-                    >
-                      <option value="">Unassigned</option>
-                      {riders.map((r) => (
-                        <option key={r.uid} value={r.uid}>
-                          {r.fullName} ({r.zone})
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="py-2.5 text-right font-semibold">{formatBdt(o.totalAmount, lang)}</td>
-                  <td className="py-2.5 text-right">
-                    {o.status !== 'cancelled' && (
-                      <button
-                        type="button"
-                        onClick={() => handleRefundOrder(o.id)}
-                        className="px-2.5 py-1 rounded border border-red-200 text-red-600 font-semibold hover:bg-red-50"
-                      >
-                        {lang === 'bn' ? 'রিফান্ড ও রিভার্স' : 'Cancel & Refund'}
-                      </button>
-                    )}
-                  </td>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-4 overflow-x-auto">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                {[
+                  {
+                    id: 'active' as const,
+                    label:
+                      lang === 'bn'
+                        ? `অ্যাক্টিভ ডেলিভারি (${activeDeliveryOrders.length})`
+                        : `Active Delivery Orders (${activeDeliveryOrders.length})`,
+                  },
+                  {
+                    id: 'all' as const,
+                    label: lang === 'bn' ? `সব অর্ডার (${orders.length})` : `All Orders (${orders.length})`,
+                  },
+                  {
+                    id: 'closed' as const,
+                    label:
+                      lang === 'bn'
+                        ? `সম্পন্ন / বাতিল (${orders.length - activeDeliveryOrders.length})`
+                        : `Completed / Cancelled (${orders.length - activeDeliveryOrders.length})`,
+                  },
+                ].map((flt) => (
+                  <button
+                    key={flt.id}
+                    type="button"
+                    onClick={() => setOrderFilter(flt.id)}
+                    className={`px-3 py-1.5 rounded-xl border font-semibold transition-colors ${
+                      orderFilter === flt.id
+                        ? 'bg-[#E21B70] text-white border-[#E21B70]'
+                        : 'bg-white text-neutral-700 border-neutral-200 hover:border-neutral-300'
+                    }`}
+                  >
+                    {flt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <table className="w-full text-xs text-left tabular-nums">
+              <thead>
+                <tr className="border-b border-neutral-200 text-neutral-500">
+                  <th className="py-2">Order</th>
+                  <th className="py-2">Restaurant</th>
+                  <th className="py-2">Customer</th>
+                  <th className="py-2">Status Control</th>
+                  <th className="py-2">Assign Rider</th>
+                  <th className="py-2 text-right">Total</th>
+                  <th className="py-2 text-right">Action</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filteredOrders.map((o) => (
+                  <tr key={o.id} className="border-b border-neutral-100">
+                    <td className="py-2.5 font-mono-nums font-semibold">
+                      {o.orderNumber}
+                      <div className="text-[11px] text-neutral-400">
+                        {o.paymentMethod.toUpperCase()} ({o.paymentStatus})
+                      </div>
+                    </td>
+                    <td className="py-2.5">{o.restaurantName}</td>
+                    <td className="py-2.5">
+                      {o.customerName}
+                      <div className="text-neutral-400">{o.deliveryArea}</div>
+                    </td>
+                    <td className="py-2.5">
+                      <select
+                        value={o.status}
+                        aria-label={`Order status for ${o.orderNumber}`}
+                        onChange={(e) =>
+                          handleOrderOverride(o.id, { status: e.target.value as OrderStatus })
+                        }
+                        className="px-2 py-1 border border-neutral-200 rounded bg-white font-semibold text-[#2E3138]"
+                      >
+                        {ORDER_STATUS_OPTIONS.map((st) => (
+                          <option key={st} value={st}>
+                            {st.replace(/_/g, ' ')}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="py-2.5">
+                      <select
+                        value={o.riderUid || ''}
+                        aria-label={`Assign rider for ${o.orderNumber}`}
+                        onChange={(e) =>
+                          handleOrderOverride(o.id, {
+                            status: o.status === 'ready' && e.target.value ? 'rider_assigned' : o.status,
+                            riderUid: e.target.value || null,
+                          })
+                        }
+                        className="px-2 py-1 border border-neutral-200 rounded bg-white"
+                      >
+                        <option value="">Unassigned</option>
+                        {riders.map((r) => (
+                          <option key={r.uid} value={r.uid}>
+                            {r.fullName} ({r.zone})
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="py-2.5 text-right font-semibold">{formatBdt(o.totalAmount, lang)}</td>
+                    <td className="py-2.5 text-right space-x-1.5 whitespace-nowrap">
+                      {onTrackOrder && (
+                        <button
+                          type="button"
+                          onClick={() => onTrackOrder(o.id)}
+                          className="px-2 py-1 rounded border border-neutral-200 text-[#2E3138] font-semibold hover:border-[#E21B70]"
+                        >
+                          Track
+                        </button>
+                      )}
+                      {o.status !== 'cancelled' && (
+                        <button
+                          type="button"
+                          onClick={() => handleRefundOrder(o.id)}
+                          className="px-2.5 py-1 rounded border border-red-200 text-red-600 font-semibold hover:bg-red-50"
+                        >
+                          {lang === 'bn' ? 'রিফান্ড ও রিভার্স' : 'Cancel & Refund'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : tab === 'finance' ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -3501,11 +4226,22 @@ export function AdminDashboard({
                         <option value="">
                           {lang === 'bn' ? 'হাব অনুযায়ী GPS সরান...' : 'Move GPS to BD Hub...'}
                         </option>
-                        {BANGLADESH_AREAS.map((a) => (
-                          <option key={a.name} value={a.name}>
-                            {a.name} ({a.division})
-                          </option>
+                        {DHAKA_DELIVERY_ZONES.map((z) => (
+                          <optgroup key={z.code} label={`${z.code} — ${z.name}`}>
+                            {z.areas.map((a) => (
+                              <option key={a.name} value={a.name}>
+                                {a.name} ({a.nameBn})
+                              </option>
+                            ))}
+                          </optgroup>
                         ))}
+                        <optgroup label={lang === 'bn' ? 'অন্যান্য জেলা' : 'Nationwide Bangladesh Cities'}>
+                          {BANGLADESH_AREAS.filter((a) => !a.zoneCode).map((a) => (
+                            <option key={a.name} value={a.name}>
+                              {a.name} ({a.division})
+                            </option>
+                          ))}
+                        </optgroup>
                         <option value="__custom__">
                           {lang === 'bn' ? '+ কাস্টম এলাকা লিখুন...' : '+ Custom Area in BD...'}
                         </option>
@@ -4058,18 +4794,19 @@ export function AdminDashboard({
                       ? '+ কাস্টম এলাকা যোগ করুন (ঢাকা/সারা দেশ)...'
                       : '+ Add Custom Area (Dhaka / Bangladesh)...'
                   }
-                  presets={BANGLADESH_AREAS.map((a) => ({
-                    value: a.name,
-                    label: `${a.name} — ${a.division} (${a.nameBn})`,
-                  }))}
+                  presets={getBangladeshAreaSelectPresets(lang)}
                   onSelectPreset={(val) => {
                     const found = BANGLADESH_AREAS.find((a) => a.name === val);
+                    const formatted = found
+                      ? formatResolvedMapAddress({ areaName: found.name, lat: found.lat, lng: found.lng })
+                      : '';
                     setRestaurantModal((prev) =>
                       prev
                         ? {
                             ...prev,
                             area: val,
                             ...(found ? { lat: found.lat, lng: found.lng } : {}),
+                            ...(formatted ? { address: formatted } : {}),
                           }
                         : null
                     );
@@ -4106,7 +4843,13 @@ export function AdminDashboard({
                   markerLabel={restaurantModal.name || restaurantModal.area}
                   interactive
                   heightClass="h-[190px]"
-                  onSelectLocation={(c) =>
+                  onSelectLocation={(c) => {
+                    const formatted = formatResolvedMapAddress({
+                      displayName: c.displayName,
+                      areaName: c.areaName,
+                      lat: c.lat,
+                      lng: c.lng,
+                    });
                     setRestaurantModal((prev) =>
                       prev
                         ? {
@@ -4114,10 +4857,11 @@ export function AdminDashboard({
                             lat: c.lat,
                             lng: c.lng,
                             area: c.areaName || prev.area,
+                            ...(formatted ? { address: formatted } : {}),
                           }
                         : null
-                    )
-                  }
+                    );
+                  }}
                 />
               </div>
               <div>

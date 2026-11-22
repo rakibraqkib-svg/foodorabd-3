@@ -31,19 +31,20 @@ export function signSandboxToken(payload: {
   role: UserRole;
   isSandbox?: boolean;
 }): string {
+  const isSandbox = payload.isSandbox ?? true;
   const data = Buffer.from(
     JSON.stringify({
       ...payload,
-      isSandbox: payload.isSandbox ?? true,
+      isSandbox,
       exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
     })
   ).toString('base64url');
   const sig = crypto.createHmac('sha256', SANDBOX_SECRET).update(data).digest('base64url');
-  return `sbx.${data}.${sig}`;
+  return `${isSandbox ? 'sbx' : 'fbd'}.${data}.${sig}`;
 }
 
 export function verifySandboxToken(token: string): AuthenticatedUser | null {
-  if (!token.startsWith('sbx.')) return null;
+  if (!token.startsWith('sbx.') && !token.startsWith('fbd.')) return null;
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   const [, data, sig] = parts;
@@ -52,12 +53,13 @@ export function verifySandboxToken(token: string): AuthenticatedUser | null {
   try {
     const parsed = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'));
     if (!parsed.exp || parsed.exp < Date.now()) return null;
+    const isSandbox = token.startsWith('sbx.') && Boolean(parsed.isSandbox ?? true);
     return {
       uid: parsed.uid,
       email: parsed.email,
       fullName: parsed.fullName,
       role: parsed.role,
-      isSandbox: Boolean(parsed.isSandbox ?? true),
+      isSandbox,
     };
   } catch {
     return null;
@@ -138,7 +140,7 @@ export async function resolveUserFromToken(tokenRaw?: string | null): Promise<Au
   const token = String(tokenRaw || '').trim();
   if (!token) return null;
 
-  // 1. Check server-signed session/sandbox token
+  // 1. Check server-signed session (fbd.) or sandbox (sbx.) token
   const sandboxUser = verifySandboxToken(token);
   if (sandboxUser) {
     const dbUser = await getOrCreateUser(
@@ -147,6 +149,9 @@ export async function resolveUserFromToken(tokenRaw?: string | null): Promise<Au
       sandboxUser.fullName,
       sandboxUser.role
     );
+    if (dbUser.status === 'suspended') {
+      return null;
+    }
     return {
       uid: dbUser.uid,
       email: dbUser.email,
@@ -165,6 +170,9 @@ export async function resolveUserFromToken(tokenRaw?: string | null): Promise<Au
     supaUser.fullName,
     'customer'
   );
+  if (dbUser.status === 'suspended') {
+    return null;
+  }
   return {
     uid: dbUser.uid,
     email: dbUser.email,

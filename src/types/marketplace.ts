@@ -271,6 +271,8 @@ export interface StorefrontConfig {
   accentColor: string;
   showTopPartnerBar: boolean;
   showPickupTab: boolean;
+  showActiveDeliveryBar: boolean;
+  featuredActiveOrderId: string;
   announcementBarEnabled: boolean;
   announcementTextEn: string;
   announcementTextBn: string;
@@ -347,6 +349,23 @@ export interface AuditLogItem {
   createdAt: string;
 }
 
+export interface AdminEmailSettingsView {
+  provider: 'gmail' | 'smtp' | 'resend';
+  smtpHost: string;
+  smtpPort: number;
+  smtpSecure: boolean;
+  smtpUser: string;
+  fromAddress: string;
+  notifyEmail?: string;
+  hasSmtpPass: boolean;
+  smtpPassPreview: string;
+  hasResendKey: boolean;
+  resendKeyPreview: string;
+  configured: boolean;
+  activeProvider: 'smtp' | 'resend' | 'in_app_email_log';
+  source: 'database' | 'env' | 'none';
+}
+
 export interface BackendStatusSummary {
   ok: boolean;
   checkedAt: string;
@@ -361,6 +380,8 @@ export interface BackendStatusSummary {
     bkashLiveConfigured: boolean;
     sslcommerzLiveConfigured: boolean;
     pathaoLiveConfigured: boolean;
+    emailConfigured?: boolean;
+    emailProvider?: string;
   };
   tableCounts: {
     users: number;
@@ -374,4 +395,5 @@ export interface BackendStatusSummary {
     auditLogs: number;
   };
 }
+
 

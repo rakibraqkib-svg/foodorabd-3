@@ -44,8 +44,19 @@ import {
   isSandboxAuthToken,
   shouldPersistAuthToken,
   shouldRestoreTrackedOrderShortcut,
+  formatResolvedMapAddress,
+  shouldPlayDedupedOrderChime,
+  collectMerchantOrderAlertRecipients,
+  buildMerchantOrderAlertEmailPayload,
+  detectOrderBatchChanges,
+  isGooglePlusCodeSegment,
+  isAdministrativeNoiseSegment,
+  cleanMapAddressSegments,
+  matchCanonicalAreaFromHints,
+  extractCleanGoogleGeocodeAddress,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
+import { BANGLADESH_AREAS, DHAKA_DELIVERY_ZONES } from './i18n';
 
 test('cart unit price and subtotal include discount price, variation delta, and add-ons', () => {
   const item = {
@@ -574,7 +585,7 @@ test('buildOrderTrackingUrl and doesEmailMatchOrder handle tokens and case-insen
   assert.equal(doesEmailMatchOrder('', 'c@b.com'), false);
 });
 
-test('buildOrderTrackingEmailPayload formats tracking URL, escaped customer text, and rider info', () => {
+test('buildOrderTrackingEmailPayload formats itemized invoice, tracking URL, escaped customer text, and rider info', () => {
   const payload = buildOrderTrackingEmailPayload({
     origin: 'https://foodorabd1.vercel.app/',
     orderId: 99,
@@ -585,6 +596,12 @@ test('buildOrderTrackingEmailPayload formats tracking URL, escaped customer text
     restaurantName: 'Panshi & Sons',
     deliveryArea: 'Sylhet (Zindabazar)',
     deliveryAddress: 'House 12, Road 3, Zindabazar',
+    subtotal: 720,
+    discountAmount: 50,
+    couponCode: 'FOODORA50',
+    deliveryFee: 49,
+    serviceFee: 10,
+    taxAmount: 51,
     totalAmount: 780,
     paymentMethod: 'bkash',
     paymentStatus: 'paid',
@@ -593,19 +610,25 @@ test('buildOrderTrackingEmailPayload formats tracking URL, escaped customer text
     riderName: 'Kamrul Rider',
     riderPhone: '+8801811223344',
     etaMinutes: 14,
-    items: [{ name: 'Beef Shatkora', quantity: 2, lineTotal: 720 }],
+    items: [{ name: 'Beef Shatkora', quantity: 2, unitPrice: 360, lineTotal: 720 }],
   });
 
-  assert.equal(payload.subject, 'Foodora BD Order FD-2026-9900 — ON THE WAY');
+  assert.equal(payload.subject, 'Foodora BD Invoice INV-FD-2026-9900 (FD-2026-9900) — ON THE WAY');
   assert.equal(payload.trackingUrl, 'https://foodorabd1.vercel.app/?order=99&token=sec_tok_99');
+  assert.ok(payload.html.includes('INV-FD-2026-9900'));
   assert.ok(payload.html.includes('Nadia &lt;Rahman&gt;'));
   assert.ok(payload.html.includes('Panshi &amp; Sons'));
   assert.ok(payload.html.includes('Kamrul Rider'));
   assert.ok(payload.html.includes('+8801811223344'));
   assert.ok(payload.html.includes('~14 mins'));
   assert.ok(payload.html.includes('Beef Shatkora'));
+  assert.ok(payload.html.includes('@ ৳360'));
+  assert.ok(payload.html.includes('Subtotal:'));
+  assert.ok(payload.html.includes('FOODORA50'));
+  assert.ok(payload.html.includes('VAT / Tax:'));
   assert.ok(payload.html.includes('রাইডার আপনার ঠিকানায় আসছেন'));
   assert.ok(payload.html.includes('https://foodorabd1.vercel.app/?order=99&amp;token=sec_tok_99'));
+  assert.ok(payload.text.includes('INV-FD-2026-9900'));
   assert.ok(payload.text.includes('Sylhet (Zindabazar)'));
   assert.ok(payload.text.includes('+8801811223344'));
 });
@@ -787,12 +810,14 @@ test('parseOrderSoundPreference and getOrderAlertChimeNotes validate chime profi
   assert.ok(statusNotes[1].freq > statusNotes[0].freq);
 });
 
-test('isSandboxAuthToken and shouldPersistAuthToken block persisting demo sandbox tokens across visits', () => {
+test('isSandboxAuthToken and shouldPersistAuthToken separate sbx. sandbox tokens from real fbd. email tokens', () => {
   assert.equal(isSandboxAuthToken('sbx.eyJ1aWQiOiJkZW1vIn0.sig'), true);
   assert.equal(shouldPersistAuthToken('sbx.eyJ1aWQiOiJkZW1vIn0.sig'), false);
   assert.equal(shouldPersistAuthToken(''), false);
   assert.equal(shouldPersistAuthToken(null), false);
 
+  assert.equal(isSandboxAuthToken('fbd.eyJ1aWQiOiJ1c2VyXzEifQ.sig'), false);
+  assert.equal(shouldPersistAuthToken('fbd.eyJ1aWQiOiJ1c2VyXzEifQ.sig'), true);
   assert.equal(isSandboxAuthToken('eyJhbGciOiJIUzI1NiJ9.realuser.sig'), false);
   assert.equal(shouldPersistAuthToken('eyJhbGciOiJIUzI1NiJ9.realuser.sig'), true);
 });
@@ -811,6 +836,170 @@ test('shouldRestoreTrackedOrderShortcut ignores stale demo/sandbox records and k
   assert.equal(
     shouldRestoreTrackedOrderShortcut({ orderId: 505, orderNumber: 'FD-BD-99210', isSandbox: false }),
     true
+  );
+});
+
+test('formatResolvedMapAddress strips Plus Codes and municipal noise while building concise street addresses', () => {
+  assert.equal(
+    formatResolvedMapAddress({
+      displayName: 'Q9W8+X2, Road 71, Gulshan 2, Ward 19, Dhaka North City Corporation, Dhaka Metropolitan, Dhaka Division, 1212, Bangladesh',
+      areaName: 'Gulshan 2',
+      lat: 23.7949,
+      lng: 90.4144,
+    }),
+    'Road 71, Gulshan 2, Bangladesh'
+  );
+  assert.equal(
+    formatResolvedMapAddress({
+      displayName: '',
+      areaName: 'Dhanmondi 27',
+      lat: 23.7511,
+      lng: 90.3765,
+    }),
+    'Dhanmondi 27, Bangladesh'
+  );
+  assert.equal(
+    formatResolvedMapAddress({
+      displayName: '',
+      areaName: 'Pinned (23.7800, 90.4100)',
+      lat: 23.78,
+      lng: 90.41,
+    }),
+    'Pinned (23.7800, 90.4100), Bangladesh'
+  );
+});
+
+test('isGooglePlusCodeSegment, extractCleanGoogleGeocodeAddress, and matchCanonicalAreaFromHints resolve exact street and Dhaka zone without Plus Codes', () => {
+  assert.equal(isGooglePlusCodeSegment('Q9R7+M24'), true);
+  assert.equal(isGooglePlusCodeSegment('Q9W8+XR Dhaka'), true);
+  assert.equal(isGooglePlusCodeSegment('Road 11'), false);
+  assert.equal(isAdministrativeNoiseSegment('Dhaka North City Corporation'), true);
+  assert.equal(isAdministrativeNoiseSegment('Ward 19'), true);
+  assert.equal(isAdministrativeNoiseSegment('Unnamed Road'), true);
+
+  assert.deepEqual(
+    cleanMapAddressSegments('Q9R7+M24, House 14, Road 11, Banani, Ward 19, Dhaka North City Corporation, Dhaka 1213, Bangladesh'),
+    ['House 14', 'Road 11', 'Banani', 'Dhaka']
+  );
+
+  const parsed = extractCleanGoogleGeocodeAddress(
+    [
+      {
+        formatted_address: 'QVR4+26 Dhaka, Bangladesh',
+        types: ['plus_code'],
+      },
+      {
+        formatted_address: 'Road 11, Banani Model Town, Dhaka 1213, Bangladesh',
+        types: ['route'],
+        address_components: [
+          { long_name: 'Road 11', types: ['route'] },
+          { long_name: 'Banani', types: ['sublocality_level_1', 'sublocality'] },
+          { long_name: 'Dhaka', types: ['locality'] },
+        ],
+      },
+    ],
+    23.7937,
+    90.4066,
+    BANGLADESH_AREAS
+  );
+
+  assert.equal(parsed.areaName, 'Banani');
+  assert.equal(parsed.displayName, 'Road 11, Banani Model Town, Dhaka, Bangladesh');
+  assert.equal(
+    matchCanonicalAreaFromHints(['Bashundhara Residential Area', 'Dhaka'], 23.8191, 90.4526, BANGLADESH_AREAS),
+    'Bashundhara R/A'
+  );
+});
+
+test('Dhaka Zone 01-12 structure, grouped select options, and storefront Active Delivery Bar config work deterministically', () => {
+  assert.equal(DHAKA_DELIVERY_ZONES.length, 12);
+  assert.equal(DHAKA_DELIVERY_ZONES[0].code, 'ZONE 01');
+  assert.equal(DHAKA_DELIVERY_ZONES[11].code, 'ZONE 12');
+
+  const merged = mergeCustomSelectOptions(
+    [{ value: 'Niketan', label: 'Niketan', group: 'ZONE 01 — GULSHAN' }],
+    ['Baridhara DOHS']
+  );
+  assert.equal(merged[0].group, 'ZONE 01 — GULSHAN');
+  assert.equal(merged[1].group, 'Saved Custom');
+
+  const scDefault = mergeStorefrontConfig(null);
+  assert.equal(scDefault.showActiveDeliveryBar, true);
+  assert.equal(scDefault.featuredActiveOrderId, '');
+
+  const scHidden = mergeStorefrontConfig({
+    showActiveDeliveryBar: false,
+    featuredActiveOrderId: '',
+  });
+  assert.equal(scHidden.showActiveDeliveryBar, false);
+  assert.equal(scHidden.featuredActiveOrderId, '');
+});
+
+test('shouldPlayDedupedOrderChime suppresses duplicate event keys inside cooldown window', () => {
+  const cache = new Map<string, number>();
+  assert.equal(shouldPlayDedupedOrderChime('order:10:confirmed', cache, 1000, 4000), true);
+  assert.equal(shouldPlayDedupedOrderChime('order:10:confirmed', cache, 2500, 4000), false);
+  assert.equal(shouldPlayDedupedOrderChime('order:10:preparing', cache, 2500, 4000), true);
+  assert.equal(shouldPlayDedupedOrderChime('order:10:confirmed', cache, 5500, 4000), true);
+  assert.equal(shouldPlayDedupedOrderChime('', cache, 5500, 4000), true);
+});
+
+test('collectMerchantOrderAlertRecipients deduplicates restaurant, owner, and admin emails while filtering sandbox domains', () => {
+  const recipients = collectMerchantOrderAlertRecipients({
+    restaurantEmail: 'Vendor@Example.com',
+    ownerEmail: 'vendor@example.com',
+    adminNotifyEmail: 'rakibraqkib@gmail.com',
+    fallbackAdminEmails: ['rakibraqkib@gmail.com', 'vendor@foodora.bd'],
+  });
+  assert.deepEqual(recipients, ['vendor@example.com', 'rakibraqkib@gmail.com']);
+});
+
+test('buildMerchantOrderAlertEmailPayload generates bilingual new order & status update alerts', () => {
+  const alert = buildMerchantOrderAlertEmailPayload({
+    origin: 'https://foodora.bd',
+    orderId: 88,
+    orderNumber: 'FD-BD-88120',
+    trackingToken: 'tok-88',
+    eventKind: 'new_order',
+    restaurantName: "Sultan's Dine",
+    customerName: 'Nusrat Jahan',
+    customerPhone: '01711223344',
+    deliveryArea: 'Banani',
+    deliveryAddress: 'Road 11, Banani, Dhaka',
+    totalAmount: 920,
+    paymentMethod: 'bkash',
+    paymentStatus: 'paid',
+    status: 'confirmed',
+    items: [{ name: 'Mutton Kacchi', quantity: 2, lineTotal: 860 }],
+  });
+  assert.ok(alert.subject.includes('FD-BD-88120'));
+  assert.ok(alert.subject.includes('920'));
+  assert.ok(alert.html.includes('নতুন অর্ডার এসেছে'));
+  assert.ok(alert.html.includes('2x'));
+  assert.ok(alert.html.includes('Mutton Kacchi'));
+  assert.ok(alert.trackingUrl.includes('order=88'));
+});
+
+test('detectOrderBatchChanges identifies newly arrived orders and status/payment updates', () => {
+  const initial = detectOrderBatchChanges(null, [
+    { id: 1, status: 'confirmed', paymentStatus: 'pending' },
+    { id: 2, status: 'preparing', paymentStatus: 'paid' },
+  ]);
+  assert.equal(initial.newOrders.length, 0);
+  assert.equal(initial.updatedOrders.length, 0);
+
+  const next = detectOrderBatchChanges(initial.nextMap, [
+    { id: 3, status: 'confirmed', paymentStatus: 'pending' },
+    { id: 1, status: 'accepted', paymentStatus: 'pending' },
+    { id: 2, status: 'preparing', paymentStatus: 'paid' },
+  ]);
+  assert.deepEqual(
+    next.newOrders.map((o) => o.id),
+    [3]
+  );
+  assert.deepEqual(
+    next.updatedOrders.map((o) => o.id),
+    [1]
   );
 });
 

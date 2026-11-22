@@ -6,6 +6,8 @@ export const DEFAULT_STOREFRONT_CONFIG: StorefrontConfig = {
   accentColor: '#E21B70',
   showTopPartnerBar: true,
   showPickupTab: true,
+  showActiveDeliveryBar: true,
+  featuredActiveOrderId: '',
   announcementBarEnabled: false,
   announcementTextEn: 'Flash Offer: Free Dhaka delivery on orders above ৳499 with code DHAKA50!',
   announcementTextBn: 'ফ্ল্যাশ অফার: ৪৯৯৳+ অর্ডারে ফ্রি ঢাকা ডেলিভারি (কোড: DHAKA50)!',
@@ -65,8 +67,8 @@ export function mergeStorefrontConfig(
     if (typeof DEFAULT_STOREFRONT_CONFIG[key] === 'boolean') {
       (merged as Record<string, unknown>)[key] = Boolean(val);
     } else if (typeof val === 'string') {
-      if (key === 'googleSiteVerification') {
-        merged.googleSiteVerification = val.trim();
+      if (key === 'googleSiteVerification' || key === 'featuredActiveOrderId') {
+        (merged as Record<string, unknown>)[key] = val.trim();
       } else {
         (merged as Record<string, unknown>)[key] = val.trim() ? val : DEFAULT_STOREFRONT_CONFIG[key];
       }

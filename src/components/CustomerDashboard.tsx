@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Heart, MapPin, Package, Plus, Star, User, Volume2, VolumeX } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowLeft, Bell, Heart, MapPin, Package, Plus, Star, User, Volume2, VolumeX, X } from 'lucide-react';
 import { apiFetch, getAuthToken } from '../lib/api';
-import { BANGLADESH_AREAS } from '../lib/i18n';
-import { formatBdt } from '../lib/marketplace-logic';
+import { BANGLADESH_AREAS, getBangladeshAreaSelectPresets } from '../lib/i18n';
+import { detectOrderBatchChanges, formatBdt, formatResolvedMapAddress } from '../lib/marketplace-logic';
 import { playOrderAlertChime, useOrderSoundSetting, useRealtimeEvents } from '../lib/realtime';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
@@ -52,22 +52,57 @@ export function CustomerDashboard({
   const [instructions, setInstructions] = useState('');
   const [coords, setCoords] = useState({ lat: BANGLADESH_AREAS[0].lat, lng: BANGLADESH_AREAS[0].lng });
   const [savingAddr, setSavingAddr] = useState(false);
+  const [liveOrderAlert, setLiveOrderAlert] = useState<string | null>(null);
+  const orderSnapshotMapRef = useRef<Map<number, { status: string; paymentStatus?: string }> | null>(
+    null
+  );
 
-  const loadData = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
-    try {
-      const [ordRes, addrRes] = await Promise.all([
-        apiFetch<{ orders: OrderRecord[] }>('/api/customer/orders'),
-        apiFetch<{ addresses: CustomerAddress[] }>('/api/customer/addresses'),
-      ]);
-      setOrders(ordRes.orders);
-      setAddresses(addrRes.addresses);
-    } catch (err) {
-      console.error('Failed to load customer workspace:', err);
-    } finally {
-      if (!silent) setLoading(false);
-    }
-  }, []);
+  const loadData = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoading(true);
+      try {
+        const [ordRes, addrRes] = await Promise.all([
+          apiFetch<{ orders: OrderRecord[] }>('/api/customer/orders'),
+          apiFetch<{ addresses: CustomerAddress[] }>('/api/customer/addresses'),
+        ]);
+        const changes = detectOrderBatchChanges(orderSnapshotMapRef.current, ordRes.orders);
+        orderSnapshotMapRef.current = changes.nextMap;
+        if (silent && changes.updatedOrders.length > 0) {
+          const changed = changes.updatedOrders[0];
+          setLiveOrderAlert(
+            lang === 'bn'
+              ? `আপনার অর্ডার আপডেট হয়েছে: ${changed.orderNumber} (${changed.status.replace(/_/g, ' ')})`
+              : `Order status updated: ${changed.orderNumber} (${changed.status.replace(/_/g, ' ')})`
+          );
+          void playOrderAlertChime('status_update', {
+            dedupKey: `order_status_${changed.id}_${changed.status}`,
+          });
+        } else if (silent && changes.newOrders.length > 0) {
+          const fresh = changes.newOrders[0];
+          setLiveOrderAlert(
+            lang === 'bn'
+              ? `নতুন অর্ডার যুক্ত হয়েছে: ${fresh.orderNumber}`
+              : `New order placed: ${fresh.orderNumber}`
+          );
+          void playOrderAlertChime('new_order', {
+            dedupKey: `order_created_${fresh.id}`,
+          });
+        }
+        setOrders(ordRes.orders);
+        setAddresses(addrRes.addresses);
+      } catch (err) {
+        console.error('Failed to load customer workspace:', err);
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [lang]
+  );
+
+  useEffect(() => {
+    orderSnapshotMapRef.current = null;
+    setLiveOrderAlert(null);
+  }, [user?.uid]);
 
   useEffect(() => {
     loadData(false);
@@ -76,10 +111,10 @@ export function CustomerDashboard({
   useRealtimeEvents({
     enabled: Boolean(user?.uid),
     token: getAuthToken(),
-    pollFallbackMs: 10000,
+    pollFallbackMs: 6000,
     onSync: () => loadData(true),
     onEvent: (ev) => {
-      if (ev.type === 'order:created' || ev.type === 'order:updated') {
+      if (ev.type === 'order:created' || ev.type === 'order:updated' || ev.type === 'notification:created') {
         loadData(true);
       }
     },
@@ -228,6 +263,26 @@ export function CustomerDashboard({
         </div>
       </div>
 
+      {liveOrderAlert && (
+        <div
+          role="status"
+          className="rounded-2xl bg-[#FFF0F6] border border-[#E21B70]/40 p-3.5 flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2.5 text-xs font-bold text-[#2E3138]">
+            <Bell className="w-4 h-4 text-[#E21B70] shrink-0 animate-pulse" />
+            <span>{liveOrderAlert}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setLiveOrderAlert(null)}
+            aria-label="Dismiss order status update"
+            className="p-1 rounded hover:bg-white text-neutral-500"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {loading ? (
         <div className="h-44 rounded-2xl bg-white border border-neutral-200 p-6 flex items-center justify-center text-sm text-neutral-500">
           {lang === 'bn' ? 'তথ্য লোড হচ্ছে...' : 'Loading customer workspace...'}
@@ -344,13 +399,18 @@ export function CustomerDashboard({
                         ? '+ কাস্টম এলাকা যোগ করুন...'
                         : '+ Add Custom Area in Bangladesh...'
                     }
-                    presets={BANGLADESH_AREAS.map((a) => ({
-                      value: a.name,
-                      label: `${a.name} — ${a.division} (${a.nameBn})`,
-                    }))}
+                    presets={getBangladeshAreaSelectPresets(lang)}
                     onSelectPreset={(val) => {
                       const found = BANGLADESH_AREAS.find((a) => a.name === val);
-                      if (found) setCoords({ lat: found.lat, lng: found.lng });
+                      if (found) {
+                        setCoords({ lat: found.lat, lng: found.lng });
+                        const formatted = formatResolvedMapAddress({
+                          areaName: found.name,
+                          lat: found.lat,
+                          lng: found.lng,
+                        });
+                        if (formatted) setAddressLine(formatted);
+                      }
                     }}
                   />
                 </div>
@@ -392,6 +452,13 @@ export function CustomerDashboard({
                 onSelectLocation={(c) => {
                   setCoords({ lat: c.lat, lng: c.lng });
                   if (c.areaName) setArea(c.areaName);
+                  const formatted = formatResolvedMapAddress({
+                    displayName: c.displayName,
+                    areaName: c.areaName,
+                    lat: c.lat,
+                    lng: c.lng,
+                  });
+                  if (formatted) setAddressLine(formatted);
                 }}
               />
 

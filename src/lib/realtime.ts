@@ -3,6 +3,7 @@ import {
   getOrderAlertChimeNotes,
   ORDER_SOUND_STORAGE_KEY,
   parseOrderSoundPreference,
+  shouldPlayDedupedOrderChime,
 } from './marketplace-logic';
 
 export interface ClientRealtimeMessage {
@@ -17,6 +18,9 @@ export interface ClientRealtimeMessage {
 }
 
 const ORDER_SOUND_CHANGED_EVENT = 'foodora:order-sound-changed';
+const AUDIO_UNLOCK_STATE_EVENT = 'foodora:audio-unlock-state';
+const LOCAL_REALTIME_CHANNEL = 'foodora_bd_realtime_v1';
+const LOCAL_REALTIME_STORAGE_KEY = 'foodora_bd_realtime_ping_v1';
 
 export function isOrderSoundEnabled(): boolean {
   if (typeof window === 'undefined') return true;
@@ -68,26 +72,133 @@ export function useOrderSoundSetting(): [boolean, (next: boolean) => void] {
 }
 
 let sharedAudioCtx: AudioContext | null = null;
+let audioUnlockInstalled = false;
+let pendingBlockedChime: 'new_order' | 'status_update' | null = null;
+let audioUnlockRequired = false;
+const orderChimeDedupCache = new Map<string, number>();
 
-export function playOrderAlertChime(
+function notifyAudioUnlockState(needed: boolean) {
+  audioUnlockRequired = needed;
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent<boolean>(AUDIO_UNLOCK_STATE_EVENT, { detail: needed }));
+  }
+}
+
+function ensureAudioContext(): AudioContext | null {
+  if (typeof window === 'undefined') return null;
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) return null;
+  if (!sharedAudioCtx) {
+    sharedAudioCtx = new AudioCtx();
+  }
+  return sharedAudioCtx;
+}
+
+function warmUpAudioContext(ctx: AudioContext): void {
+  try {
+    const buffer = ctx.createBuffer(1, 1, 22050);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.start(0);
+  } catch {
+    // ignore warm-up errors
+  }
+}
+
+function installGlobalAudioUnlocker(): void {
+  if (typeof window === 'undefined' || audioUnlockInstalled) return;
+  audioUnlockInstalled = true;
+  const unlock = async () => {
+    try {
+      const ctx = ensureAudioContext();
+      if (!ctx) return;
+      if (ctx.state === 'suspended') {
+        await ctx.resume().catch(() => {});
+      }
+      if (ctx.state === 'running') {
+        warmUpAudioContext(ctx);
+        if (audioUnlockRequired) {
+          notifyAudioUnlockState(false);
+        }
+        if (pendingBlockedChime) {
+          const kind = pendingBlockedChime;
+          pendingBlockedChime = null;
+          void playOrderAlertChime(kind, { force: true });
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+  window.addEventListener('pointerdown', unlock, { passive: true });
+  window.addEventListener('mousedown', unlock, { passive: true });
+  window.addEventListener('touchstart', unlock, { passive: true });
+  window.addEventListener('keydown', unlock, { passive: true });
+  window.addEventListener('click', unlock, { passive: true });
+}
+
+if (typeof window !== 'undefined') {
+  installGlobalAudioUnlocker();
+}
+
+export function useAudioUnlockPrompt(): {
+  needsUnlock: boolean;
+  unlockAudio: () => Promise<boolean>;
+} {
+  const [needsUnlock, setNeedsUnlock] = useState<boolean>(() => audioUnlockRequired);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<boolean>).detail;
+      setNeedsUnlock(Boolean(detail));
+    };
+    window.addEventListener(AUDIO_UNLOCK_STATE_EVENT, handler);
+    return () => window.removeEventListener(AUDIO_UNLOCK_STATE_EVENT, handler);
+  }, []);
+
+  const unlockAudio = useCallback(async () => {
+    const kind = pendingBlockedChime || 'new_order';
+    pendingBlockedChime = null;
+    notifyAudioUnlockState(false);
+    return playOrderAlertChime(kind, { force: true });
+  }, []);
+
+  return { needsUnlock, unlockAudio };
+}
+
+export async function playOrderAlertChime(
   kind: 'new_order' | 'status_update' = 'new_order',
-  options?: { force?: boolean }
-): boolean {
+  options?: { force?: boolean; dedupKey?: string }
+): Promise<boolean> {
   if (typeof window === 'undefined') return false;
   if (!options?.force && !isOrderSoundEnabled()) return false;
+  if (
+    options?.dedupKey &&
+    !shouldPlayDedupedOrderChime(options.dedupKey, orderChimeDedupCache, Date.now(), 4000)
+  ) {
+    return false;
+  }
   try {
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioCtx) return false;
-    if (!sharedAudioCtx) {
-      sharedAudioCtx = new AudioCtx();
+    installGlobalAudioUnlocker();
+    const ctx = ensureAudioContext();
+    if (!ctx) return false;
+    if (ctx.state === 'suspended') {
+      await ctx.resume().catch(() => {});
     }
-    if (sharedAudioCtx.state === 'suspended') {
-      void sharedAudioCtx.resume().catch(() => {});
+    if (ctx.state !== 'running') {
+      pendingBlockedChime = kind;
+      notifyAudioUnlockState(true);
+      return false;
     }
-    const ctx = sharedAudioCtx;
-    const now = ctx.currentTime;
+    if (audioUnlockRequired) {
+      notifyAudioUnlockState(false);
+    }
+
+    const now = ctx.currentTime + 0.01;
     const masterGain = ctx.createGain();
     masterGain.gain.setValueAtTime(0.95, now);
     masterGain.connect(ctx.destination);
@@ -97,7 +208,6 @@ export function playOrderAlertChime(
       const startAt = now + note.delaySec;
       const stopAt = startAt + note.durationSec + 0.03;
 
-      // Warm fundamental bell tone
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
@@ -110,7 +220,6 @@ export function playOrderAlertChime(
       osc.start(startAt);
       osc.stop(stopAt);
 
-      // Gentle octave shimmer overtone for a pleasant chime timbre
       if (note.harmonicRatio && note.harmonicGain) {
         const overtone = ctx.createOscillator();
         const overtoneGain = ctx.createGain();
@@ -127,11 +236,33 @@ export function playOrderAlertChime(
     });
     return true;
   } catch {
-    // ignore autoplay restriction when user hasn't interacted yet
+    pendingBlockedChime = kind;
+    notifyAudioUnlockState(true);
     return false;
   }
 }
 
+export function emitLocalRealtimeSignal(
+  type: ClientRealtimeMessage['type'],
+  payload: Record<string, any>
+): void {
+  if (typeof window === 'undefined') return;
+  const msg: ClientRealtimeMessage = { type, payload, ts: Date.now() };
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const ch = new BroadcastChannel(LOCAL_REALTIME_CHANNEL);
+      ch.postMessage(msg);
+      ch.close();
+    }
+  } catch {
+    // ignore BroadcastChannel errors
+  }
+  try {
+    window.localStorage.setItem(LOCAL_REALTIME_STORAGE_KEY, JSON.stringify(msg));
+  } catch {
+    // ignore storage errors
+  }
+}
 
 export function useRealtimeEvents(options: {
   enabled?: boolean;
@@ -147,7 +278,7 @@ export function useRealtimeEvents(options: {
     token = null,
     orderId = null,
     trackingToken = null,
-    pollFallbackMs = 15000,
+    pollFallbackMs = 8000,
     onEvent,
     onSync,
   } = options;
@@ -174,12 +305,16 @@ export function useRealtimeEvents(options: {
     if (trackingToken) params.set('trackingToken', trackingToken);
     const qs = params.toString();
 
+    const dispatchClientMessage = (parsed: ClientRealtimeMessage) => {
+      if (parsed && parsed.type && parsed.type !== 'connected') {
+        onEventRef.current(parsed);
+      }
+    };
+
     const handleMessageText = (raw: string) => {
       try {
         const parsed = JSON.parse(raw) as ClientRealtimeMessage;
-        if (parsed && parsed.type && parsed.type !== 'connected') {
-          onEventRef.current(parsed);
-        }
+        dispatchClientMessage(parsed);
       } catch {
         // ignore malformed frames
       }
@@ -201,7 +336,8 @@ export function useRealtimeEvents(options: {
 
     const connectWs = () => {
       if (disposed) return;
-      if (wsConsecutiveFailures >= 2) {
+      // Switch to SSE immediately after first WS close so updates never stall
+      if (wsConsecutiveFailures >= 1) {
         connectSseFallback();
         return;
       }
@@ -218,6 +354,14 @@ export function useRealtimeEvents(options: {
       }
 
       ws.onopen = () => {
+        if (disposed) {
+          try {
+            ws?.close();
+          } catch {
+            // ignore
+          }
+          return;
+        }
         opened = true;
         liveConnected = true;
         wsConsecutiveFailures = 0;
@@ -236,16 +380,41 @@ export function useRealtimeEvents(options: {
         if (!opened || lifetime < 1500) {
           wsConsecutiveFailures += 1;
         }
-        const delay = Math.min(8000, 1000 * Math.pow(2, wsConsecutiveFailures));
-        reconnectTimer = setTimeout(connectWs, delay);
+        if (wsConsecutiveFailures >= 1) {
+          connectSseFallback();
+          return;
+        }
+        reconnectTimer = setTimeout(connectWs, 1200);
       };
 
       ws.onerror = () => {
-        // onclose will trigger fallback/reconnect
+        // onclose will trigger SSE fallback
       };
     };
 
     connectWs();
+
+    // Instant cross-tab local sync (e.g., Customer tab -> Admin/Vendor tab in same browser)
+    let bc: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        bc = new BroadcastChannel(LOCAL_REALTIME_CHANNEL);
+        bc.onmessage = (ev) => {
+          if (!disposed && ev.data) {
+            dispatchClientMessage(ev.data as ClientRealtimeMessage);
+          }
+        };
+      }
+    } catch {
+      // ignore
+    }
+
+    const handleStorageSync = (ev: StorageEvent) => {
+      if (!disposed && ev.key === LOCAL_REALTIME_STORAGE_KEY && ev.newValue) {
+        handleMessageText(ev.newValue);
+      }
+    };
+    window.addEventListener('storage', handleStorageSync);
 
     const handleVisibilityOrFocus = () => {
       if (document.visibilityState === 'visible') {
@@ -255,26 +424,55 @@ export function useRealtimeEvents(options: {
     window.addEventListener('focus', handleVisibilityOrFocus);
     document.addEventListener('visibilitychange', handleVisibilityOrFocus);
 
+    // Fast polling when disconnected, plus a guaranteed safety-net periodic sync
+    // so multi-instance deployments stay up to date without manual reload.
+    const effectiveInterval = Math.max(4000, pollFallbackMs);
+    let ticks = 0;
     const syncInterval =
       pollFallbackMs > 0
         ? setInterval(() => {
-            if (!liveConnected && document.visibilityState === 'visible') {
+            if (document.visibilityState !== 'visible') return;
+            ticks += 1;
+            if (!liveConnected || ticks % 2 === 0) {
               onSyncRef.current?.();
             }
-          }, pollFallbackMs)
+          }, effectiveInterval)
         : null;
 
     return () => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (syncInterval) clearInterval(syncInterval);
+      window.removeEventListener('storage', handleStorageSync);
       window.removeEventListener('focus', handleVisibilityOrFocus);
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
-      if (ws) {
+      if (bc) {
         try {
-          ws.close();
+          bc.close();
         } catch {
           // ignore
+        }
+      }
+      if (ws) {
+        const socketToClose = ws;
+        socketToClose.onmessage = null;
+        socketToClose.onerror = null;
+        socketToClose.onclose = null;
+        if (socketToClose.readyState === WebSocket.OPEN) {
+          try {
+            socketToClose.close();
+          } catch {
+            // ignore
+          }
+        } else if (socketToClose.readyState === WebSocket.CONNECTING) {
+          // Avoid Chromium "WebSocket is closed before the connection is established" warning
+          socketToClose.onopen = () => {
+            try {
+              socketToClose.close();
+            } catch {
+              // ignore
+            }
+          };
         }
       }
       if (sse) {
