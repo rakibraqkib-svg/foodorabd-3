@@ -10,10 +10,10 @@ import express from "express";
 import http from "node:http";
 import path from "node:path";
 import fs from "node:fs";
-import crypto3 from "node:crypto";
+import crypto4 from "node:crypto";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
-import { and as and2, desc as desc2, eq as eq4, ne, or as or2, sql as sql3 } from "drizzle-orm";
+import { and as and2, desc as desc3, eq as eq5, ne, or as or2, sql as sql3 } from "drizzle-orm";
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { z } from "zod";
 
@@ -399,6 +399,9 @@ var createPool = () => {
       });
     }
     global._postgresPool.on("error", (err) => {
+      if (err.message && (err.message.includes("Connection terminated unexpectedly") || err.message.includes("terminating connection"))) {
+        return;
+      }
       console.error("Unexpected error on idle SQL pool client:", err);
     });
   }
@@ -2042,11 +2045,12 @@ function mapOpenMeteoWeather(weatherCode, precipitationMm) {
   }
   return { labelEn: "Clear Sky", labelBn: "\u09AA\u09B0\u09BF\u09B7\u09CD\u0995\u09BE\u09B0 \u0986\u0995\u09BE\u09B6", isRaining: false, rainBufferMin: 0 };
 }
-var PRIMARY_SUPER_ADMIN_EMAIL = "rakibraqkib@gmail.com";
+var PRIMARY_SUPER_ADMIN_EMAIL = "raqkibrony@gmail.com";
 var ADMIN_PIN_DEFAULT_EMAIL = "raqkibrony@gmail.com";
+var SECONDARY_SUPER_ADMIN_EMAIL = "rakibraqkib@gmail.com";
 var PROTECTED_SUPER_ADMIN_EMAILS = [
   PRIMARY_SUPER_ADMIN_EMAIL,
-  ADMIN_PIN_DEFAULT_EMAIL
+  SECONDARY_SUPER_ADMIN_EMAIL
 ];
 function isProtectedSuperAdminEmail(email) {
   const normalized = email.trim().toLowerCase();
@@ -2334,6 +2338,31 @@ ${urlNodes}
 </urlset>
 `;
 }
+var BANGLADESH_COORDS_BOUNDS = {
+  minLat: 20.5,
+  maxLat: 26.7,
+  minLng: 88,
+  maxLng: 92.7
+};
+function isWithinBangladesh(lat, lng) {
+  return Number.isFinite(lat) && Number.isFinite(lng) && lat >= BANGLADESH_COORDS_BOUNDS.minLat && lat <= BANGLADESH_COORDS_BOUNDS.maxLat && lng >= BANGLADESH_COORDS_BOUNDS.minLng && lng <= BANGLADESH_COORDS_BOUNDS.maxLng;
+}
+function resolveNearestAreaFromList(lat, lng, areas) {
+  if (!areas || areas.length === 0) {
+    return { area: null, distanceKm: 0, label: `${lat.toFixed(4)}, ${lng.toFixed(4)}` };
+  }
+  let best = areas[0];
+  let bestDist = Infinity;
+  for (const a of areas) {
+    const d = haversineDistanceKm(lat, lng, a.lat, a.lng);
+    if (d < bestDist) {
+      bestDist = d;
+      best = a;
+    }
+  }
+  const thresholdKm = bestDist <= 18 ? best.name : `${best.name} (${lat.toFixed(3)}, ${lng.toFixed(3)})`;
+  return { area: best, distanceKm: bestDist, label: thresholdKm };
+}
 function buildOrderTrackingUrl(origin, orderId, trackingToken) {
   const cleanOrigin = origin.replace(/\/+$/, "");
   const base = `${cleanOrigin}/?order=${encodeURIComponent(String(orderId))}`;
@@ -2345,34 +2374,272 @@ function doesEmailMatchOrder(orderEmail, queryEmail) {
   const b = String(queryEmail || "").trim().toLowerCase();
   return Boolean(a && b && a === b);
 }
+function isGooglePlusCodeSegment(segment) {
+  const clean = String(segment || "").trim();
+  if (!clean) return false;
+  return /^[23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,4}(?:\s|$)/i.test(clean);
+}
+function isAdministrativeNoiseSegment(segment) {
+  const clean = String(segment || "").trim();
+  if (!clean) return true;
+  if (isGooglePlusCodeSegment(clean)) return true;
+  const lower = clean.toLowerCase();
+  if (lower === "bangladesh" || clean === "\u09AC\u09BE\u0982\u09B2\u09BE\u09A6\u09C7\u09B6" || lower === "unnamed road" || lower === "road" || /^ward[\s-]*(no\.?\s*)?\d+/i.test(clean) || /^ওয়ার্ড[\s-]*(নং\.?\s*)?[\d০-৯]+/.test(clean) || /city corporation/i.test(clean) || /সিটি কর্পোরেশন/.test(clean) || /\bmetropolitan\b/i.test(clean) || /\bdistrict\b/i.test(clean) || /\bdivision\b/i.test(clean) || /(জেলা|বিভাগ|মহানগর)$/.test(clean) || /^\d{4}$/.test(clean)) {
+    return true;
+  }
+  return false;
+}
+function stripTrailingPostalCode(segment) {
+  return String(segment || "").replace(/\bDhaka\s+\d{4}\b/gi, "Dhaka").replace(/[\s,-]+\d{4}$/, "").trim();
+}
+function cleanMapAddressSegments(rawAddress) {
+  const parts = String(rawAddress || "").split(",").map((p) => stripTrailingPostalCode(p)).filter(Boolean).filter((p) => !isAdministrativeNoiseSegment(p));
+  const seen = /* @__PURE__ */ new Set();
+  const unique = [];
+  for (const part of parts) {
+    const key = part.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(part);
+    }
+  }
+  return unique;
+}
+var AREA_ALIAS_RULES = [
+  { pattern: /\bgulshan[\s-]*2\b|গুলশান[\s-]*২/i, canonical: "Gulshan 2" },
+  { pattern: /\bgulshan[\s-]*1\b|গুলশান[\s-]*১/i, canonical: "Gulshan 1" },
+  { pattern: /\bniketan\b|নিকেতন/i, canonical: "Niketan" },
+  { pattern: /\bshahjadpur\b|শাহজাদপুর/i, canonical: "Shahjadpur" },
+  { pattern: /\bchairman\s*bari\b|চেয়ারম্যান\s*বাড়ি/i, canonical: "Chairman Bari" },
+  { pattern: /\bkakoli\b|কাকলী/i, canonical: "Kakoli" },
+  { pattern: /\bbanani\b|বনানী/i, canonical: "Banani" },
+  { pattern: /\bsatmasjid\b|সাতমসজিদ/i, canonical: "Satmasjid Road" },
+  { pattern: /\bjigatola\b|\bzhigatola\b|জিগাতলা/i, canonical: "Jigatola" },
+  { pattern: /\bkalabagan\b|কলাবাগান/i, canonical: "Kalabagan" },
+  { pattern: /\bdhanmondi\s*(?:27|16)\b|ধানমন্ডি\s*(?:২৭|১৬)/i, canonical: "Dhanmondi 27" },
+  { pattern: /\bdhanmondi\b|ধানমন্ডি/i, canonical: "Dhanmondi 1\u201332" },
+  { pattern: /\bpallabi\b|পল্লবী/i, canonical: "Pallabi" },
+  { pattern: /\bkazipara\b|কাজীপাড়া/i, canonical: "Kazipara" },
+  { pattern: /\bmirpur[\s-]*10\b|মিরপুর[\s-]*১০/i, canonical: "Mirpur 10" },
+  { pattern: /\bmirpur[\s-]*11\b|মিরপুর[\s-]*১১/i, canonical: "Mirpur 11" },
+  { pattern: /\bmirpur[\s-]*12\b|মিরপুর[\s-]*১২/i, canonical: "Mirpur 12" },
+  { pattern: /\bmirpur[\s-]*1\b|মিরপুর[\s-]*১/i, canonical: "Mirpur 1" },
+  { pattern: /\bmirpur[\s-]*2\b|মিরপুর[\s-]*২/i, canonical: "Mirpur 2" },
+  { pattern: /\bmirpur[\s-]*6\b|মিরপুর[\s-]*৬/i, canonical: "Mirpur 6" },
+  { pattern: /\brajlaxmi\b|রাজলক্ষ্মী/i, canonical: "Rajlaxmi" },
+  { pattern: /\bjashimuddin\b|জসিমউদ্দীন/i, canonical: "Jashimuddin" },
+  { pattern: /\babdullahpur\b|আব্দুল্লাহপুর/i, canonical: "Abdullahpur" },
+  { pattern: /\buttara\b|উত্তরা/i, canonical: "Uttara Sector 7" },
+  { pattern: /\btown\s*hall\b|টাউন\s*হল/i, canonical: "Town Hall" },
+  { pattern: /\bbosila\b|\bbashila\b|বসিলা/i, canonical: "Bosila" },
+  { pattern: /\badabor\b|আদাবর/i, canonical: "Adabor" },
+  { pattern: /\bshyamoli\b|শ্যামলী/i, canonical: "Shyamoli" },
+  { pattern: /\bmohammadpur\b|মোহাম্মদপুর/i, canonical: "Mohammadpur" },
+  { pattern: /\bjamuna\s*future\s*park\b|যমুনা\s*ফিউচার/i, canonical: "Jamuna Future Park" },
+  { pattern: /\bkuril\b|কুড়িল/i, canonical: "Kuril" },
+  { pattern: /\bvatara\b|\bbhatara\b|ভাটারা/i, canonical: "Vatara" },
+  { pattern: /\bbashundhara\b|বসুন্ধরা/i, canonical: "Bashundhara R/A" },
+  { pattern: /\bmerul\s*badda\b|মেরুল\s*বাড্ডা/i, canonical: "Merul Badda" },
+  { pattern: /\brampura\b|রামপুরা/i, canonical: "Rampura" },
+  { pattern: /\baftabnagar\b|আফতাবনগর/i, canonical: "Aftabnagar" },
+  { pattern: /\bbadda\b|বাড্ডা/i, canonical: "Badda" },
+  { pattern: /\bpaltan\b|\bpurana\s*paltan\b|\bnaya\s*paltan\b|পল্টন/i, canonical: "Paltan" },
+  { pattern: /\bfakirapool\b|ফকিরাপুল/i, canonical: "Fakirapool" },
+  { pattern: /\barambagh\b|আরামবাগ/i, canonical: "Arambagh" },
+  { pattern: /\bkamalapur\b|কমলাপুর/i, canonical: "Kamalapur" },
+  { pattern: /\bmotijheel\b|মতিঝিল/i, canonical: "Motijheel" },
+  { pattern: /\bchawkbazar\b|চকবাজার/i, canonical: "Chawkbazar" },
+  { pattern: /\bbangshal\b|বংশাল/i, canonical: "Bangshal" },
+  { pattern: /\blalbagh\b|লালবাগ/i, canonical: "Lalbagh" },
+  { pattern: /\bwari\b|ওয়ারী/i, canonical: "Wari" },
+  { pattern: /\bsutrapur\b|সূত্রাপুর/i, canonical: "Sutrapur" },
+  { pattern: /\bkarwan\s*bazar\b|কারওয়ান\s*বাজার/i, canonical: "Karwan Bazar" },
+  { pattern: /\bkawran\s*bazar\b|কাওরান\s*বাজার/i, canonical: "Kawran Bazar" },
+  { pattern: /\bfarmgate\b|ফার্মগেট/i, canonical: "Farmgate" },
+  { pattern: /\btejgaon\b|তেজগাঁও/i, canonical: "Tejgaon" },
+  { pattern: /\btaltola\b|তালতলা/i, canonical: "Taltola" },
+  { pattern: /\bmalibagh\b|মালিবাগ/i, canonical: "Malibagh" },
+  { pattern: /\bgoran\b|গোরান/i, canonical: "Goran" },
+  { pattern: /\bkhilgaon\b|খিলগাঁও/i, canonical: "Khilgaon" }
+];
+function matchCanonicalAreaFromHints(hints, lat, lng, presets) {
+  const cleanedHints = hints.flatMap((h) => String(h || "").split(",")).map((h) => stripTrailingPostalCode(h)).filter((h) => h && !isAdministrativeNoiseSegment(h) && !/^Pinned\s*\(/i.test(h));
+  for (const hint of cleanedHints) {
+    const lowerHint = hint.toLowerCase();
+    const direct = presets.find(
+      (p) => p.name.toLowerCase() === lowerHint || p.nameBn && p.nameBn.toLowerCase() === lowerHint
+    );
+    if (direct) return direct.name;
+  }
+  const combined = cleanedHints.join(" , ");
+  for (const rule of AREA_ALIAS_RULES) {
+    if (rule.pattern.test(combined)) {
+      const matched = presets.find((p) => p.name.toLowerCase() === rule.canonical.toLowerCase());
+      if (matched) return matched.name;
+      return rule.canonical;
+    }
+  }
+  if (/\bgulshan\b|গুলশান/i.test(combined)) {
+    const gulshanOnly = presets.filter((p) => /gulshan/i.test(p.name));
+    if (gulshanOnly.length > 0) {
+      return resolveNearestAreaFromList(lat, lng, gulshanOnly).area?.name || "Gulshan 2";
+    }
+  }
+  if (/\bmirpur\b|মিরপুর/i.test(combined)) {
+    const mirpurOnly = presets.filter((p) => /mirpur/i.test(p.name));
+    if (mirpurOnly.length > 0) {
+      return resolveNearestAreaFromList(lat, lng, mirpurOnly).area?.name || "Mirpur 10";
+    }
+  }
+  const nearest = resolveNearestAreaFromList(lat, lng, presets);
+  const specificHint = cleanedHints.find(
+    (h) => !/^(dhaka|chattogram|sylhet|rajshahi|khulna|barishal|rangpur|mymensingh|ঢাকা)$/i.test(h)
+  );
+  if (specificHint) {
+    return specificHint;
+  }
+  if (nearest.area && nearest.distanceKm <= 6) {
+    return nearest.area.name;
+  }
+  return cleanedHints[0] || nearest.area?.name || `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+}
 function buildOrderTrackingEmailPayload(input) {
   const trackingUrl = buildOrderTrackingUrl(input.origin, input.orderId, input.trackingToken);
   const niceStatus = input.status.replace(/_/g, " ").toUpperCase();
+  const invoiceNumber = `INV-${input.orderNumber}`;
   const statusDisplayMap = {
-    confirmed: { en: "Order Confirmed", bn: "\u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09A8\u09AB\u09BE\u09B0\u09CD\u09AE \u09B9\u09DF\u09C7\u099B\u09C7", step: 1 },
-    accepted: { en: "Accepted by Kitchen", bn: "\u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0997\u09CD\u09B0\u09B9\u09A3 \u0995\u09B0\u09C7\u099B\u09C7", step: 2 },
-    preparing: { en: "Preparing Food", bn: "\u0996\u09BE\u09AC\u09BE\u09B0 \u09A4\u09C8\u09B0\u09BF \u09B9\u099A\u09CD\u099B\u09C7", step: 2 },
-    ready: { en: "Ready for Pickup", bn: "\u09AA\u09BF\u0995\u0986\u09AA\u09C7\u09B0 \u099C\u09A8\u09CD\u09AF \u09AA\u09CD\u09B0\u09B8\u09CD\u09A4\u09C1\u09A4", step: 3 },
-    rider_assigned: { en: "Rider Assigned", bn: "\u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u09A8\u09BF\u09B0\u09CD\u09A7\u09BE\u09B0\u09BF\u09A4 \u09B9\u09DF\u09C7\u099B\u09C7", step: 3 },
-    picked_up: { en: "Order Picked Up", bn: "\u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u0996\u09BE\u09AC\u09BE\u09B0 \u09B8\u0982\u0997\u09CD\u09B0\u09B9 \u0995\u09B0\u09C7\u099B\u09C7\u09A8", step: 4 },
-    on_the_way: { en: "Rider Is On The Way", bn: "\u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u0986\u09AA\u09A8\u09BE\u09B0 \u09A0\u09BF\u0995\u09BE\u09A8\u09BE\u09DF \u0986\u09B8\u099B\u09C7\u09A8", step: 4 },
-    delivered: { en: "Order Delivered", bn: "\u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \u09B8\u09AE\u09CD\u09AA\u09A8\u09CD\u09A8 \u09B9\u09DF\u09C7\u099B\u09C7", step: 5 },
-    cancelled: { en: "Order Cancelled", bn: "\u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09AC\u09BE\u09A4\u09BF\u09B2 \u09B9\u09DF\u09C7\u099B\u09C7", step: 0 }
+    confirmed: {
+      en: "Order Confirmed & Invoice Ready",
+      bn: "\u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09A8\u09AB\u09BE\u09B0\u09CD\u09AE \u0993 \u0987\u09A8\u09AD\u09DF\u09C7\u09B8 \u09A4\u09C8\u09B0\u09BF \u09B9\u09DF\u09C7\u099B\u09C7",
+      subEn: "We have sent your order to the kitchen and will notify you when cooking begins.",
+      subBn: "\u0986\u09AA\u09A8\u09BE\u09B0 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0\u099F\u09BF \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F\u09C7 \u09AA\u09BE\u09A0\u09BE\u09A8\u09CB \u09B9\u09DF\u09C7\u099B\u09C7, \u09B0\u09BE\u09A8\u09CD\u09A8\u09BE \u09B6\u09C1\u09B0\u09C1 \u09B9\u09B2\u09C7\u0987 \u0986\u09AA\u09A1\u09C7\u099F \u09AA\u09BE\u09AC\u09C7\u09A8\u0964",
+      accent: "#E21B70",
+      step: 1
+    },
+    payment_verified: {
+      en: "Payment Confirmed & Receipt Updated",
+      bn: "\u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F \u09B8\u09AE\u09CD\u09AA\u09A8\u09CD\u09A8 \u0993 \u09B0\u09B8\u09BF\u09A6 \u0986\u09AA\u09A1\u09C7\u099F \u09B9\u09DF\u09C7\u099B\u09C7",
+      subEn: "Your digital payment is verified and your order is moving ahead.",
+      subBn: "\u0986\u09AA\u09A8\u09BE\u09B0 \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F \u09AF\u09BE\u099A\u09BE\u0987 \u09B8\u09AE\u09CD\u09AA\u09A8\u09CD\u09A8 \u09B9\u09DF\u09C7\u099B\u09C7 \u098F\u09AC\u0982 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09AA\u09CD\u09B0\u09B8\u09CD\u09A4\u09C1\u09A4 \u09B9\u099A\u09CD\u099B\u09C7\u0964",
+      accent: "#059669",
+      step: 1
+    },
+    accepted: {
+      en: "Accepted by Kitchen",
+      bn: "\u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0997\u09CD\u09B0\u09B9\u09A3 \u0995\u09B0\u09C7\u099B\u09C7",
+      subEn: "The restaurant chef accepted your order and is queueing preparation.",
+      subBn: "\u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u0986\u09AA\u09A8\u09BE\u09B0 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0\u099F\u09BF \u0997\u09CD\u09B0\u09B9\u09A3 \u0995\u09B0\u09C7\u099B\u09C7 \u0993 \u09AA\u09CD\u09B0\u09B8\u09CD\u09A4\u09C1\u09A4\u09BF \u09B6\u09C1\u09B0\u09C1 \u0995\u09B0\u099B\u09C7\u0964",
+      accent: "#E21B70",
+      step: 2
+    },
+    preparing: {
+      en: "Preparing Fresh Food",
+      bn: "\u0986\u09AA\u09A8\u09BE\u09B0 \u0996\u09BE\u09AC\u09BE\u09B0 \u09A4\u09C8\u09B0\u09BF \u09B9\u099A\u09CD\u099B\u09C7",
+      subEn: "Your meal is being freshly cooked and packed carefully at the kitchen.",
+      subBn: "\u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F\u09C7\u09B0 \u0995\u09BF\u099A\u09C7\u09A8\u09C7 \u0986\u09AA\u09A8\u09BE\u09B0 \u0996\u09BE\u09AC\u09BE\u09B0 \u0997\u09B0\u09AE \u0993 \u09AB\u09CD\u09B0\u09C7\u09B6\u09AD\u09BE\u09AC\u09C7 \u09A4\u09C8\u09B0\u09BF \u0993 \u09AA\u09CD\u09AF\u09BE\u0995 \u0995\u09B0\u09BE \u09B9\u099A\u09CD\u099B\u09C7\u0964",
+      accent: "#D97706",
+      step: 2
+    },
+    ready: {
+      en: "Ready for Pickup",
+      bn: "\u09AA\u09BF\u0995\u0986\u09AA\u09C7\u09B0 \u099C\u09A8\u09CD\u09AF \u09AA\u09CD\u09B0\u09B8\u09CD\u09A4\u09C1\u09A4",
+      subEn: "Your food is packed and sealed, waiting for our rider to pick it up.",
+      subBn: "\u0986\u09AA\u09A8\u09BE\u09B0 \u0996\u09BE\u09AC\u09BE\u09B0 \u09AA\u09CD\u09AF\u09BE\u0995\u09BF\u0982 \u09B8\u09AE\u09CD\u09AA\u09A8\u09CD\u09A8 \u2014 \u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u09AA\u09BF\u0995\u0986\u09AA\u09C7\u09B0 \u099C\u09A8\u09CD\u09AF \u0985\u09AA\u09C7\u0995\u09CD\u09B7\u09AE\u09BE\u09A3\u0964",
+      accent: "#2563EB",
+      step: 3
+    },
+    rider_assigned: {
+      en: "Rider Assigned to Your Order",
+      bn: "\u0986\u09AA\u09A8\u09BE\u09B0 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0\u09C7 \u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u09A8\u09BF\u09B0\u09CD\u09A7\u09BE\u09B0\u09BF\u09A4 \u09B9\u09DF\u09C7\u099B\u09C7",
+      subEn: "Your delivery partner is heading to the restaurant to collect your order.",
+      subBn: "\u0986\u09AE\u09BE\u09A6\u09C7\u09B0 \u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u0986\u09AA\u09A8\u09BE\u09B0 \u0996\u09BE\u09AC\u09BE\u09B0 \u0986\u09A8\u09A4\u09C7 \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F\u09C7\u09B0 \u0989\u09A6\u09CD\u09A6\u09C7\u09B6\u09CD\u09AF\u09C7 \u09B0\u0993\u09A8\u09BE \u09A6\u09BF\u09DF\u09C7\u099B\u09C7\u09A8\u0964",
+      accent: "#2563EB",
+      step: 3
+    },
+    picked_up: {
+      en: "Order Picked Up by Rider",
+      bn: "\u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u0996\u09BE\u09AC\u09BE\u09B0 \u09B8\u0982\u0997\u09CD\u09B0\u09B9 \u0995\u09B0\u09C7\u099B\u09C7\u09A8",
+      subEn: "Your rider has collected the sealed bag and is starting your delivery.",
+      subBn: "\u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u09A5\u09C7\u0995\u09C7 \u0996\u09BE\u09AC\u09BE\u09B0 \u09B8\u0982\u0997\u09CD\u09B0\u09B9 \u0995\u09B0\u09C7\u099B\u09C7\u09A8 \u098F\u09AC\u0982 \u0986\u09AA\u09A8\u09BE\u09B0 \u09A6\u09BF\u0995\u09C7 \u0986\u09B8\u099B\u09C7\u09A8\u0964",
+      accent: "#059669",
+      step: 4
+    },
+    on_the_way: {
+      en: "Rider Is On The Way",
+      bn: "\u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u0986\u09AA\u09A8\u09BE\u09B0 \u09A0\u09BF\u0995\u09BE\u09A8\u09BE\u09DF \u0986\u09B8\u099B\u09C7\u09A8",
+      subEn: "Get ready! Follow live rider GPS on the map link below.",
+      subBn: "\u09AA\u09CD\u09B0\u09B8\u09CD\u09A4\u09C1\u09A4 \u09A5\u09BE\u0995\u09C1\u09A8! \u09A8\u09BF\u099A\u09C7\u09B0 \u09B2\u09BF\u0982\u0995\u09C7 \u09B0\u09BE\u0987\u09A1\u09BE\u09B0\u09C7\u09B0 \u09B2\u09BE\u0987\u09AD \u0985\u09AC\u09B8\u09CD\u09A5\u09BE\u09A8 \u09AE\u09CD\u09AF\u09BE\u09AA\u09C7 \u09A6\u09C7\u0996\u09A4\u09C7 \u09AA\u09BE\u09B0\u09AC\u09C7\u09A8\u0964",
+      accent: "#059669",
+      step: 4
+    },
+    delivered: {
+      en: "Order Delivered \u2014 Enjoy Your Meal!",
+      bn: "\u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \u09B8\u09AE\u09CD\u09AA\u09A8\u09CD\u09A8 \u09B9\u09DF\u09C7\u099B\u09C7 \u2014 \u0996\u09BE\u09AC\u09BE\u09B0 \u0989\u09AA\u09AD\u09CB\u0997 \u0995\u09B0\u09C1\u09A8!",
+      subEn: "Thank you for ordering with Foodora BD. Keep this invoice for your records.",
+      subBn: "\u09AB\u09C1\u09A1\u09CB\u09B0\u09BE \u09AC\u09BF\u09A1\u09BF-\u09A4\u09C7 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09B0\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF \u09A7\u09A8\u09CD\u09AF\u09AC\u09BE\u09A6! \u0985\u09A8\u09C1\u0997\u09CD\u09B0\u09B9 \u0995\u09B0\u09C7 \u0985\u09CD\u09AF\u09BE\u09AA\u09C7 \u09B0\u09BF\u09AD\u09BF\u0989 \u09A6\u09BF\u09A8\u0964",
+      accent: "#059669",
+      step: 5
+    },
+    cancelled: {
+      en: "Order Cancelled",
+      bn: "\u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09AC\u09BE\u09A4\u09BF\u09B2 \u09B9\u09DF\u09C7\u099B\u09C7",
+      subEn: "This order was cancelled. Any eligible prepaid amount will be refunded automatically.",
+      subBn: "\u0985\u09B0\u09CD\u09A1\u09BE\u09B0\u099F\u09BF \u09AC\u09BE\u09A4\u09BF\u09B2 \u0995\u09B0\u09BE \u09B9\u09DF\u09C7\u099B\u09C7\u0964 \u0985\u0997\u09CD\u09B0\u09BF\u09AE \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F \u09A5\u09BE\u0995\u09B2\u09C7 \u09B0\u09BF\u09AB\u09BE\u09A8\u09CD\u09A1 \u09AA\u09CD\u09B0\u09B8\u09C7\u09B8 \u0995\u09B0\u09BE \u09B9\u09AC\u09C7\u0964",
+      accent: "#DC2626",
+      step: 0
+    }
   };
-  const info = statusDisplayMap[input.status] || { en: niceStatus, bn: niceStatus, step: 1 };
-  const subject = `Foodora BD Order ${input.orderNumber} \u2014 ${niceStatus}`;
+  const info = statusDisplayMap[input.status] || {
+    en: `Order Status: ${niceStatus}`,
+    bn: `\u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0986\u09AA\u09A1\u09C7\u099F: ${niceStatus}`,
+    subEn: "Here is the latest update on your Foodora BD order.",
+    subBn: "\u0986\u09AA\u09A8\u09BE\u09B0 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0\u09C7\u09B0 \u09B8\u09B0\u09CD\u09AC\u09B6\u09C7\u09B7 \u0985\u09AC\u09B8\u09CD\u09A5\u09BE \u09A8\u09BF\u099A\u09C7 \u09A6\u09C7\u0993\u09DF\u09BE \u09B9\u09B2\u09CB\u0964",
+    accent: "#E21B70",
+    step: 1
+  };
+  const subject = `Foodora BD \xB7 ${info.en} (${input.orderNumber} / ${invoiceNumber})`;
   const riderLine = input.riderName ? `<p style="margin:4px 0;"><strong>Assigned Rider:</strong> ${escapeXml(input.riderName)}${input.riderPhone ? ` (${escapeXml(input.riderPhone)})` : ""}</p>` : "";
   const etaLine = typeof input.etaMinutes === "number" && input.etaMinutes > 0 && input.status !== "delivered" && input.status !== "cancelled" ? `<p style="margin:4px 0;"><strong>Estimated Arrival:</strong> ~${input.etaMinutes} mins</p>` : "";
   const addressLine = input.deliveryAddress ? `<p style="margin:4px 0;"><strong>Delivery Address:</strong> ${escapeXml(input.deliveryAddress)}</p>` : "";
   const noteLine = input.statusNote ? `<p style="margin:4px 0;"><strong>Update:</strong> ${escapeXml(input.statusNote)}</p>` : "";
   const paymentBadge = input.paymentStatus ? ` \xB7 ${escapeXml(input.paymentStatus.toUpperCase())}` : "";
-  const itemsBlock = Array.isArray(input.items) && input.items.length > 0 ? `<div style="border-top:1px solid #F3F4F6;padding-top:10px;margin-top:10px;">
-           <p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#4B5563;">Ordered Items:</p>
-           ${input.items.slice(0, 10).map(
-    (it) => `<p style="margin:2px 0;font-size:12px;color:#374151;">${it.quantity}\xD7 ${escapeXml(
-      it.name
-    )} \u2014 \u09F3${it.lineTotal}</p>`
-  ).join("")}
+  const issuedAt = input.createdAt ? new Date(input.createdAt).toLocaleString("en-BD") : (/* @__PURE__ */ new Date()).toLocaleString("en-BD");
+  const itemsList = Array.isArray(input.items) ? input.items : [];
+  const computedSubtotal = typeof input.subtotal === "number" && Number.isFinite(input.subtotal) ? input.subtotal : itemsList.reduce((sum, it) => sum + (Number(it.lineTotal) || 0), 0);
+  const discountVal = Math.max(0, Number(input.discountAmount || 0));
+  const deliveryFeeVal = Math.max(0, Number(input.deliveryFee ?? 0));
+  const serviceFeeVal = Math.max(0, Number(input.serviceFee ?? 0));
+  const taxVal = Math.max(0, Number(input.taxAmount ?? 0));
+  const itemsBlock = itemsList.length > 0 ? `<div style="border-top:1px solid #F3F4F6;padding-top:10px;margin-top:10px;">
+           <p style="margin:0 0 8px;font-size:12px;font-weight:bold;color:#2E3138;">Itemized Invoice (${escapeXml(invoiceNumber)}):</p>
+           <table style="width:100%;border-collapse:collapse;font-size:12px;color:#374151;">
+             <thead>
+               <tr style="border-bottom:1px solid #F3F4F6;text-align:left;color:#6B7280;">
+                 <th style="padding:4px 0;">Item</th>
+                 <th style="padding:4px 0;text-align:center;">Qty</th>
+                 <th style="padding:4px 0;text-align:right;">Total</th>
+               </tr>
+             </thead>
+             <tbody>
+               ${itemsList.slice(0, 20).map((it) => {
+    const varPart = it.variation ? ` (${escapeXml(it.variation)})` : "";
+    const unitPart = typeof it.unitPrice === "number" && it.unitPrice > 0 ? ` <span style="color:#6B7280;font-size:11px;">@ \u09F3${it.unitPrice}</span>` : "";
+    return `<tr style="border-bottom:1px solid #F9FAFB;">
+                     <td style="padding:5px 0;">${escapeXml(it.name)}${varPart}${unitPart}</td>
+                     <td style="padding:5px 0;text-align:center;">${it.quantity}</td>
+                     <td style="padding:5px 0;text-align:right;font-weight:bold;">\u09F3${it.lineTotal}</td>
+                   </tr>`;
+  }).join("")}
+             </tbody>
+           </table>
+           <div style="border-top:1px solid #FBCFE8;margin-top:8px;padding-top:8px;font-size:12px;color:#374151;">
+             <p style="margin:2px 0;"><span>Subtotal:</span> <strong style="float:right;">\u09F3${computedSubtotal}</strong></p>
+             ${discountVal > 0 ? `<p style="margin:2px 0;color:#059669;"><span>Discount${input.couponCode ? ` (${escapeXml(input.couponCode)})` : ""}:</span> <strong style="float:right;">-\u09F3${discountVal}</strong></p>` : ""}
+             ${typeof input.deliveryFee === "number" ? `<p style="margin:2px 0;"><span>Delivery Fee:</span> <strong style="float:right;">\u09F3${deliveryFeeVal}</strong></p>` : ""}
+             ${typeof input.serviceFee === "number" ? `<p style="margin:2px 0;"><span>Service Fee:</span> <strong style="float:right;">\u09F3${serviceFeeVal}</strong></p>` : ""}
+             ${taxVal > 0 ? `<p style="margin:2px 0;"><span>VAT / Tax:</span> <strong style="float:right;">\u09F3${taxVal}</strong></p>` : ""}
+             <p style="margin:6px 0 0;padding-top:6px;border-top:1px dashed #FBCFE8;font-size:13px;color:#E21B70;"><span><strong>Total Payable:</strong></span> <strong style="float:right;">\u09F3${input.totalAmount}</strong></p>
+           </div>
          </div>` : "";
   const steps = [
     { idx: 1, label: "Confirmed" },
@@ -2393,37 +2660,85 @@ function buildOrderTrackingEmailPayload(input) {
   const html = `<!doctype html>
 <html>
   <body style="font-family:Arial,sans-serif;background:#f7f7f7;padding:24px;color:#2E3138;">
-    <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;padding:24px;border:1px solid #e5e7eb;">
-      <p style="margin:0 0 4px;font-size:11px;font-weight:bold;letter-spacing:0.06em;text-transform:uppercase;color:#E21B70;">Foodora BD \xB7 Live Order Update</p>
-      <h2 style="margin:0 0 6px;color:#2E3138;font-size:20px;">${escapeXml(info.en)}</h2>
-      <p style="margin:0 0 14px;font-size:13px;color:#E21B70;font-weight:bold;">${escapeXml(info.bn)}</p>
-      <p style="margin:0 0 10px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
-      <p style="margin:0 0 12px;font-size:14px;">Your order <strong>${escapeXml(input.orderNumber)}</strong> from <strong>${escapeXml(input.restaurantName)}</strong> is now <strong>${escapeXml(niceStatus)}</strong>.</p>
-      ${progressHtml}
-      <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
-        <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
-        ${addressLine}
-        <p style="margin:4px 0;"><strong>Total Payable:</strong> \u09F3${input.totalAmount} (${escapeXml(input.paymentMethod.toUpperCase())}${paymentBadge})</p>
-        ${etaLine}
-        ${riderLine}
-        ${noteLine}
-        ${itemsBlock}
+    <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+      <div style="background:${info.accent};padding:14px 24px;color:#ffffff;">
+        <p style="margin:0;font-size:11px;font-weight:bold;letter-spacing:0.06em;text-transform:uppercase;opacity:0.92;">Foodora BD \xB7 Order Invoice &amp; Live Tracking</p>
+        <h2 style="margin:4px 0 2px;font-size:20px;color:#ffffff;">${escapeXml(info.en)}</h2>
+        <p style="margin:0;font-size:13px;font-weight:bold;opacity:0.95;">${escapeXml(info.bn)}</p>
       </div>
-      <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Track Order &amp; Rider Live \xB7 \u09B2\u09BE\u0987\u09AD \u099F\u09CD\u09B0\u09CD\u09AF\u09BE\u0995 \u0995\u09B0\u09C1\u09A8</a>
-      <p style="margin:16px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Direct tracking link: ${escapeXml(trackingUrl)}</p>
+      <div style="padding:22px 24px;">
+        <p style="margin:0 0 10px;font-size:12px;color:#6B7280;">Invoice: <strong>${escapeXml(invoiceNumber)}</strong> \xB7 Issued: ${escapeXml(issuedAt)}</p>
+        <p style="margin:0 0 8px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
+        <p style="margin:0 0 6px;font-size:14px;">Your order <strong>${escapeXml(input.orderNumber)}</strong> from <strong>${escapeXml(input.restaurantName)}</strong> is now <strong>${escapeXml(niceStatus)}</strong>.</p>
+        <p style="margin:0 0 4px;font-size:12px;color:#4B5563;">${escapeXml(info.subEn)}</p>
+        <p style="margin:0 0 12px;font-size:12px;color:#6B7280;">${escapeXml(info.subBn)}</p>
+        ${progressHtml}
+        <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
+          <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
+          ${addressLine}
+          <p style="margin:4px 0;"><strong>Payment:</strong> ${escapeXml(input.paymentMethod.toUpperCase())}${paymentBadge} \xB7 <strong>Total: \u09F3${input.totalAmount}</strong></p>
+          ${etaLine}
+          ${riderLine}
+          ${noteLine}
+          ${itemsBlock}
+        </div>
+        <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Track Order &amp; Rider Live \xB7 \u09B2\u09BE\u0987\u09AD \u099F\u09CD\u09B0\u09CD\u09AF\u09BE\u0995 \u0995\u09B0\u09C1\u09A8</a>
+        <p style="margin:16px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Direct tracking link: ${escapeXml(trackingUrl)}</p>
+        <p style="margin:14px 0 0;padding-top:12px;border-top:1px solid #F3F4F6;font-size:11px;color:#9CA3AF;">Foodora BD Customer Order Updates \xB7 Automatic notification email for every order stage.</p>
+      </div>
     </div>
   </body>
 </html>`;
-  const text2 = `Foodora BD \u2014 Order ${input.orderNumber} (${info.en} / ${info.bn})
+  const itemsText = itemsList.length > 0 ? `
+Items:
+${itemsList.slice(0, 20).map((it) => `- ${it.quantity}x ${it.name}${it.variation ? ` (${it.variation})` : ""}: BDT ${it.lineTotal}`).join("\n")}
+Subtotal: BDT ${computedSubtotal}${discountVal > 0 ? `
+Discount: -BDT ${discountVal}` : ""}${typeof input.deliveryFee === "number" ? `
+Delivery Fee: BDT ${deliveryFeeVal}` : ""}${typeof input.serviceFee === "number" ? `
+Service Fee: BDT ${serviceFeeVal}` : ""}` : "";
+  const text2 = `Foodora BD \u2014 Invoice ${invoiceNumber} | Order ${input.orderNumber} (${info.en} / ${info.bn})
+${info.subEn}
+${info.subBn}
 Restaurant: ${input.restaurantName}
 Delivery Area: ${input.deliveryArea}${input.deliveryAddress ? `
-Address: ${input.deliveryAddress}` : ""}
+Address: ${input.deliveryAddress}` : ""}${itemsText}
 Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()}${input.paymentStatus ? ` \xB7 ${input.paymentStatus}` : ""})
 ${input.etaMinutes ? `Estimated Arrival: ~${input.etaMinutes} mins
 ` : ""}${input.riderName ? `Rider: ${input.riderName}${input.riderPhone ? ` (${input.riderPhone})` : ""}
 ` : ""}${input.statusNote ? `Update: ${input.statusNote}
 ` : ""}Track live on map: ${trackingUrl}`;
   return { subject, trackingUrl, html, text: text2 };
+}
+function getOrderEmailTemplatePreview(status, origin = "https://foodora.bd", recipientEmail = "customer@gmail.com") {
+  return buildOrderTrackingEmailPayload({
+    origin,
+    orderId: 99999,
+    orderNumber: "FD-BD-84210",
+    trackingToken: "demo-preview-token",
+    customerName: "Tanjim Rahman",
+    customerEmail: recipientEmail,
+    restaurantName: "Sultan's Dine \u2014 Gulshan",
+    deliveryArea: "Banani",
+    deliveryAddress: "House 14, Road 11, Banani, Dhaka 1213",
+    subtotal: 650,
+    discountAmount: 50,
+    couponCode: "FOODORA50",
+    deliveryFee: 45,
+    serviceFee: 10,
+    taxAmount: 0,
+    totalAmount: 655,
+    paymentMethod: "bkash",
+    paymentStatus: status === "cancelled" ? "refunded" : "paid",
+    status,
+    statusNote: status === "delivered" ? "Handed to customer at reception desk." : status === "cancelled" ? "Cancelled per customer support request." : "Live order update notification from Foodora BD.",
+    riderName: status === "rider_assigned" || status === "on_the_way" || status === "delivered" ? "Ariful Islam" : null,
+    riderPhone: status === "rider_assigned" || status === "on_the_way" || status === "delivered" ? "01711-000222" : null,
+    etaMinutes: status === "on_the_way" ? 12 : 25,
+    items: [
+      { name: "Mutton Kacchi (Half)", quantity: 1, unitPrice: 450, lineTotal: 450 },
+      { name: "Jali Kabab & Borhani", quantity: 1, unitPrice: 200, lineTotal: 200 }
+    ]
+  });
 }
 function pickNearestStandbyRider(candidates, targetLat, targetLng) {
   if (!candidates || candidates.length === 0) return null;
@@ -2479,6 +2794,261 @@ function buildAiHelpSystemInstruction(params) {
     "- Partner & Rider Portals: Restaurant owners can register, add custom cuisines/categories/areas, and integrate Partner APIs; Riders anywhere in Bangladesh can apply to join and share live GPS locations.",
     contextNotes
   ].filter(Boolean).join("\n");
+}
+function collectMerchantOrderAlertRecipients(input) {
+  const seen = /* @__PURE__ */ new Set();
+  const candidates = [
+    input.restaurantEmail,
+    input.ownerEmail,
+    input.adminNotifyEmail,
+    ...input.fallbackAdminEmails || [PRIMARY_SUPER_ADMIN_EMAIL]
+  ];
+  const out = [];
+  for (const raw of candidates) {
+    const clean = String(raw || "").trim().toLowerCase();
+    if (!clean || !clean.includes("@") || !clean.includes(".")) continue;
+    if (clean.endsWith("@foodora.bd")) continue;
+    if (seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}
+function buildMerchantOrderAlertEmailPayload(input) {
+  const trackingUrl = buildOrderTrackingUrl(input.origin, input.orderId, input.trackingToken);
+  const niceStatus = input.status.replace(/_/g, " ").toUpperCase();
+  const isNew = input.eventKind === "new_order";
+  const headlineEn = isNew ? `New Order Received: ${input.orderNumber}` : `Order Update (${input.orderNumber}): ${niceStatus}`;
+  const headlineBn = isNew ? `\u09A8\u09A4\u09C1\u09A8 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u098F\u09B8\u09C7\u099B\u09C7: ${input.orderNumber}` : `\u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09B8\u09CD\u099F\u09CD\u09AF\u09BE\u099F\u09BE\u09B8 \u0986\u09AA\u09A1\u09C7\u099F: ${niceStatus}`;
+  const subject = isNew ? `\u{1F514} Foodora BD New Order Alert ${input.orderNumber} (\u09F3${input.totalAmount}) \u2014 ${input.restaurantName}` : `\u{1F4E6} Foodora BD Order Update ${input.orderNumber} \u2014 ${niceStatus}`;
+  const itemsList = Array.isArray(input.items) ? input.items : [];
+  const itemsHtml = itemsList.length > 0 ? `<ul style="margin:8px 0 0;padding-left:18px;font-size:12px;color:#374151;">
+          ${itemsList.slice(0, 20).map(
+    (it) => `<li style="margin:3px 0;"><strong>${it.quantity}x</strong> ${escapeXml(it.name)}${it.variation ? ` (${escapeXml(it.variation)})` : ""} \u2014 <strong>\u09F3${it.lineTotal}</strong></li>`
+  ).join("")}
+        </ul>` : "";
+  const html = `<!doctype html>
+<html>
+  <body style="font-family:Arial,sans-serif;background:#f7f7f7;padding:24px;color:#2E3138;">
+    <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;padding:24px;border:1px solid #e5e7eb;">
+      <p style="margin:0 0 4px;font-size:11px;font-weight:bold;letter-spacing:0.06em;text-transform:uppercase;color:#E21B70;">Foodora BD \xB7 Store &amp; Admin Live Order Alert</p>
+      <h2 style="margin:0 0 4px;color:#2E3138;font-size:20px;">${escapeXml(headlineEn)}</h2>
+      <p style="margin:0 0 12px;font-size:13px;color:#E21B70;font-weight:bold;">${escapeXml(headlineBn)}</p>
+      <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
+        <p style="margin:4px 0;"><strong>Restaurant:</strong> ${escapeXml(input.restaurantName)}</p>
+        <p style="margin:4px 0;"><strong>Customer:</strong> ${escapeXml(input.customerName)}${input.customerPhone ? ` (${escapeXml(input.customerPhone)})` : ""}</p>
+        <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
+        ${input.deliveryAddress ? `<p style="margin:4px 0;"><strong>Address:</strong> ${escapeXml(input.deliveryAddress)}</p>` : ""}
+        <p style="margin:4px 0;"><strong>Status:</strong> ${escapeXml(niceStatus)} \xB7 <strong>Total: \u09F3${input.totalAmount}</strong> (${escapeXml(
+    input.paymentMethod.toUpperCase()
+  )}${input.paymentStatus ? ` \xB7 ${escapeXml(input.paymentStatus.toUpperCase())}` : ""})</p>
+        ${input.riderName ? `<p style="margin:4px 0;"><strong>Rider:</strong> ${escapeXml(input.riderName)}</p>` : ""}
+        ${input.statusNote ? `<p style="margin:4px 0;"><strong>Note:</strong> ${escapeXml(input.statusNote)}</p>` : ""}
+        ${itemsHtml}
+      </div>
+      <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Open Live Order View \xB7 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09A6\u09C7\u0996\u09C1\u09A8</a>
+      <p style="margin:12px 0 0;font-size:11px;color:#9CA3AF;">Notification dispatched to Admin (${escapeXml(PRIMARY_SUPER_ADMIN_EMAIL)}) &amp; Store Kitchen.</p>
+      <p style="margin:6px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Direct link: ${escapeXml(trackingUrl)}</p>
+    </div>
+  </body>
+</html>`;
+  const itemsText = itemsList.length > 0 ? `
+Items:
+${itemsList.slice(0, 20).map((it) => `- ${it.quantity}x ${it.name}: BDT ${it.lineTotal}`).join("\n")}` : "";
+  const text2 = `${headlineEn} (${headlineBn})
+Restaurant: ${input.restaurantName}
+Customer: ${input.customerName}${input.customerPhone ? ` (${input.customerPhone})` : ""}
+Area: ${input.deliveryArea}${input.deliveryAddress ? `
+Address: ${input.deliveryAddress}` : ""}
+Status: ${niceStatus} | Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()})${input.riderName ? `
+Rider: ${input.riderName}` : ""}${input.statusNote ? `
+Note: ${input.statusNote}` : ""}${itemsText}
+View live order: ${trackingUrl}`;
+  return { subject, trackingUrl, html, text: text2 };
+}
+var JOINED_PLACE_WORDS = [
+  [/citycent(?:er|re)/gi, "city center"],
+  [/futurepark/gi, "future park"],
+  [/shoppingmall/gi, "shopping mall"],
+  [/shoppingcent(?:er|re)/gi, "shopping center"],
+  [/medicalcollege/gi, "medical college"],
+  [/railwaystation/gi, "railway station"],
+  [/policeplaza/gi, "police plaza"],
+  [/pinkcity/gi, "pink city"],
+  [/oceancity/gi, "ocean city"],
+  [/housingestate/gi, "housing estate"],
+  [/busstand/gi, "bus stand"],
+  [/supermarket/gi, "super market"],
+  [/([a-z]{3,})(\d+)/gi, "$1 $2"]
+];
+function normalizeFuzzyAddressText(raw) {
+  let out = raw.toLowerCase().trim();
+  for (const [pattern, replacement] of JOINED_PLACE_WORDS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out.replace(/aa+/g, "a").replace(/ee+/g, "i").replace(/oo+/g, "u").replace(/[,.;:/()_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+function expandAddressSearchQueries(rawQuery) {
+  const clean = rawQuery.trim();
+  if (!clean) return [];
+  let spaced = clean;
+  for (const [pattern, replacement] of JOINED_PLACE_WORDS) {
+    spaced = spaced.replace(pattern, replacement);
+  }
+  spaced = spaced.replace(/\s+/g, " ").trim();
+  const phoneticSaad = spaced.replace(/\bsad\b/gi, "saad").replace(/\bcentre\b/gi, "center");
+  const tokens = phoneticSaad.split(/\s+/).filter(Boolean);
+  const unique = /* @__PURE__ */ new Set([clean]);
+  if (spaced) unique.add(spaced);
+  if (phoneticSaad) unique.add(phoneticSaad);
+  if (tokens.length >= 3) {
+    unique.add(tokens.slice(0, 2).join(" "));
+  }
+  return Array.from(unique);
+}
+var GENERIC_PLACE_STOPWORDS = /* @__PURE__ */ new Set([
+  "road",
+  "rd",
+  "street",
+  "st",
+  "house",
+  "block",
+  "sector",
+  "area",
+  "zone",
+  "dhaka",
+  "bangladesh",
+  "bd",
+  "city",
+  "center",
+  "centre",
+  "tower",
+  "plaza",
+  "park",
+  "mall"
+]);
+function findLocalAddressSuggestions(rawQuery, areas, limit = 8) {
+  const q = rawQuery.trim().toLowerCase();
+  if (!q) return [];
+  const fuzzyQuery = normalizeFuzzyAddressText(rawQuery);
+  const compactQuery = fuzzyQuery.replace(/\s+/g, "");
+  const tokens = fuzzyQuery.split(/\s+/).filter(Boolean);
+  const scored = [];
+  const partialFallback = [];
+  for (const area of areas) {
+    const nameLower = area.name.toLowerCase();
+    const bnLower = (area.nameBn || "").toLowerCase();
+    const divLower = (area.division || "").toLowerCase();
+    const zoneLower = `${area.zoneCode || ""} ${area.zoneLabel || ""}`.toLowerCase();
+    const extraLower = `${area.addressHint || ""} ${area.keywords || ""}`.toLowerCase();
+    const rawHaystack = `${nameLower} ${bnLower} ${divLower} ${zoneLower} ${extraLower}`.trim();
+    const fuzzyName = normalizeFuzzyAddressText(area.name);
+    const fuzzyHaystack = normalizeFuzzyAddressText(rawHaystack);
+    const compactName = fuzzyName.replace(/\s+/g, "");
+    const compactHaystack = fuzzyHaystack.replace(/\s+/g, "");
+    const rawTokens = q.split(/\s+/).filter(Boolean);
+    const matchesRaw = rawTokens.length > 0 && rawTokens.every((tok) => rawHaystack.includes(tok));
+    const matchesFuzzy = tokens.length > 0 && tokens.every((tok) => fuzzyHaystack.includes(tok));
+    const matchesCompact = compactQuery.length >= 4 && compactHaystack.includes(compactQuery);
+    const subtitle = area.zoneCode ? `${area.zoneCode}${area.division ? ` \xB7 ${area.division}` : ""}` : area.zoneLabel || area.division || "Bangladesh";
+    const displayName = area.addressHint ? `${area.name}, ${area.addressHint}` : `${area.name}${area.division ? `, ${area.division}` : ""}, Bangladesh`;
+    const buildItem = () => ({
+      shortName: area.name,
+      shortNameBn: area.nameBn || area.name,
+      displayName,
+      subtitle,
+      lat: area.lat,
+      lng: area.lng,
+      source: "area"
+    });
+    if (matchesRaw || matchesFuzzy || matchesCompact) {
+      let score = 20;
+      if (nameLower === q || bnLower === q || fuzzyName === fuzzyQuery || compactName === compactQuery) {
+        score = 120;
+      } else if (nameLower.startsWith(q) || bnLower.startsWith(q) || fuzzyName.startsWith(fuzzyQuery) || compactName.startsWith(compactQuery)) {
+        score = 100;
+      } else if (nameLower.includes(q) || bnLower.includes(q) || fuzzyName.includes(fuzzyQuery) || compactName.includes(compactQuery)) {
+        score = 84;
+      } else if (tokens.every((tok) => fuzzyName.includes(tok))) {
+        score = 72;
+      } else if (zoneLower.includes(q)) {
+        score = 45;
+      }
+      scored.push({ score, item: buildItem() });
+      continue;
+    }
+    if (tokens.length >= 2) {
+      const strongTokens = tokens.filter((t) => t.length >= 3 && !GENERIC_PLACE_STOPWORDS.has(t));
+      if (strongTokens.length > 0) {
+        const haystackWords = fuzzyHaystack.split(/\s+/).filter(Boolean);
+        const nameWords = fuzzyName.split(/\s+/).filter(Boolean);
+        const matchesWord = (words, tok) => tok.length <= 3 ? words.some((w) => w === tok) : words.some((w) => w.startsWith(tok) || w.includes(tok));
+        let matchedCount = 0;
+        let matchedInName = 0;
+        for (const tok of strongTokens) {
+          if (matchesWord(haystackWords, tok)) {
+            matchedCount += 1;
+            if (matchesWord(nameWords, tok)) matchedInName += 1;
+          }
+        }
+        if (matchedCount > 0) {
+          const partialScore = 10 + matchedCount * 14 + matchedInName * 8;
+          partialFallback.push({ score: partialScore, item: buildItem() });
+        }
+      }
+    }
+  }
+  scored.sort((a, b) => b.score - a.score || a.item.shortName.localeCompare(b.item.shortName));
+  if (scored.length >= limit) {
+    return scored.slice(0, Math.max(1, limit)).map((s) => s.item);
+  }
+  partialFallback.sort((a, b) => b.score - a.score || a.item.shortName.localeCompare(b.item.shortName));
+  const combined = [...scored, ...partialFallback];
+  return combined.slice(0, Math.max(1, limit)).map((s) => s.item);
+}
+function filterAndRankRemoteSuggestions(rawQuery, items, limit = 10) {
+  const fuzzyQuery = normalizeFuzzyAddressText(rawQuery);
+  const tokens = fuzzyQuery.split(/\s+/).filter((t) => t.length >= 2);
+  const strongTokens = tokens.filter((t) => t.length >= 3 && !GENERIC_PLACE_STOPWORDS.has(t));
+  const requiredAny = strongTokens.length > 0 ? strongTokens : tokens;
+  const matchesToken = (text2, words, tok) => tok.length <= 3 ? words.some((w) => w === tok) : text2.includes(tok);
+  const scored = [];
+  for (const item of items) {
+    const fuzzyText = normalizeFuzzyAddressText(`${item.shortName} ${item.displayName} ${item.subtitle || ""}`);
+    const fuzzyName = normalizeFuzzyAddressText(item.shortName);
+    const textWords = fuzzyText.split(/\s+/).filter(Boolean);
+    const nameWords = fuzzyName.split(/\s+/).filter(Boolean);
+    let matchedCount = 0;
+    let matchedNameCount = 0;
+    for (const tok of tokens) {
+      if (matchesToken(fuzzyText, textWords, tok)) matchedCount += 1;
+      if (matchesToken(fuzzyName, nameWords, tok)) matchedNameCount += 1;
+    }
+    const hasStrongHit = requiredAny.length === 0 || requiredAny.some((tok) => matchesToken(fuzzyText, textWords, tok));
+    if (!hasStrongHit) continue;
+    let score = matchedCount * 12 + matchedNameCount * 18;
+    if (fuzzyName.includes(fuzzyQuery)) score += 60;
+    else if (fuzzyText.includes(fuzzyQuery)) score += 35;
+    scored.push({ score, item });
+  }
+  if (scored.length === 0) {
+    return items.slice(0, Math.max(1, limit));
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, Math.max(1, limit)).map((s) => s.item);
+}
+function mergeAddressSuggestions(localItems, remoteItems, limit = 12) {
+  const out = [];
+  const seenKeys = /* @__PURE__ */ new Set();
+  const pushUnique = (item) => {
+    const key = `${normalizeFuzzyAddressText(item.shortName)}|${item.lat.toFixed(3)}|${item.lng.toFixed(3)}`;
+    if (seenKeys.has(key)) return;
+    seenKeys.add(key);
+    out.push(item);
+  };
+  for (const item of localItems) pushUnique(item);
+  for (const item of remoteItems) pushUnique(item);
+  return out.slice(0, Math.max(1, limit));
 }
 
 // src/db/queries.ts
@@ -2810,13 +3380,24 @@ async function getAdminWorkspace() {
 }
 async function getNotificationsForUser(uid, role) {
   try {
-    return await db.select().from(notifications).where(
-      or(
-        eq(notifications.recipientUid, uid),
-        eq(notifications.roleTarget, role),
-        eq(notifications.roleTarget, "all")
-      )
-    ).orderBy(desc(notifications.createdAt)).limit(25);
+    const cleanUid = String(uid || "").trim();
+    const cleanRole = String(role || "customer").trim();
+    if (!cleanUid) return [];
+    const isAdmin = cleanRole === "admin" || cleanRole === "super_admin";
+    const roleBroadcastUid = `role-${cleanRole}`;
+    const roleCondition = isAdmin ? or(
+      eq(notifications.recipientUid, cleanUid),
+      eq(notifications.recipientUid, "broadcast-all"),
+      eq(notifications.recipientUid, roleBroadcastUid),
+      eq(notifications.recipientUid, "role-admin"),
+      eq(notifications.recipientUid, "role-super_admin"),
+      eq(notifications.recipientUid, "demo-admin-uid")
+    ) : or(
+      eq(notifications.recipientUid, cleanUid),
+      eq(notifications.recipientUid, "broadcast-all"),
+      eq(notifications.recipientUid, roleBroadcastUid)
+    );
+    return await db.select().from(notifications).where(roleCondition).orderBy(desc(notifications.createdAt)).limit(25);
   } catch (error) {
     console.error("Failed to fetch notifications:", error);
     return [];
@@ -2860,7 +3441,7 @@ var supabaseServer = createClient(SUPABASE_URL, SUPABASE_AUTH_KEY, {
   }
 });
 async function verifySupabaseAccessToken(token) {
-  if (!token || token.startsWith("sbx.")) return null;
+  if (!token || token.startsWith("sbx.") || token.startsWith("fbd.")) return null;
   try {
     const { data, error } = await supabaseServer.auth.getUser(token);
     if (error || !data?.user) {
@@ -2884,18 +3465,19 @@ async function verifySupabaseAccessToken(token) {
 // src/middleware/auth.ts
 var SANDBOX_SECRET = process.env.SANDBOX_SESSION_SECRET || `foodora-bd-sandbox-${process.env.SQL_DB_NAME || "dev"}-${process.env.APPLET_ID || "local"}`;
 function signSandboxToken(payload) {
+  const isSandbox = payload.isSandbox ?? true;
   const data = Buffer.from(
     JSON.stringify({
       ...payload,
-      isSandbox: payload.isSandbox ?? true,
+      isSandbox,
       exp: Date.now() + 1e3 * 60 * 60 * 24 * 7
     })
   ).toString("base64url");
   const sig = crypto.createHmac("sha256", SANDBOX_SECRET).update(data).digest("base64url");
-  return `sbx.${data}.${sig}`;
+  return `${isSandbox ? "sbx" : "fbd"}.${data}.${sig}`;
 }
 function verifySandboxToken(token) {
-  if (!token.startsWith("sbx.")) return null;
+  if (!token.startsWith("sbx.") && !token.startsWith("fbd.")) return null;
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const [, data, sig] = parts;
@@ -2904,12 +3486,13 @@ function verifySandboxToken(token) {
   try {
     const parsed = JSON.parse(Buffer.from(data, "base64url").toString("utf8"));
     if (!parsed.exp || parsed.exp < Date.now()) return null;
+    const isSandbox = token.startsWith("sbx.") && Boolean(parsed.isSandbox ?? true);
     return {
       uid: parsed.uid,
       email: parsed.email,
       fullName: parsed.fullName,
       role: parsed.role,
-      isSandbox: Boolean(parsed.isSandbox ?? true)
+      isSandbox
     };
   } catch {
     return null;
@@ -2968,6 +3551,9 @@ async function resolveUserFromToken(tokenRaw) {
       sandboxUser.fullName,
       sandboxUser.role
     );
+    if (dbUser2.status === "suspended") {
+      return null;
+    }
     return {
       uid: dbUser2.uid,
       email: dbUser2.email,
@@ -2984,6 +3570,9 @@ async function resolveUserFromToken(tokenRaw) {
     supaUser.fullName,
     "customer"
   );
+  if (dbUser.status === "suspended") {
+    return null;
+  }
   return {
     uid: dbUser.uid,
     email: dbUser.email,
@@ -3031,6 +3620,75 @@ var requireRole = (allowedRoles) => {
     next();
   };
 };
+
+// src/lib/storefront-config.ts
+var DEFAULT_STOREFRONT_CONFIG = {
+  brandPrefix: "foodora",
+  brandSuffix: "bd",
+  accentColor: "#E21B70",
+  showTopPartnerBar: true,
+  showPickupTab: true,
+  showActiveDeliveryBar: true,
+  featuredActiveOrderId: "",
+  announcementBarEnabled: false,
+  announcementTextEn: "Flash Offer: Free Dhaka delivery on orders above \u09F3499 with code DHAKA50!",
+  announcementTextBn: "\u09AB\u09CD\u09B2\u09CD\u09AF\u09BE\u09B6 \u0985\u09AB\u09BE\u09B0: \u09EA\u09EF\u09EF\u09F3+ \u0985\u09B0\u09CD\u09A1\u09BE\u09B0\u09C7 \u09AB\u09CD\u09B0\u09BF \u09A2\u09BE\u0995\u09BE \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF (\u0995\u09CB\u09A1: DHAKA50)!",
+  showHero: true,
+  heroBadgeEn: "Dhaka Launch Offer",
+  heroBadgeBn: "\u09A2\u09BE\u0995\u09BE \u09B2\u099E\u09CD\u099A \u0985\u09AB\u09BE\u09B0",
+  heroTitleEn: "Enjoy Free Delivery & 50% Off on your first order",
+  heroTitleBn: "\u09AA\u09CD\u09B0\u09A5\u09AE \u0985\u09B0\u09CD\u09A1\u09BE\u09B0\u09C7 \u09AB\u09CD\u09B0\u09BF \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \u0993 \u09EB\u09E6% \u099B\u09BE\u09DC \u0989\u09AA\u09AD\u09CB\u0997 \u0995\u09B0\u09C1\u09A8",
+  heroSubEn: "Discover Dhaka\u2019s finest Kacchi Biriyani, gourmet burgers, artisan pizza & home kitchens delivered hot to your door.",
+  heroSubBn: "\u09A2\u09BE\u0995\u09BE\u09B0 \u09B8\u09C7\u09B0\u09BE \u0995\u09BE\u099A\u09CD\u099A\u09BF \u09AC\u09BF\u09B0\u09BF\u09DF\u09BE\u09A8\u09BF, \u09AC\u09BE\u09B0\u09CD\u0997\u09BE\u09B0, \u09AA\u09BF\u09CE\u099C\u09BE \u0993 \u0998\u09B0\u09CB\u09DF\u09BE \u0996\u09BE\u09AC\u09BE\u09B0 \u098F\u0996\u09A8 \u09AE\u09C1\u09B9\u09C2\u09B0\u09CD\u09A4\u09C7\u0987 \u0986\u09AA\u09A8\u09BE\u09B0 \u09A6\u09B0\u099C\u09BE\u09DF\u0964",
+  heroTrustEn: "30 min avg delivery \xB7 bKash & Nagad \xB7 Live rider tracking",
+  heroTrustBn: "\u0997\u09DC\u09C7 \u09E9\u09E6 \u09AE\u09BF\u09A8\u09BF\u099F\u09C7 \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \xB7 \u09AC\u09BF\u0995\u09BE\u09B6 \u0993 \u09A8\u0997\u09A6 \xB7 \u09B2\u09BE\u0987\u09AD \u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u099F\u09CD\u09B0\u09CD\u09AF\u09BE\u0995\u09BF\u0982",
+  heroBtnEn: "Order Now",
+  heroBtnBn: "\u098F\u0996\u09A8\u0987 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09B0\u09C1\u09A8",
+  heroImageUrl: "/src/assets/images/hero_e21b70_feast_1794846866285.jpg",
+  showPromoTicket: true,
+  promoCode: "FOODORA50",
+  promoDescEn: "Unlock 50% off & free Dhaka delivery on your first order.",
+  promoDescBn: "\u09AA\u09CD\u09B0\u09A5\u09AE \u0985\u09B0\u09CD\u09A1\u09BE\u09B0\u09C7 \u09EB\u09E6% \u099B\u09BE\u09DC \u0993 \u09AB\u09CD\u09B0\u09BF \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \u0986\u09A8\u09B2\u0995 \u0995\u09B0\u09C1\u09A8\u0964",
+  showCuisineRibbon: true,
+  showDailyDeals: true,
+  dailyDealsTitleEn: "Daily Vouchers & Deals",
+  dailyDealsTitleBn: "\u09A6\u09C8\u09A8\u09BF\u0995 \u09AD\u09BE\u0989\u099A\u09BE\u09B0 \u0993 \u09A1\u09BF\u09B2",
+  restaurantsHeadingEn: "All Restaurants",
+  restaurantsHeadingBn: "\u09B8\u0995\u09B2 \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F",
+  footerDescEn: "Bangladesh\u2019s full-stack multi-vendor food delivery marketplace.",
+  footerDescBn: "\u09AC\u09BE\u0982\u09B2\u09BE\u09A6\u09C7\u09B6\u09C7\u09B0 \u0986\u09A7\u09C1\u09A8\u09BF\u0995 \u09AE\u09BE\u09B2\u09CD\u099F\u09BF-\u09AD\u09C7\u09A8\u09CD\u09A1\u09B0 \u09AB\u09C1\u09A1 \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \u09AE\u09BE\u09B0\u09CD\u0995\u09C7\u099F\u09AA\u09CD\u09B2\u09C7\u09B8\u0964",
+  footerZonesLine1: "Gulshan 1 & 2 \xB7 Banani \xB7 Dhanmondi",
+  footerZonesLine2: "Uttara \xB7 Mirpur \xB7 Bashundhara R/A \xB7 Motijheel",
+  footerCopyright: "\xA9 2026 Foodora BD",
+  maintenanceMode: false,
+  maintenanceMessage: "Scheduled kitchen & courier maintenance is in progress. Ordering will resume shortly.",
+  seoTitleEn: "Foodora BD | Order Food Online in Dhaka \u2014 Biriyani, Burgers & Fast Delivery",
+  seoTitleBn: "\u09AB\u09C1\u09A1\u09CB\u09B0\u09BE \u09AC\u09BF\u09A1\u09BF | \u09A2\u09BE\u0995\u09BE\u09DF \u0985\u09A8\u09B2\u09BE\u0987\u09A8\u09C7 \u0996\u09BE\u09AC\u09BE\u09B0 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09B0\u09C1\u09A8 \u2014 \u09A6\u09CD\u09B0\u09C1\u09A4 \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF",
+  seoDescriptionEn: "Order food online from top Dhaka restaurants & cloud kitchens. Fast delivery across Gulshan, Banani, Dhanmondi, Uttara & Mirpur with bKash, Nagad & SSLCommerz.",
+  seoDescriptionBn: "\u0997\u09C1\u09B2\u09B6\u09BE\u09A8, \u09AC\u09A8\u09BE\u09A8\u09C0, \u09A7\u09BE\u09A8\u09AE\u09A8\u09CD\u09A1\u09BF, \u0989\u09A4\u09CD\u09A4\u09B0\u09BE \u0993 \u09AE\u09BF\u09B0\u09AA\u09C1\u09B0\u09C7\u09B0 \u09B8\u09C7\u09B0\u09BE \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u09A5\u09C7\u0995\u09C7 \u09AC\u09BF\u0995\u09BE\u09B6, \u09A8\u0997\u09A6 \u0993 \u0995\u09BE\u09B0\u09CD\u09A1\u09C7 \u09A6\u09CD\u09B0\u09C1\u09A4 \u0996\u09BE\u09AC\u09BE\u09B0 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09B0\u09C1\u09A8\u0964",
+  seoKeywords: "food delivery dhaka, online food order bangladesh, kacchi biriyani dhaka, bKash food delivery, restaurant marketplace bangladesh",
+  googleSiteVerification: ""
+};
+function mergeStorefrontConfig(raw) {
+  if (!raw || typeof raw !== "object") {
+    return { ...DEFAULT_STOREFRONT_CONFIG };
+  }
+  const merged = { ...DEFAULT_STOREFRONT_CONFIG };
+  for (const key of Object.keys(DEFAULT_STOREFRONT_CONFIG)) {
+    const val = raw[key];
+    if (val === void 0 || val === null) continue;
+    if (typeof DEFAULT_STOREFRONT_CONFIG[key] === "boolean") {
+      merged[key] = Boolean(val);
+    } else if (typeof val === "string") {
+      if (key === "googleSiteVerification" || key === "featuredActiveOrderId") {
+        merged[key] = val.trim();
+      } else {
+        merged[key] = val.trim() ? val : DEFAULT_STOREFRONT_CONFIG[key];
+      }
+    }
+  }
+  return merged;
+}
 
 // src/services/delivery.ts
 var FoodoraOwnRiderProvider = class {
@@ -3173,6 +3831,219 @@ function getDeliveryProvider(mode) {
   }
 }
 
+// src/lib/i18n.ts
+var DHAKA_DELIVERY_ZONES = [
+  {
+    code: "ZONE 01",
+    name: "GULSHAN",
+    nameBn: "\u0997\u09C1\u09B2\u09B6\u09BE\u09A8",
+    summary: "Gulshan 1, Gulshan 2, Niketan, Shahjadpur",
+    areas: [
+      { name: "Gulshan 2", nameBn: "\u0997\u09C1\u09B2\u09B6\u09BE\u09A8 \u09E8", division: "Dhaka", zoneCode: "ZONE 01", zoneLabel: "ZONE 01 \u2014 GULSHAN", lat: 23.7949, lng: 90.4144 },
+      { name: "Gulshan 1", nameBn: "\u0997\u09C1\u09B2\u09B6\u09BE\u09A8 \u09E7", division: "Dhaka", zoneCode: "ZONE 01", zoneLabel: "ZONE 01 \u2014 GULSHAN", lat: 23.7811, lng: 90.4167 },
+      { name: "Niketan", nameBn: "\u09A8\u09BF\u0995\u09C7\u09A4\u09A8", division: "Dhaka", zoneCode: "ZONE 01", zoneLabel: "ZONE 01 \u2014 GULSHAN", lat: 23.7764, lng: 90.4098 },
+      { name: "Shahjadpur", nameBn: "\u09B6\u09BE\u09B9\u099C\u09BE\u09A6\u09AA\u09C1\u09B0", division: "Dhaka", zoneCode: "ZONE 01", zoneLabel: "ZONE 01 \u2014 GULSHAN", lat: 23.7985, lng: 90.4256 }
+    ]
+  },
+  {
+    code: "ZONE 02",
+    name: "BANANI",
+    nameBn: "\u09AC\u09A8\u09BE\u09A8\u09C0",
+    summary: "Banani 1\u201327, Chairman Bari, Kakoli",
+    areas: [
+      { name: "Banani", nameBn: "\u09AC\u09A8\u09BE\u09A8\u09C0", division: "Dhaka", zoneCode: "ZONE 02", zoneLabel: "ZONE 02 \u2014 BANANI", lat: 23.7937, lng: 90.4066 },
+      { name: "Banani 1\u201327", nameBn: "\u09AC\u09A8\u09BE\u09A8\u09C0 \u09E7\u2013\u09E8\u09ED", division: "Dhaka", zoneCode: "ZONE 02", zoneLabel: "ZONE 02 \u2014 BANANI", lat: 23.7942, lng: 90.4045 },
+      { name: "Chairman Bari", nameBn: "\u099A\u09C7\u09DF\u09BE\u09B0\u09AE\u09CD\u09AF\u09BE\u09A8 \u09AC\u09BE\u09DC\u09BF", division: "Dhaka", zoneCode: "ZONE 02", zoneLabel: "ZONE 02 \u2014 BANANI", lat: 23.7916, lng: 90.4021 },
+      { name: "Kakoli", nameBn: "\u0995\u09BE\u0995\u09B2\u09C0", division: "Dhaka", zoneCode: "ZONE 02", zoneLabel: "ZONE 02 \u2014 BANANI", lat: 23.7983, lng: 90.4008 }
+    ]
+  },
+  {
+    code: "ZONE 03",
+    name: "DHANMONDI",
+    nameBn: "\u09A7\u09BE\u09A8\u09AE\u09A8\u09CD\u09A1\u09BF",
+    summary: "Dhanmondi 1\u201332, Satmasjid Road, Jigatola, Kalabagan",
+    areas: [
+      { name: "Dhanmondi 27", nameBn: "\u09A7\u09BE\u09A8\u09AE\u09A8\u09CD\u09A1\u09BF \u09E8\u09ED", division: "Dhaka", zoneCode: "ZONE 03", zoneLabel: "ZONE 03 \u2014 DHANMONDI", lat: 23.7518, lng: 90.3712 },
+      { name: "Dhanmondi 1\u201332", nameBn: "\u09A7\u09BE\u09A8\u09AE\u09A8\u09CD\u09A1\u09BF \u09E7\u2013\u09E9\u09E8", division: "Dhaka", zoneCode: "ZONE 03", zoneLabel: "ZONE 03 \u2014 DHANMONDI", lat: 23.7461, lng: 90.3742 },
+      { name: "Satmasjid Road", nameBn: "\u09B8\u09BE\u09A4\u09AE\u09B8\u099C\u09BF\u09A6 \u09B0\u09CB\u09A1", division: "Dhaka", zoneCode: "ZONE 03", zoneLabel: "ZONE 03 \u2014 DHANMONDI", lat: 23.7458, lng: 90.3698 },
+      { name: "Jigatola", nameBn: "\u099C\u09BF\u0997\u09BE\u09A4\u09B2\u09BE", division: "Dhaka", zoneCode: "ZONE 03", zoneLabel: "ZONE 03 \u2014 DHANMONDI", lat: 23.7397, lng: 90.3728 },
+      { name: "Kalabagan", nameBn: "\u0995\u09B2\u09BE\u09AC\u09BE\u0997\u09BE\u09A8", division: "Dhaka", zoneCode: "ZONE 03", zoneLabel: "ZONE 03 \u2014 DHANMONDI", lat: 23.7495, lng: 90.3822 }
+    ]
+  },
+  {
+    code: "ZONE 04",
+    name: "MIRPUR",
+    nameBn: "\u09AE\u09BF\u09B0\u09AA\u09C1\u09B0",
+    summary: "Mirpur 1, 2, 6, 10, 11, 12, Pallabi, Kazipara",
+    areas: [
+      { name: "Mirpur 10", nameBn: "\u09AE\u09BF\u09B0\u09AA\u09C1\u09B0 \u09E7\u09E6", division: "Dhaka", zoneCode: "ZONE 04", zoneLabel: "ZONE 04 \u2014 MIRPUR", lat: 23.8069, lng: 90.3687 },
+      { name: "Mirpur 1", nameBn: "\u09AE\u09BF\u09B0\u09AA\u09C1\u09B0 \u09E7", division: "Dhaka", zoneCode: "ZONE 04", zoneLabel: "ZONE 04 \u2014 MIRPUR", lat: 23.7984, lng: 90.3536 },
+      { name: "Mirpur 2", nameBn: "\u09AE\u09BF\u09B0\u09AA\u09C1\u09B0 \u09E8", division: "Dhaka", zoneCode: "ZONE 04", zoneLabel: "ZONE 04 \u2014 MIRPUR", lat: 23.8045, lng: 90.3612 },
+      { name: "Mirpur 6", nameBn: "\u09AE\u09BF\u09B0\u09AA\u09C1\u09B0 \u09EC", division: "Dhaka", zoneCode: "ZONE 04", zoneLabel: "ZONE 04 \u2014 MIRPUR", lat: 23.8124, lng: 90.3638 },
+      { name: "Mirpur 11", nameBn: "\u09AE\u09BF\u09B0\u09AA\u09C1\u09B0 \u09E7\u09E7", division: "Dhaka", zoneCode: "ZONE 04", zoneLabel: "ZONE 04 \u2014 MIRPUR", lat: 23.8186, lng: 90.3652 },
+      { name: "Mirpur 12", nameBn: "\u09AE\u09BF\u09B0\u09AA\u09C1\u09B0 \u09E7\u09E8", division: "Dhaka", zoneCode: "ZONE 04", zoneLabel: "ZONE 04 \u2014 MIRPUR", lat: 23.8286, lng: 90.3641 },
+      { name: "Pallabi", nameBn: "\u09AA\u09B2\u09CD\u09B2\u09AC\u09C0", division: "Dhaka", zoneCode: "ZONE 04", zoneLabel: "ZONE 04 \u2014 MIRPUR", lat: 23.8256, lng: 90.3602 },
+      { name: "Kazipara", nameBn: "\u0995\u09BE\u099C\u09C0\u09AA\u09BE\u09DC\u09BE", division: "Dhaka", zoneCode: "ZONE 04", zoneLabel: "ZONE 04 \u2014 MIRPUR", lat: 23.7966, lng: 90.3735 }
+    ]
+  },
+  {
+    code: "ZONE 05",
+    name: "UTTARA",
+    nameBn: "\u0989\u09A4\u09CD\u09A4\u09B0\u09BE",
+    summary: "Sectors 1\u201314, Rajlaxmi, Jashimuddin, Abdullahpur",
+    areas: [
+      { name: "Uttara Sector 7", nameBn: "\u0989\u09A4\u09CD\u09A4\u09B0\u09BE \u09B8\u09C7\u0995\u09CD\u099F\u09B0 \u09ED", division: "Dhaka", zoneCode: "ZONE 05", zoneLabel: "ZONE 05 \u2014 UTTARA", lat: 23.8682, lng: 90.3991 },
+      { name: "Uttara Sectors 1\u201314", nameBn: "\u0989\u09A4\u09CD\u09A4\u09B0\u09BE \u09B8\u09C7\u0995\u09CD\u099F\u09B0 \u09E7\u2013\u09E7\u09EA", division: "Dhaka", zoneCode: "ZONE 05", zoneLabel: "ZONE 05 \u2014 UTTARA", lat: 23.8722, lng: 90.3965 },
+      { name: "Rajlaxmi", nameBn: "\u09B0\u09BE\u099C\u09B2\u0995\u09CD\u09B7\u09CD\u09AE\u09C0", division: "Dhaka", zoneCode: "ZONE 05", zoneLabel: "ZONE 05 \u2014 UTTARA", lat: 23.8618, lng: 90.4003 },
+      { name: "Jashimuddin", nameBn: "\u099C\u09B8\u09BF\u09AE\u0989\u09A6\u09CD\u09A6\u09C0\u09A8", division: "Dhaka", zoneCode: "ZONE 05", zoneLabel: "ZONE 05 \u2014 UTTARA", lat: 23.8602, lng: 90.4009 },
+      { name: "Abdullahpur", nameBn: "\u0986\u09AC\u09CD\u09A6\u09C1\u09B2\u09CD\u09B2\u09BE\u09B9\u09AA\u09C1\u09B0", division: "Dhaka", zoneCode: "ZONE 05", zoneLabel: "ZONE 05 \u2014 UTTARA", lat: 23.8794, lng: 90.4012 }
+    ]
+  },
+  {
+    code: "ZONE 06",
+    name: "MOHAMMADPUR",
+    nameBn: "\u09AE\u09CB\u09B9\u09BE\u09AE\u09CD\u09AE\u09A6\u09AA\u09C1\u09B0",
+    summary: "Mohammadpur, Town Hall, Bosila, Adabor, Shyamoli",
+    areas: [
+      { name: "Mohammadpur", nameBn: "\u09AE\u09CB\u09B9\u09BE\u09AE\u09CD\u09AE\u09A6\u09AA\u09C1\u09B0", division: "Dhaka", zoneCode: "ZONE 06", zoneLabel: "ZONE 06 \u2014 MOHAMMADPUR", lat: 23.7658, lng: 90.3586 },
+      { name: "Town Hall", nameBn: "\u099F\u09BE\u0989\u09A8 \u09B9\u09B2", division: "Dhaka", zoneCode: "ZONE 06", zoneLabel: "ZONE 06 \u2014 MOHAMMADPUR", lat: 23.7662, lng: 90.3621 },
+      { name: "Bosila", nameBn: "\u09AC\u09B8\u09BF\u09B2\u09BE", division: "Dhaka", zoneCode: "ZONE 06", zoneLabel: "ZONE 06 \u2014 MOHAMMADPUR", lat: 23.7484, lng: 90.3435 },
+      { name: "Adabor", nameBn: "\u0986\u09A6\u09BE\u09AC\u09B0", division: "Dhaka", zoneCode: "ZONE 06", zoneLabel: "ZONE 06 \u2014 MOHAMMADPUR", lat: 23.7704, lng: 90.3568 },
+      { name: "Shyamoli", nameBn: "\u09B6\u09CD\u09AF\u09BE\u09AE\u09B2\u09C0", division: "Dhaka", zoneCode: "ZONE 06", zoneLabel: "ZONE 06 \u2014 MOHAMMADPUR", lat: 23.7745, lng: 90.3654 }
+    ]
+  },
+  {
+    code: "ZONE 07",
+    name: "BASHUNDHARA",
+    nameBn: "\u09AC\u09B8\u09C1\u09A8\u09CD\u09A7\u09B0\u09BE",
+    summary: "Bashundhara R/A, Jamuna Future Park, Kuril, Vatara",
+    areas: [
+      { name: "Bashundhara R/A", nameBn: "\u09AC\u09B8\u09C1\u09A8\u09CD\u09A7\u09B0\u09BE \u0986\u09AC\u09BE\u09B8\u09BF\u0995 \u098F\u09B2\u09BE\u0995\u09BE", division: "Dhaka", zoneCode: "ZONE 07", zoneLabel: "ZONE 07 \u2014 BASHUNDHARA", lat: 23.8191, lng: 90.4526 },
+      { name: "Jamuna Future Park", nameBn: "\u09AF\u09AE\u09C1\u09A8\u09BE \u09AB\u09BF\u0989\u099A\u09BE\u09B0 \u09AA\u09BE\u09B0\u09CD\u0995", division: "Dhaka", zoneCode: "ZONE 07", zoneLabel: "ZONE 07 \u2014 BASHUNDHARA", lat: 23.8135, lng: 90.4242 },
+      { name: "Kuril", nameBn: "\u0995\u09C1\u09DC\u09BF\u09B2", division: "Dhaka", zoneCode: "ZONE 07", zoneLabel: "ZONE 07 \u2014 BASHUNDHARA", lat: 23.8204, lng: 90.4215 },
+      { name: "Vatara", nameBn: "\u09AD\u09BE\u099F\u09BE\u09B0\u09BE", division: "Dhaka", zoneCode: "ZONE 07", zoneLabel: "ZONE 07 \u2014 BASHUNDHARA", lat: 23.8062, lng: 90.4285 }
+    ]
+  },
+  {
+    code: "ZONE 08",
+    name: "BADDA",
+    nameBn: "\u09AC\u09BE\u09A1\u09CD\u09A1\u09BE",
+    summary: "Badda, Merul Badda, Rampura, Aftabnagar",
+    areas: [
+      { name: "Badda", nameBn: "\u09AC\u09BE\u09A1\u09CD\u09A1\u09BE", division: "Dhaka", zoneCode: "ZONE 08", zoneLabel: "ZONE 08 \u2014 BADDA", lat: 23.7805, lng: 90.4267 },
+      { name: "Merul Badda", nameBn: "\u09AE\u09C7\u09B0\u09C1\u09B2 \u09AC\u09BE\u09A1\u09CD\u09A1\u09BE", division: "Dhaka", zoneCode: "ZONE 08", zoneLabel: "ZONE 08 \u2014 BADDA", lat: 23.7712, lng: 90.4252 },
+      { name: "Rampura", nameBn: "\u09B0\u09BE\u09AE\u09AA\u09C1\u09B0\u09BE", division: "Dhaka", zoneCode: "ZONE 08", zoneLabel: "ZONE 08 \u2014 BADDA", lat: 23.7615, lng: 90.4208 },
+      { name: "Aftabnagar", nameBn: "\u0986\u09AB\u09A4\u09BE\u09AC\u09A8\u0997\u09B0", division: "Dhaka", zoneCode: "ZONE 08", zoneLabel: "ZONE 08 \u2014 BADDA", lat: 23.7654, lng: 90.4328 }
+    ]
+  },
+  {
+    code: "ZONE 09",
+    name: "MOTIJHEEL",
+    nameBn: "\u09AE\u09A4\u09BF\u099D\u09BF\u09B2",
+    summary: "Motijheel, Paltan, Fakirapool, Arambagh, Kamalapur",
+    areas: [
+      { name: "Motijheel", nameBn: "\u09AE\u09A4\u09BF\u099D\u09BF\u09B2", division: "Dhaka", zoneCode: "ZONE 09", zoneLabel: "ZONE 09 \u2014 MOTIJHEEL", lat: 23.7272, lng: 90.4198 },
+      { name: "Paltan", nameBn: "\u09AA\u09B2\u09CD\u099F\u09A8", division: "Dhaka", zoneCode: "ZONE 09", zoneLabel: "ZONE 09 \u2014 MOTIJHEEL", lat: 23.7336, lng: 90.4119 },
+      { name: "Fakirapool", nameBn: "\u09AB\u0995\u09BF\u09B0\u09BE\u09AA\u09C1\u09B2", division: "Dhaka", zoneCode: "ZONE 09", zoneLabel: "ZONE 09 \u2014 MOTIJHEEL", lat: 23.7332, lng: 90.4178 },
+      { name: "Arambagh", nameBn: "\u0986\u09B0\u09BE\u09AE\u09AC\u09BE\u0997", division: "Dhaka", zoneCode: "ZONE 09", zoneLabel: "ZONE 09 \u2014 MOTIJHEEL", lat: 23.7311, lng: 90.4221 },
+      { name: "Kamalapur", nameBn: "\u0995\u09AE\u09B2\u09BE\u09AA\u09C1\u09B0", division: "Dhaka", zoneCode: "ZONE 09", zoneLabel: "ZONE 09 \u2014 MOTIJHEEL", lat: 23.7318, lng: 90.4264 }
+    ]
+  },
+  {
+    code: "ZONE 10",
+    name: "OLD DHAKA",
+    nameBn: "\u09AA\u09C1\u09B0\u09BE\u09A8 \u09A2\u09BE\u0995\u09BE",
+    summary: "Chawkbazar, Bangshal, Lalbagh, Wari, Sutrapur",
+    areas: [
+      { name: "Chawkbazar", nameBn: "\u099A\u0995\u09AC\u09BE\u099C\u09BE\u09B0", division: "Dhaka", zoneCode: "ZONE 10", zoneLabel: "ZONE 10 \u2014 OLD DHAKA", lat: 23.7158, lng: 90.3962 },
+      { name: "Bangshal", nameBn: "\u09AC\u0982\u09B6\u09BE\u09B2", division: "Dhaka", zoneCode: "ZONE 10", zoneLabel: "ZONE 10 \u2014 OLD DHAKA", lat: 23.7186, lng: 90.4046 },
+      { name: "Lalbagh", nameBn: "\u09B2\u09BE\u09B2\u09AC\u09BE\u0997", division: "Dhaka", zoneCode: "ZONE 10", zoneLabel: "ZONE 10 \u2014 OLD DHAKA", lat: 23.7189, lng: 90.3881 },
+      { name: "Wari", nameBn: "\u0993\u09DF\u09BE\u09B0\u09C0", division: "Dhaka", zoneCode: "ZONE 10", zoneLabel: "ZONE 10 \u2014 OLD DHAKA", lat: 23.7178, lng: 90.4176 },
+      { name: "Sutrapur", nameBn: "\u09B8\u09C2\u09A4\u09CD\u09B0\u09BE\u09AA\u09C1\u09B0", division: "Dhaka", zoneCode: "ZONE 10", zoneLabel: "ZONE 10 \u2014 OLD DHAKA", lat: 23.7095, lng: 90.4138 }
+    ]
+  },
+  {
+    code: "ZONE 11",
+    name: "TEJGAON / FARMGATE",
+    nameBn: "\u09A4\u09C7\u099C\u0997\u09BE\u0981\u0993 / \u09AB\u09BE\u09B0\u09CD\u09AE\u0997\u09C7\u099F",
+    summary: "Tejgaon, Farmgate, Karwan Bazar, Kawran Bazar",
+    areas: [
+      { name: "Tejgaon", nameBn: "\u09A4\u09C7\u099C\u0997\u09BE\u0981\u0993", division: "Dhaka", zoneCode: "ZONE 11", zoneLabel: "ZONE 11 \u2014 TEJGAON / FARMGATE", lat: 23.7612, lng: 90.3964 },
+      { name: "Farmgate", nameBn: "\u09AB\u09BE\u09B0\u09CD\u09AE\u0997\u09C7\u099F", division: "Dhaka", zoneCode: "ZONE 11", zoneLabel: "ZONE 11 \u2014 TEJGAON / FARMGATE", lat: 23.7561, lng: 90.3872 },
+      { name: "Karwan Bazar", nameBn: "\u0995\u09BE\u09B0\u0993\u09DF\u09BE\u09A8 \u09AC\u09BE\u099C\u09BE\u09B0", division: "Dhaka", zoneCode: "ZONE 11", zoneLabel: "ZONE 11 \u2014 TEJGAON / FARMGATE", lat: 23.7514, lng: 90.3931 },
+      { name: "Kawran Bazar", nameBn: "\u0995\u09BE\u0993\u09B0\u09BE\u09A8 \u09AC\u09BE\u099C\u09BE\u09B0", division: "Dhaka", zoneCode: "ZONE 11", zoneLabel: "ZONE 11 \u2014 TEJGAON / FARMGATE", lat: 23.7521, lng: 90.3936 }
+    ]
+  },
+  {
+    code: "ZONE 12",
+    name: "KHILGAON",
+    nameBn: "\u0996\u09BF\u09B2\u0997\u09BE\u0981\u0993",
+    summary: "Khilgaon, Taltola, Malibagh, Goran & custom area",
+    areas: [
+      { name: "Khilgaon", nameBn: "\u0996\u09BF\u09B2\u0997\u09BE\u0981\u0993", division: "Dhaka", zoneCode: "ZONE 12", zoneLabel: "ZONE 12 \u2014 KHILGAON", lat: 23.7506, lng: 90.4254 },
+      { name: "Taltola", nameBn: "\u09A4\u09BE\u09B2\u09A4\u09B2\u09BE", division: "Dhaka", zoneCode: "ZONE 12", zoneLabel: "ZONE 12 \u2014 KHILGAON", lat: 23.7532, lng: 90.4235 },
+      { name: "Malibagh", nameBn: "\u09AE\u09BE\u09B2\u09BF\u09AC\u09BE\u0997", division: "Dhaka", zoneCode: "ZONE 12", zoneLabel: "ZONE 12 \u2014 KHILGAON", lat: 23.7478, lng: 90.4126 },
+      { name: "Goran", nameBn: "\u0997\u09CB\u09B0\u09BE\u09A8", division: "Dhaka", zoneCode: "ZONE 12", zoneLabel: "ZONE 12 \u2014 KHILGAON", lat: 23.7492, lng: 90.4335 }
+    ]
+  }
+];
+var DHAKA_AREAS = DHAKA_DELIVERY_ZONES.map((z2) => ({
+  name: z2.areas[0].name,
+  nameBn: z2.areas[0].nameBn,
+  lat: z2.areas[0].lat,
+  lng: z2.areas[0].lng
+}));
+var NATIONWIDE_BD_AREAS = [
+  { name: "Chattogram (GEC / Agrabad)", nameBn: "\u099A\u099F\u09CD\u099F\u0997\u09CD\u09B0\u09BE\u09AE (\u099C\u09BF\u0987\u09B8\u09BF / \u0986\u0997\u09CD\u09B0\u09BE\u09AC\u09BE\u09A6)", division: "Chattogram", zoneLabel: "Nationwide Bangladesh Cities", lat: 22.3569, lng: 91.7832 },
+  { name: "Sylhet (Zindabazar)", nameBn: "\u09B8\u09BF\u09B2\u09C7\u099F (\u099C\u09BF\u09A8\u09CD\u09A6\u09BE\u09AC\u09BE\u099C\u09BE\u09B0)", division: "Sylhet", zoneLabel: "Nationwide Bangladesh Cities", lat: 24.8949, lng: 91.8687 },
+  { name: "Rajshahi (Shaheb Bazar)", nameBn: "\u09B0\u09BE\u099C\u09B6\u09BE\u09B9\u09C0 (\u09B8\u09BE\u09B9\u09C7\u09AC \u09AC\u09BE\u099C\u09BE\u09B0)", division: "Rajshahi", zoneLabel: "Nationwide Bangladesh Cities", lat: 24.3745, lng: 88.6042 },
+  { name: "Khulna (Shib Bari)", nameBn: "\u0996\u09C1\u09B2\u09A8\u09BE (\u09B6\u09BF\u09AC\u09AC\u09BE\u09DC\u09C0)", division: "Khulna", zoneLabel: "Nationwide Bangladesh Cities", lat: 22.8456, lng: 89.5403 },
+  { name: "Barishal (Sadar)", nameBn: "\u09AC\u09B0\u09BF\u09B6\u09BE\u09B2 (\u09B8\u09A6\u09B0)", division: "Barishal", zoneLabel: "Nationwide Bangladesh Cities", lat: 22.701, lng: 90.3535 },
+  { name: "Rangpur (Jahaj Company)", nameBn: "\u09B0\u0982\u09AA\u09C1\u09B0 (\u099C\u09BE\u09B9\u09BE\u099C \u0995\u09CB\u09AE\u09CD\u09AA\u09BE\u09A8\u09BF)", division: "Rangpur", zoneLabel: "Nationwide Bangladesh Cities", lat: 25.7439, lng: 89.2752 },
+  { name: "Mymensingh (Town Hall)", nameBn: "\u09AE\u09DF\u09AE\u09A8\u09B8\u09BF\u0982\u09B9 (\u099F\u09BE\u0989\u09A8 \u09B9\u09B2)", division: "Mymensingh", zoneLabel: "Nationwide Bangladesh Cities", lat: 24.7471, lng: 90.4203 },
+  { name: "Narayanganj (Chashara)", nameBn: "\u09A8\u09BE\u09B0\u09BE\u09DF\u09A3\u0997\u099E\u09CD\u099C (\u099A\u09BE\u09B7\u09BE\u09DD\u09BE)", division: "Dhaka", zoneLabel: "Nationwide Bangladesh Cities", lat: 23.6238, lng: 90.5 },
+  { name: "Gazipur (Joydebpur)", nameBn: "\u0997\u09BE\u099C\u09C0\u09AA\u09C1\u09B0 (\u099C\u09DF\u09A6\u09C7\u09AC\u09AA\u09C1\u09B0)", division: "Dhaka", zoneLabel: "Nationwide Bangladesh Cities", lat: 23.9999, lng: 90.4203 },
+  { name: "Savar (City Center)", nameBn: "\u09B8\u09BE\u09AD\u09BE\u09B0 (\u09B8\u09BF\u099F\u09BF \u09B8\u09C7\u09A8\u09CD\u099F\u09BE\u09B0)", division: "Dhaka", zoneLabel: "Nationwide Bangladesh Cities", lat: 23.8583, lng: 90.2667 },
+  { name: "Cumilla (Kandirpar)", nameBn: "\u0995\u09C1\u09AE\u09BF\u09B2\u09CD\u09B2\u09BE (\u0995\u09BE\u09A8\u09CD\u09A6\u09BF\u09B0\u09AA\u09BE\u09DC)", division: "Chattogram", zoneLabel: "Nationwide Bangladesh Cities", lat: 23.4607, lng: 91.1809 },
+  { name: "Cox's Bazar (Kolatoli)", nameBn: "\u0995\u0995\u09CD\u09B8\u09AC\u09BE\u099C\u09BE\u09B0 (\u0995\u09B2\u09BE\u09A4\u09B2\u09C0)", division: "Chattogram", zoneLabel: "Nationwide Bangladesh Cities", lat: 21.4272, lng: 92.0058 },
+  { name: "Bogura (Satmatha)", nameBn: "\u09AC\u0997\u09C1\u09DC\u09BE (\u09B8\u09BE\u09A4\u09AE\u09BE\u09A5\u09BE)", division: "Rajshahi", zoneLabel: "Nationwide Bangladesh Cities", lat: 24.8481, lng: 89.373 },
+  { name: "Jashore (Town)", nameBn: "\u09AF\u09B6\u09CB\u09B0 (\u09B6\u09B9\u09B0)", division: "Khulna", zoneLabel: "Nationwide Bangladesh Cities", lat: 23.1664, lng: 89.2081 }
+];
+var BANGLADESH_LANDMARKS = [
+  { name: "Saad Musa City Center", nameBn: "\u09B8\u09BE\u09A6 \u09AE\u09C1\u09B8\u09BE \u09B8\u09BF\u099F\u09BF \u09B8\u09C7\u09A8\u09CD\u099F\u09BE\u09B0", division: "Dhaka", zoneCode: "ZONE 07", zoneLabel: "Pragati Sarani \xB7 Kuril / Nikunja", addressHint: "Ka-96-E Pragati Sarani, Kuril, Nikunja 1, Dhaka 1229", keywords: "sad musa city center citycenter corporate tower kuril nikunja", lat: 23.81801, lng: 90.42001 },
+  { name: "Saad Musa Tower (Agrabad)", nameBn: "\u09B8\u09BE\u09A6 \u09AE\u09C1\u09B8\u09BE \u099F\u09BE\u0993\u09DF\u09BE\u09B0 (\u0986\u0997\u09CD\u09B0\u09BE\u09AC\u09BE\u09A6)", division: "Chattogram", zoneLabel: "Agrabad C/A \xB7 Chattogram", addressHint: "Agrabad Commercial Area, Chattogram", keywords: "sad musa tower building commercial chittagong agrabad", lat: 22.3264, lng: 91.8122 },
+  { name: "Saad Musa Industrial Park", nameBn: "\u09B8\u09BE\u09A6 \u09AE\u09C1\u09B8\u09BE \u0987\u09A8\u09CD\u09A1\u09BE\u09B8\u09CD\u099F\u09CD\u09B0\u09BF\u09DF\u09BE\u09B2 \u09AA\u09BE\u09B0\u09CD\u0995", division: "Chattogram", zoneLabel: "Kalurghat \xB7 Chattogram", addressHint: "Kalurghat Heavy Industrial Area, Chattogram", keywords: "sad musa group factory textile chittagong", lat: 22.3911, lng: 91.8842 },
+  { name: "Jamuna Future Park", nameBn: "\u09AF\u09AE\u09C1\u09A8\u09BE \u09AB\u09BF\u0989\u099A\u09BE\u09B0 \u09AA\u09BE\u09B0\u09CD\u0995", division: "Dhaka", zoneCode: "ZONE 07", zoneLabel: "ZONE 07 \xB7 Kuril / Bashundhara", addressHint: "Ka-244 Pragati Sarani, Kuril, Dhaka 1229", keywords: "futurepark shopping mall kuril bashundhara", lat: 23.8135, lng: 90.4242 },
+  { name: "Bashundhara City Shopping Complex", nameBn: "\u09AC\u09B8\u09C1\u09A8\u09CD\u09A7\u09B0\u09BE \u09B8\u09BF\u099F\u09BF \u09B6\u09AA\u09BF\u0982 \u09AE\u09B2", division: "Dhaka", zoneCode: "ZONE 11", zoneLabel: "Panthapath \xB7 Karwan Bazar", addressHint: "Panthapath, West Karwan Bazar, Dhaka 1215", keywords: "bashundhara city shopping mall panthapath farmgate", lat: 23.7509, lng: 90.3905 },
+  { name: "Police Plaza Concord", nameBn: "\u09AA\u09C1\u09B2\u09BF\u09B6 \u09AA\u09CD\u09B2\u09BE\u099C\u09BE \u0995\u09A8\u0995\u09B0\u09CD\u09A1", division: "Dhaka", zoneCode: "ZONE 01", zoneLabel: "Hatirjheel \xB7 Gulshan 1", addressHint: "Plot 2, Road 144, Gulshan 1 (Hatirjheel Link), Dhaka 1212", keywords: "policeplaza concord mall shopping tower gulshan", lat: 23.7731, lng: 90.4156 },
+  { name: "Gulshan Pink City Shopping Mall", nameBn: "\u0997\u09C1\u09B2\u09B6\u09BE\u09A8 \u09AA\u09BF\u0982\u0995 \u09B8\u09BF\u099F\u09BF", division: "Dhaka", zoneCode: "ZONE 01", zoneLabel: "ZONE 01 \xB7 Gulshan 2", addressHint: "Plot 15, Road 103, Gulshan Avenue, Dhaka 1212", keywords: "pinkcity shopping mall gulshan 2", lat: 23.7924, lng: 90.4153 },
+  { name: "Navana Tower (Gulshan 1)", nameBn: "\u09A8\u09BE\u09AD\u09BE\u09A8\u09BE \u099F\u09BE\u0993\u09DF\u09BE\u09B0 (\u0997\u09C1\u09B2\u09B6\u09BE\u09A8 \u09E7)", division: "Dhaka", zoneCode: "ZONE 01", zoneLabel: "ZONE 01 \xB7 Gulshan 1", addressHint: "45 Gulshan South C/A, Circle 1, Dhaka 1212", keywords: "navana tower commercial office gulshan 1", lat: 23.7808, lng: 90.4169 },
+  { name: "Shimanto Square", nameBn: "\u09B8\u09C0\u09AE\u09BE\u09A8\u09CD\u09A4 \u09B8\u09CD\u0995\u09DF\u09BE\u09B0", division: "Dhaka", zoneCode: "ZONE 03", zoneLabel: "ZONE 03 \xB7 Dhanmondi", addressHint: "Road 2, Dhanmondi (Jigatola), Dhaka 1205", keywords: "shimanto square rifles square shopping mall dhanmondi", lat: 23.7385, lng: 90.3752 },
+  { name: "Tokyo Square", nameBn: "\u099F\u09CB\u0995\u09BF\u0993 \u09B8\u09CD\u0995\u09DF\u09BE\u09B0", division: "Dhaka", zoneCode: "ZONE 06", zoneLabel: "ZONE 06 \xB7 Mohammadpur", addressHint: "Japan Garden City, Ring Road, Mohammadpur, Dhaka 1207", keywords: "tokyo square mall japan garden city mohammadpur", lat: 23.7689, lng: 90.3587 },
+  { name: "Mascot Plaza (Uttara)", nameBn: "\u09AE\u09BE\u09B8\u0995\u099F \u09AA\u09CD\u09B2\u09BE\u099C\u09BE (\u0989\u09A4\u09CD\u09A4\u09B0\u09BE)", division: "Dhaka", zoneCode: "ZONE 05", zoneLabel: "ZONE 05 \xB7 Uttara Sector 7", addressHint: "Sector 7, Sonargaon Janapath, Uttara, Dhaka 1230", keywords: "mascot plaza shopping mall uttara sector 7", lat: 23.8698, lng: 90.3999 },
+  { name: "Rajlokkhi Complex (Uttara)", nameBn: "\u09B0\u09BE\u099C\u09B2\u0995\u09CD\u09B7\u09CD\u09AE\u09C0 \u0995\u09AE\u09AA\u09CD\u09B2\u09C7\u0995\u09CD\u09B8 (\u0989\u09A4\u09CD\u09A4\u09B0\u09BE)", division: "Dhaka", zoneCode: "ZONE 05", zoneLabel: "ZONE 05 \xB7 Uttara Sector 3", addressHint: "Sector 3, Dhaka-Mymensingh Hwy, Uttara, Dhaka 1230", keywords: "rajlaxmi rajlokkhi complex market uttara", lat: 23.8644, lng: 90.4002 },
+  { name: "North Tower (Uttara)", nameBn: "\u09A8\u09B0\u09CD\u09A5 \u099F\u09BE\u0993\u09DF\u09BE\u09B0 (\u0989\u09A4\u09CD\u09A4\u09B0\u09BE)", division: "Dhaka", zoneCode: "ZONE 05", zoneLabel: "ZONE 05 \xB7 Uttara Sector 7", addressHint: "Sector 7, House Building, Uttara, Dhaka 1230", keywords: "north tower shopping center uttara house building", lat: 23.8744, lng: 90.4005 },
+  { name: "Evercare Hospital Dhaka", nameBn: "\u098F\u09AD\u09BE\u09B0\u0995\u09C7\u09DF\u09BE\u09B0 \u09B9\u09BE\u09B8\u09AA\u09BE\u09A4\u09BE\u09B2 \u09A2\u09BE\u0995\u09BE", division: "Dhaka", zoneCode: "ZONE 07", zoneLabel: "Bashundhara R/A", addressHint: "Plot 81, Block E, Bashundhara R/A, Dhaka 1229", keywords: "apollo hospital evercare medical bashundhara", lat: 23.8099, lng: 90.4314 },
+  { name: "United Hospital (Gulshan)", nameBn: "\u0987\u0989\u09A8\u09BE\u0987\u099F\u09C7\u09A1 \u09B9\u09BE\u09B8\u09AA\u09BE\u09A4\u09BE\u09B2 (\u0997\u09C1\u09B2\u09B6\u09BE\u09A8)", division: "Dhaka", zoneCode: "ZONE 01", zoneLabel: "Gulshan 2", addressHint: "Plot 15, Road 71, Gulshan 2, Dhaka 1212", keywords: "united hospital medical gulshan 2", lat: 23.8047, lng: 90.4158 },
+  { name: "Square Hospital (Panthapath)", nameBn: "\u09B8\u09CD\u0995\u09DF\u09BE\u09B0 \u09B9\u09BE\u09B8\u09AA\u09BE\u09A4\u09BE\u09B2 (\u09AA\u09BE\u09A8\u09CD\u09A5\u09AA\u09A5)", division: "Dhaka", zoneCode: "ZONE 03", zoneLabel: "Panthapath \xB7 Dhanmondi", addressHint: "18/F Bir Uttam Qazi Nuruzzaman Sarak, Panthapath, Dhaka 1205", keywords: "square hospital medical panthapath green road", lat: 23.7529, lng: 90.3816 },
+  { name: "Dhaka Medical College Hospital", nameBn: "\u09A2\u09BE\u0995\u09BE \u09AE\u09C7\u09A1\u09BF\u0995\u09C7\u09B2 \u0995\u09B2\u09C7\u099C \u09B9\u09BE\u09B8\u09AA\u09BE\u09A4\u09BE\u09B2", division: "Dhaka", zoneCode: "ZONE 10", zoneLabel: "Shahbagh \xB7 Bakshibazar", addressHint: "Secretariat Road, Ramna / Shahbagh, Dhaka 1000", keywords: "dmch medicalcollege hospital shahbagh buet", lat: 23.7259, lng: 90.3976 },
+  { name: "North South University (NSU)", nameBn: "\u09A8\u09B0\u09CD\u09A5 \u09B8\u09BE\u0989\u09A5 \u0987\u0989\u09A8\u09BF\u09AD\u09BE\u09B0\u09CD\u09B8\u09BF\u099F\u09BF (NSU)", division: "Dhaka", zoneCode: "ZONE 07", zoneLabel: "Bashundhara R/A", addressHint: "Plot 15, Block B, Bashundhara R/A, Dhaka 1229", keywords: "nsu north south university campus bashundhara", lat: 23.8151, lng: 90.4255 },
+  { name: "BRAC University (Merul Badda)", nameBn: "\u09AC\u09CD\u09B0\u09CD\u09AF\u09BE\u0995 \u0987\u0989\u09A8\u09BF\u09AD\u09BE\u09B0\u09CD\u09B8\u09BF\u099F\u09BF (\u09AE\u09C7\u09B0\u09C1\u09B2 \u09AC\u09BE\u09A1\u09CD\u09A1\u09BE)", division: "Dhaka", zoneCode: "ZONE 08", zoneLabel: "Merul Badda", addressHint: "Kha 224 Bir Uttam Rafiqul Islam Ave, Merul Badda, Dhaka 1212", keywords: "bracu brac university campus merul badda mohakhali", lat: 23.7725, lng: 90.4249 },
+  { name: "University of Dhaka (TSC / Shahbagh)", nameBn: "\u09A2\u09BE\u0995\u09BE \u09AC\u09BF\u09B6\u09CD\u09AC\u09AC\u09BF\u09A6\u09CD\u09AF\u09BE\u09B2\u09DF (\u099F\u09BF\u098F\u09B8\u09B8\u09BF)", division: "Dhaka", zoneCode: "ZONE 03", zoneLabel: "Shahbagh \xB7 Nilkhet", addressHint: "TSC Road, University of Dhaka, Shahbagh, Dhaka 1000", keywords: "du dhaka university tsc shahbagh nilkhet", lat: 23.7339, lng: 90.3953 },
+  { name: "Hazrat Shahjalal International Airport", nameBn: "\u09B9\u09AF\u09B0\u09A4 \u09B6\u09BE\u09B9\u099C\u09BE\u09B2\u09BE\u09B2 \u0986\u09A8\u09CD\u09A4\u09B0\u09CD\u099C\u09BE\u09A4\u09BF\u0995 \u09AC\u09BF\u09AE\u09BE\u09A8\u09AC\u09A8\u09CD\u09A6\u09B0", division: "Dhaka", zoneCode: "ZONE 05", zoneLabel: "Airport Road \xB7 Kurmitola", addressHint: "Airport Road, Kurmitola, Dhaka 1229", keywords: "hsia airport terminal 1 2 3 kurmitola dhaka", lat: 23.8433, lng: 90.3978 },
+  { name: "Kamalapur Railway Station", nameBn: "\u0995\u09AE\u09B2\u09BE\u09AA\u09C1\u09B0 \u09B0\u09C7\u09B2\u0993\u09DF\u09C7 \u09B8\u09CD\u099F\u09C7\u09B6\u09A8", division: "Dhaka", zoneCode: "ZONE 09", zoneLabel: "Motijheel \xB7 Kamalapur", addressHint: "Kamalapur Station Road, Motijheel, Dhaka 1217", keywords: "railwaystation train station komlapur motijheel", lat: 23.7317, lng: 90.4262 },
+  { name: "Sanmar Ocean City (Chattogram)", nameBn: "\u09B8\u09BE\u09A8\u09AE\u09BE\u09B0 \u0993\u09B6\u09BE\u09A8 \u09B8\u09BF\u099F\u09BF (\u099A\u099F\u09CD\u099F\u0997\u09CD\u09B0\u09BE\u09AE)", division: "Chattogram", zoneLabel: "CDA Avenue \xB7 GEC Circle", addressHint: "CDA Avenue, East Nasirabad, GEC Circle, Chattogram", keywords: "sanmar oceancity mall gec chittagong", lat: 22.3596, lng: 91.8219 },
+  { name: "Al-Hamra Shopping City (Sylhet)", nameBn: "\u0986\u09B2-\u09B9\u09BE\u09AE\u09B0\u09BE \u09B6\u09AA\u09BF\u0982 \u09B8\u09BF\u099F\u09BF (\u09B8\u09BF\u09B2\u09C7\u099F)", division: "Sylhet", zoneLabel: "Zindabazar \xB7 Sylhet", addressHint: "Zindabazar Main Road, Sylhet 3100", keywords: "al hamra shopping city mall zindabazar sylhet", lat: 24.8965, lng: 91.8682 }
+];
+var BANGLADESH_AREAS = [
+  ...DHAKA_DELIVERY_ZONES.flatMap((z2) => z2.areas),
+  ...NATIONWIDE_BD_AREAS
+];
+var BANGLADESH_SEARCH_PLACES = [
+  ...BANGLADESH_AREAS,
+  ...BANGLADESH_LANDMARKS
+];
+
 // src/services/free-apis.ts
 var cache = /* @__PURE__ */ new Map();
 function getCached(key) {
@@ -3228,40 +4099,153 @@ async function fetchDhakaWeather(lat, lng) {
     };
   }
 }
-async function searchOsmPlaces(query) {
-  const q = query.trim();
-  if (!q) return [];
-  const key = `osm-search:${q.toLowerCase()}`;
-  const cached = getCached(key);
-  if (cached) return cached;
+async function fetchPhotonBangladeshPlaces(query, biasLat, biasLng) {
   try {
-    const queryWithCountry = q.toLowerCase().includes("bangladesh") ? q : `${q}, Bangladesh`;
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
-      queryWithCountry
-    )}&format=json&countrycodes=bd&limit=6`;
+    const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(
+      query
+    )}&lat=${biasLat}&lon=${biasLng}&limit=10&lang=en&bbox=88.0,20.5,92.7,26.7`;
     const res = await fetch(url, {
       headers: { "User-Agent": "FoodoraBD-Marketplace/1.0" },
-      signal: AbortSignal.timeout(3500)
+      signal: AbortSignal.timeout(3200)
     });
-    if (!res.ok) throw new Error(`Nominatim HTTP ${res.status}`);
-    const rows = await res.json();
-    const mapped = rows.map((r) => ({
-      displayName: r.display_name,
-      shortName: r.display_name.split(",").slice(0, 2).join(", ").trim(),
-      lat: Number(r.lat),
-      lng: Number(r.lon)
-    }));
-    return setCached(key, mapped, 10 * 60 * 1e3);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const out = [];
+    for (const f of data.features || []) {
+      const coords = f.geometry?.coordinates;
+      if (!coords || coords.length < 2) continue;
+      const lng = Number(coords[0]);
+      const lat = Number(coords[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      const p = f.properties || {};
+      if (p.countrycode && p.countrycode.toUpperCase() !== "BD") continue;
+      if (!isWithinBangladesh(lat, lng)) continue;
+      const rawTitle = (p.name || "").split(";")[0]?.trim() || p.street || p.district || p.city || "Bangladesh";
+      const streetLine = [p.housenumber, p.street].filter(Boolean).join(" ").trim();
+      const areaLine = [p.locality, p.district, p.city || p.county].filter(Boolean);
+      const displayParts = cleanMapAddressSegments(
+        [rawTitle, streetLine, ...areaLine, "Bangladesh"].filter(Boolean).join(", ")
+      );
+      const displayName = displayParts.length > 0 ? `${displayParts.slice(0, 4).join(", ")}, Bangladesh` : `${rawTitle}, Bangladesh`;
+      const subtitle = areaLine.slice(0, 2).join(" \xB7 ") || p.state || "Bangladesh Map";
+      out.push({
+        displayName,
+        shortName: rawTitle,
+        subtitle,
+        lat,
+        lng,
+        source: "map"
+      });
+    }
+    return out;
   } catch {
     return [];
   }
 }
+async function fetchGooglePlacesTextSearch(query, biasLat, biasLng) {
+  const apiKey = process.env.GOOGLE_MAPS_SERVER_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || "";
+  if (!apiKey) return [];
+  try {
+    const qWithBd = query.toLowerCase().includes("bangladesh") ? query : `${query}, Bangladesh`;
+    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(
+      qWithBd
+    )}&location=${biasLat},${biasLng}&radius=50000&region=bd&key=${encodeURIComponent(apiKey)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(3200) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (data.status !== "OK" || !Array.isArray(data.results)) return [];
+    const out = [];
+    for (const r of data.results.slice(0, 8)) {
+      const lat = Number(r.geometry?.location?.lat);
+      const lng = Number(r.geometry?.location?.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || !isWithinBangladesh(lat, lng)) continue;
+      const cleaned = cleanMapAddressSegments(r.formatted_address || "");
+      const shortName = r.name?.trim() || cleaned[0] || matchCanonicalAreaFromHints([r.formatted_address || ""], lat, lng, BANGLADESH_AREAS);
+      const displayName = cleaned.length > 0 ? `${cleaned.slice(0, 4).join(", ")}, Bangladesh` : `${shortName}, Bangladesh`;
+      out.push({
+        displayName,
+        shortName,
+        subtitle: cleaned.slice(1, 3).join(" \xB7 ") || "Google Places",
+        lat,
+        lng,
+        source: "map"
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+async function fetchNominatimPlaces(query) {
+  try {
+    const queryWithCountry = query.toLowerCase().includes("bangladesh") ? query : `${query}, Bangladesh`;
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+      queryWithCountry
+    )}&format=json&addressdetails=1&countrycodes=bd&limit=6&accept-language=en,bn`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": "FoodoraBD-Marketplace/1.0" },
+      signal: AbortSignal.timeout(3200)
+    });
+    if (!res.ok) return [];
+    const rows = await res.json();
+    return rows.filter((r) => Number.isFinite(Number(r.lat)) && Number.isFinite(Number(r.lon))).map((r) => {
+      const lat = Number(r.lat);
+      const lng = Number(r.lon);
+      const cleaned = cleanMapAddressSegments(r.display_name);
+      const rawName = (r.name || "").split(";")[0]?.trim();
+      const shortName = rawName || cleaned[0] || r.display_name.split(",")[0]?.trim() || matchCanonicalAreaFromHints([r.display_name], lat, lng, BANGLADESH_AREAS);
+      const cleanDisplay = cleaned.length > 0 ? `${cleaned.slice(0, 4).join(", ")}, Bangladesh` : r.display_name;
+      const subtitleParts = [
+        r.address?.suburb || r.address?.neighbourhood || "",
+        r.address?.city || r.address?.town || r.address?.county || ""
+      ].filter(Boolean);
+      return {
+        displayName: cleanDisplay,
+        shortName,
+        subtitle: subtitleParts.join(" \xB7 ") || "Bangladesh Map",
+        lat,
+        lng,
+        source: "map"
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+async function searchOsmPlaces(query, bias) {
+  const q = query.trim();
+  if (!q) return [];
+  const biasLat = Number.isFinite(bias?.lat) ? Number(bias?.lat) : 23.7949;
+  const biasLng = Number.isFinite(bias?.lng) ? Number(bias?.lng) : 90.4144;
+  const key = `osm-search-v4:${q.toLowerCase()}:${biasLat.toFixed(1)},${biasLng.toFixed(1)}`;
+  const cached = getCached(key);
+  if (cached) return cached;
+  const localMatches = findLocalAddressSuggestions(q, BANGLADESH_SEARCH_PLACES, 8);
+  const queryVariants = expandAddressSearchQueries(q);
+  const fullPhoneticQuery = queryVariants.find((v) => v.includes("saad") || v.includes(" ")) || q;
+  const prefixQuery = queryVariants.length >= 3 ? queryVariants[queryVariants.length - 1] : "";
+  const [googleHits, photonPrimary, photonExpanded, photonPrefix, nominatimHits] = await Promise.all([
+    fetchGooglePlacesTextSearch(fullPhoneticQuery, biasLat, biasLng),
+    fetchPhotonBangladeshPlaces(q, biasLat, biasLng),
+    fullPhoneticQuery !== q ? fetchPhotonBangladeshPlaces(fullPhoneticQuery, biasLat, biasLng) : Promise.resolve([]),
+    prefixQuery && prefixQuery !== fullPhoneticQuery && prefixQuery !== q ? fetchPhotonBangladeshPlaces(prefixQuery, biasLat, biasLng) : Promise.resolve([]),
+    fetchNominatimPlaces(fullPhoneticQuery)
+  ]);
+  const remoteCombined = mergeAddressSuggestions(
+    [...googleHits, ...photonExpanded],
+    [...photonPrimary, ...photonPrefix, ...nominatimHits],
+    16
+  );
+  const rankedRemote = filterAndRankRemoteSuggestions(fullPhoneticQuery, remoteCombined, 10);
+  const merged = mergeAddressSuggestions(localMatches, rankedRemote, 12);
+  return setCached(key, merged, 10 * 60 * 1e3);
+}
 async function reverseOsmGeocode(lat, lng, lang = "en") {
-  const key = `osm-rev:${lang}:${lat.toFixed(4)},${lng.toFixed(4)}`;
+  const key = `osm-rev-v2:${lang}:${lat.toFixed(4)},${lng.toFixed(4)}`;
   const cached = getCached(key);
   if (cached) return cached;
   try {
-    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=${lang === "bn" ? "bn,en" : "en,bn"}`;
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&addressdetails=1&zoom=18&accept-language=${lang === "bn" ? "bn,en" : "en"}`;
     const res = await fetch(url, {
       headers: { "User-Agent": "FoodoraBD-Marketplace/1.0" },
       signal: AbortSignal.timeout(4e3)
@@ -3269,15 +4253,32 @@ async function reverseOsmGeocode(lat, lng, lang = "en") {
     if (!res.ok) throw new Error(`Nominatim reverse HTTP ${res.status}`);
     const data = await res.json();
     const addr = data.address;
-    const primaryLocal = addr?.neighbourhood || addr?.quarter || addr?.suburb || addr?.village || addr?.town || addr?.road;
-    const cityPart = addr?.city || addr?.city_district || addr?.county || addr?.state_district || addr?.state;
-    const areaName = primaryLocal && cityPart && primaryLocal !== cityPart ? `${primaryLocal}, ${cityPart}` : primaryLocal || cityPart || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-    const displayName = data.display_name || `${areaName}, Bangladesh`;
+    const houseOrBuilding = [addr?.house_number, addr?.road].filter(Boolean).join(" ").trim();
+    const localHood = addr?.neighbourhood || addr?.quarter || addr?.suburb || addr?.village || addr?.town || "";
+    const cityPart = addr?.city || addr?.town || addr?.county || "";
+    const areaName = matchCanonicalAreaFromHints(
+      [localHood, addr?.road || "", data.name || "", data.display_name || "", cityPart],
+      lat,
+      lng,
+      BANGLADESH_AREAS
+    );
+    const structuredCandidates = [
+      data.name || addr?.amenity || addr?.building || "",
+      houseOrBuilding,
+      localHood,
+      areaName,
+      cityPart
+    ].filter(Boolean);
+    const cleanedSegments = cleanMapAddressSegments(
+      structuredCandidates.length > 0 ? structuredCandidates.join(", ") : data.display_name || ""
+    );
+    const displayName = cleanedSegments.length > 0 ? `${cleanedSegments.slice(0, 4).join(", ")}, Bangladesh` : `${areaName}, Bangladesh`;
     return setCached(key, { displayName, areaName, source: "OpenStreetMap" }, 10 * 60 * 1e3);
   } catch {
+    const areaName = matchCanonicalAreaFromHints([], lat, lng, BANGLADESH_AREAS);
     return {
-      displayName: `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}, Bangladesh`,
-      areaName: `Pinned (${lat.toFixed(3)}, ${lng.toFixed(3)})`,
+      displayName: `${areaName}, Bangladesh`,
+      areaName,
       source: "Fallback"
     };
   }
@@ -3365,30 +4366,477 @@ async function searchMealDbDishes(query) {
 }
 
 // src/services/order-email.ts
+import crypto2 from "node:crypto";
 import nodemailer from "nodemailer";
-function getEmailTransportStatus() {
-  const smtpHost = (process.env.SMTP_HOST || "").trim();
-  const smtpUser = (process.env.SMTP_USER || "").trim();
-  const smtpPass = (process.env.SMTP_PASS || "").trim();
-  if (smtpHost && smtpUser && smtpPass) {
+import { desc as desc2, eq as eq3 } from "drizzle-orm";
+var EMAIL_CONFIG_KEY = "__email_transport_config__";
+var EMAIL_CONFIG_UID = "sys-email-transport-config";
+function deriveEncryptionKey() {
+  const secret = process.env.FOODORA_SESSION_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.DATABASE_URL || "foodora-bd-email-config-key-v1";
+  return crypto2.createHash("sha256").update(secret).digest();
+}
+function encryptSecret(plain) {
+  const clean = plain.trim();
+  if (!clean) return "";
+  const iv = crypto2.randomBytes(12);
+  const cipher = crypto2.createCipheriv("aes-256-gcm", deriveEncryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(clean, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `v1:${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+}
+function decryptSecret(encoded) {
+  if (!encoded || !encoded.startsWith("v1:")) return "";
+  try {
+    const [, ivHex, tagHex, dataHex] = encoded.split(":");
+    if (!ivHex || !tagHex || !dataHex) return "";
+    const decipher = crypto2.createDecipheriv(
+      "aes-256-gcm",
+      deriveEncryptionKey(),
+      Buffer.from(ivHex, "hex")
+    );
+    decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+    const plain = Buffer.concat([
+      decipher.update(Buffer.from(dataHex, "hex")),
+      decipher.final()
+    ]);
+    return plain.toString("utf8");
+  } catch {
+    return "";
+  }
+}
+function maskSecret(val) {
+  const clean = val.trim();
+  if (!clean) return "";
+  if (clean.length <= 4) return "\u2022\u2022\u2022\u2022";
+  return `${clean.slice(0, 2)}\u2022\u2022\u2022\u2022\u2022\u2022${clean.slice(-2)}`;
+}
+function normalizeSmtpPassword(providerOrHost, rawPass) {
+  const trimmed = String(rawPass || "").trim();
+  if (!trimmed) return "";
+  if (providerOrHost.toLowerCase().includes("gmail")) {
+    return trimmed.replace(/\s+/g, "");
+  }
+  return trimmed;
+}
+function createSmtpTransporter(params) {
+  return nodemailer.createTransport({
+    host: params.host,
+    port: Number.isFinite(params.port) ? params.port : 465,
+    secure: params.secure,
+    auth: {
+      user: params.user,
+      pass: params.pass
+    },
+    tls: {
+      minVersion: "TLSv1.2"
+    },
+    connectionTimeout: 9e3,
+    greetingTimeout: 9e3,
+    socketTimeout: 12e3
+  });
+}
+function formatSmtpFriendlyError(err) {
+  const raw = err instanceof Error ? err.message : String(err || "SMTP error");
+  const lower = raw.toLowerCase();
+  if (lower.includes("535") || lower.includes("invalid login") || lower.includes("username and password not accepted")) {
+    return "Gmail/SMTP rejected username or password. Enable 2-Step Verification and use a 16-character Google App Password.";
+  }
+  if (lower.includes("econnrefused") || lower.includes("etimedout") || lower.includes("timeout")) {
+    return `Could not reach SMTP server (${raw}). Try switching port 465 (SSL) <-> 587 (STARTTLS).`;
+  }
+  return raw;
+}
+async function resolveCustomerEmailForOrder(orderCustomerEmail, customerUid) {
+  const direct = String(orderCustomerEmail || "").trim().toLowerCase();
+  if (direct && direct.includes("@") && !direct.endsWith(".local")) {
+    return direct;
+  }
+  const uid = String(customerUid || "").trim();
+  if (!uid || uid.startsWith("guest-")) return null;
+  try {
+    const rows = await db.select({ email: users.email }).from(users).where(eq3(users.uid, uid)).limit(1);
+    const candidate = String(rows[0]?.email || "").trim().toLowerCase();
+    if (candidate && candidate.includes("@") && !candidate.endsWith(".local")) {
+      return candidate;
+    }
+  } catch {
+  }
+  return null;
+}
+async function readStoredConfig() {
+  try {
+    const rows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq3(localCredentials.email, EMAIL_CONFIG_KEY)).limit(1);
+    if (!rows[0]?.passwordHash) return null;
+    const parsed = JSON.parse(rows[0].passwordHash);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+async function resolveEffectiveConfig() {
+  const stored = await readStoredConfig();
+  if (stored) {
+    const smtpHost = stored.provider === "gmail" ? "smtp.gmail.com" : (stored.smtpHost || "").trim();
+    const smtpPass = normalizeSmtpPassword(
+      stored.provider === "gmail" ? "gmail" : smtpHost,
+      decryptSecret(stored.smtpPassEnc)
+    );
+    const resendKey = decryptSecret(stored.resendApiKeyEnc);
+    const smtpPort = Number(stored.smtpPort) || (stored.provider === "gmail" ? 465 : 587);
+    const smtpSecure = stored.provider === "gmail" ? smtpPort === 465 : Boolean(stored.smtpSecure ?? smtpPort === 465);
+    const smtpUser = (stored.smtpUser || "").trim();
+    const defaultFrom = stored.provider === "resend" ? "Foodora BD <onboarding@resend.dev>" : smtpUser ? `Foodora BD <${smtpUser}>` : "Foodora BD <orders@foodora.bd>";
+    const fromAddress = (stored.fromAddress || defaultFrom).trim();
+    if (stored.provider === "resend" && resendKey || (stored.provider === "gmail" || stored.provider === "smtp") && smtpHost && smtpUser && smtpPass) {
+      return {
+        providerMode: stored.provider,
+        smtpHost,
+        smtpPort,
+        smtpSecure,
+        smtpUser,
+        smtpPass,
+        fromAddress,
+        resendKey,
+        source: "database"
+      };
+    }
+  }
+  const envSmtpHost = (process.env.SMTP_HOST || "").trim();
+  const envSmtpUser = (process.env.SMTP_USER || "").trim();
+  const envSmtpPass = normalizeSmtpPassword(envSmtpHost, process.env.SMTP_PASS || "");
+  const envSmtpPort = Number(process.env.SMTP_PORT || 587);
+  const envSmtpSecure = process.env.SMTP_SECURE === "true" || !process.env.SMTP_SECURE && envSmtpPort === 465;
+  const envResendKey = (process.env.RESEND_API_KEY || process.env.EMAIL_PROVIDER_API_KEY || "").trim();
+  if (envSmtpHost && envSmtpUser && envSmtpPass) {
     return {
-      configured: true,
-      provider: "smtp",
-      fromAddress: (process.env.SMTP_FROM || `Foodora BD <${smtpUser}>`).trim()
+      providerMode: envSmtpHost.includes("gmail") ? "gmail" : "smtp",
+      smtpHost: envSmtpHost,
+      smtpPort: Number.isFinite(envSmtpPort) ? envSmtpPort : 587,
+      smtpSecure: envSmtpSecure,
+      smtpUser: envSmtpUser,
+      smtpPass: envSmtpPass,
+      fromAddress: (process.env.SMTP_FROM || `Foodora BD <${envSmtpUser}>`).trim(),
+      resendKey: envResendKey,
+      source: "env"
     };
   }
-  const resendKey = (process.env.RESEND_API_KEY || process.env.EMAIL_PROVIDER_API_KEY || "").trim();
-  if (resendKey) {
+  if (envResendKey) {
     return {
-      configured: true,
-      provider: "resend",
-      fromAddress: (process.env.RESEND_FROM_EMAIL || "Foodora BD <onboarding@resend.dev>").trim()
+      providerMode: "resend",
+      smtpHost: "",
+      smtpPort: 587,
+      smtpSecure: false,
+      smtpUser: "",
+      smtpPass: "",
+      fromAddress: (process.env.RESEND_FROM_EMAIL || "Foodora BD <onboarding@resend.dev>").trim(),
+      resendKey: envResendKey,
+      source: "env"
     };
+  }
+  return {
+    providerMode: stored?.provider || "gmail",
+    smtpHost: stored?.smtpHost || "smtp.gmail.com",
+    smtpPort: stored?.smtpPort || 465,
+    smtpSecure: stored?.smtpSecure ?? true,
+    smtpUser: stored?.smtpUser || "",
+    smtpPass: "",
+    fromAddress: stored?.fromAddress || "Foodora BD <orders@foodora.bd>",
+    resendKey: "",
+    source: "none"
+  };
+}
+async function getEmailTransportStatus() {
+  const cfg = await resolveEffectiveConfig();
+  if (cfg.source !== "none") {
+    if (cfg.providerMode === "resend" && cfg.resendKey) {
+      return {
+        configured: true,
+        provider: "resend",
+        fromAddress: cfg.fromAddress,
+        source: cfg.source
+      };
+    }
+    if (cfg.smtpHost && cfg.smtpUser && cfg.smtpPass) {
+      return {
+        configured: true,
+        provider: "smtp",
+        fromAddress: cfg.fromAddress,
+        source: cfg.source
+      };
+    }
   }
   return {
     configured: false,
     provider: "in_app_email_log",
-    fromAddress: "Foodora BD <orders@foodora.bd>"
+    fromAddress: "Foodora BD <orders@foodora.bd>",
+    source: "none"
+  };
+}
+async function getAdminEmailSettingsView() {
+  const [stored, effective, status] = await Promise.all([
+    readStoredConfig(),
+    resolveEffectiveConfig(),
+    getEmailTransportStatus()
+  ]);
+  const storedPass = decryptSecret(stored?.smtpPassEnc);
+  const storedResend = decryptSecret(stored?.resendApiKeyEnc);
+  const effectivePass = storedPass || effective.smtpPass;
+  const effectiveResend = storedResend || effective.resendKey;
+  return {
+    provider: stored?.provider || effective.providerMode || "gmail",
+    smtpHost: stored?.smtpHost || effective.smtpHost || "smtp.gmail.com",
+    smtpPort: stored?.smtpPort || effective.smtpPort || 465,
+    smtpSecure: stored ? Boolean(stored.smtpSecure) : Boolean(effective.smtpSecure),
+    smtpUser: stored?.smtpUser || effective.smtpUser || "",
+    fromAddress: stored?.fromAddress || effective.fromAddress || "Foodora BD <orders@foodora.bd>",
+    notifyEmail: stored?.notifyEmail || (process.env.ORDER_ALERT_NOTIFY_EMAIL || "").trim() || PRIMARY_SUPER_ADMIN_EMAIL,
+    hasSmtpPass: Boolean(effectivePass),
+    smtpPassPreview: maskSecret(effectivePass),
+    hasResendKey: Boolean(effectiveResend),
+    resendKeyPreview: maskSecret(effectiveResend),
+    configured: status.configured,
+    activeProvider: status.provider,
+    source: effective.source
+  };
+}
+async function saveAdminEmailSettings(input) {
+  const prev = await readStoredConfig();
+  const provider = input.provider || "gmail";
+  const smtpHost = provider === "gmail" ? "smtp.gmail.com" : (input.smtpHost ?? prev?.smtpHost ?? "").trim();
+  const smtpPort = Number(
+    input.smtpPort ?? prev?.smtpPort ?? (provider === "gmail" ? 465 : 587)
+  );
+  const smtpSecure = typeof input.smtpSecure === "boolean" ? input.smtpSecure : provider === "gmail" ? smtpPort === 465 : smtpPort === 465;
+  const smtpUser = (input.smtpUser ?? prev?.smtpUser ?? "").trim();
+  const fromAddress = (input.fromAddress ?? prev?.fromAddress ?? (provider === "resend" ? "Foodora BD <onboarding@resend.dev>" : smtpUser ? `Foodora BD <${smtpUser}>` : "Foodora BD <orders@foodora.bd>")).trim();
+  const notifyEmail = (input.notifyEmail !== void 0 ? input.notifyEmail : prev?.notifyEmail ?? PRIMARY_SUPER_ADMIN_EMAIL).trim().toLowerCase();
+  const cleanedSmtpPass = input.smtpPass !== void 0 && input.smtpPass.trim() !== "" ? normalizeSmtpPassword(provider === "gmail" ? "gmail" : smtpHost, input.smtpPass) : "";
+  const nextSmtpPassEnc = cleanedSmtpPass ? encryptSecret(cleanedSmtpPass) : prev?.smtpPassEnc || "";
+  const nextResendKeyEnc = input.resendApiKey !== void 0 && input.resendApiKey.trim() !== "" ? encryptSecret(input.resendApiKey.trim()) : prev?.resendApiKeyEnc || "";
+  const payload = {
+    provider,
+    smtpHost,
+    smtpPort: Number.isFinite(smtpPort) ? smtpPort : 465,
+    smtpSecure,
+    smtpUser,
+    smtpPassEnc: nextSmtpPassEnc,
+    fromAddress,
+    notifyEmail,
+    resendApiKeyEnc: nextResendKeyEnc,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  await db.insert(localCredentials).values({
+    email: EMAIL_CONFIG_KEY,
+    uid: EMAIL_CONFIG_UID,
+    passwordHash: JSON.stringify(payload)
+  }).onConflictDoUpdate({
+    target: localCredentials.email,
+    set: { passwordHash: JSON.stringify(payload) }
+  });
+  return getAdminEmailSettingsView();
+}
+async function verifyEmailTransportConnection() {
+  const cfg = await resolveEffectiveConfig();
+  if (cfg.providerMode === "resend" && cfg.resendKey) {
+    return {
+      ok: true,
+      provider: "resend",
+      message: 'Resend API key is configured. Use "Send Test Invoice" to verify recipient inbox delivery.'
+    };
+  }
+  if (!cfg.smtpHost || !cfg.smtpUser || !cfg.smtpPass) {
+    return {
+      ok: false,
+      provider: "in_app_email_log",
+      message: "SMTP credentials not saved yet.",
+      error: "Enter Gmail/SMTP username and password in Admin -> Backend Control first."
+    };
+  }
+  const attempts = [
+    { port: Number.isFinite(cfg.smtpPort) ? cfg.smtpPort : 465, secure: cfg.smtpSecure }
+  ];
+  const altPort = cfg.smtpPort === 465 ? 587 : 465;
+  attempts.push({ port: altPort, secure: altPort === 465 });
+  let lastError = "";
+  for (const attempt of attempts) {
+    try {
+      const transporter = createSmtpTransporter({
+        host: cfg.smtpHost,
+        port: attempt.port,
+        secure: attempt.secure,
+        user: cfg.smtpUser,
+        pass: cfg.smtpPass
+      });
+      await transporter.verify();
+      return {
+        ok: true,
+        provider: "smtp",
+        portUsed: attempt.port,
+        message: `SMTP connection verified (${cfg.smtpHost}:${attempt.port} ${attempt.secure ? "SSL" : "STARTTLS"} as ${cfg.smtpUser}).`
+      };
+    } catch (err) {
+      lastError = formatSmtpFriendlyError(err);
+      if (lastError.toLowerCase().includes("rejected username or password")) {
+        break;
+      }
+    }
+  }
+  return {
+    ok: false,
+    provider: "smtp",
+    message: "SMTP verification failed.",
+    error: lastError || "Could not authenticate with SMTP server."
+  };
+}
+async function sendTransactionalEmail(params) {
+  const emailLower = String(params.to || "").trim().toLowerCase();
+  if (!emailLower || !emailLower.includes("@")) {
+    return {
+      ok: false,
+      provider: "in_app_email_log",
+      status: "invalid_recipient",
+      error: "Invalid recipient email address."
+    };
+  }
+  const cfg = await resolveEffectiveConfig();
+  let lastSmtpError = "";
+  if ((cfg.providerMode === "gmail" || cfg.providerMode === "smtp") && cfg.smtpHost && cfg.smtpUser && cfg.smtpPass) {
+    const attempts = [
+      { port: Number.isFinite(cfg.smtpPort) ? cfg.smtpPort : 465, secure: cfg.smtpSecure }
+    ];
+    const altPort = cfg.smtpPort === 465 ? 587 : 465;
+    attempts.push({ port: altPort, secure: altPort === 465 });
+    for (const attempt of attempts) {
+      try {
+        const transporter = createSmtpTransporter({
+          host: cfg.smtpHost,
+          port: attempt.port,
+          secure: attempt.secure,
+          user: cfg.smtpUser,
+          pass: cfg.smtpPass
+        });
+        await transporter.sendMail({
+          from: cfg.fromAddress || `Foodora BD <${cfg.smtpUser}>`,
+          to: emailLower,
+          subject: params.subject,
+          text: params.text,
+          html: params.html
+        });
+        return { ok: true, provider: "smtp", status: "sent" };
+      } catch (err) {
+        lastSmtpError = formatSmtpFriendlyError(err);
+        if (lastSmtpError.toLowerCase().includes("rejected username or password")) {
+          break;
+        }
+      }
+    }
+    console.warn("SMTP email dispatch failed:", lastSmtpError);
+    if (!cfg.resendKey) {
+      return {
+        ok: false,
+        provider: "smtp",
+        status: `smtp_error: ${lastSmtpError.slice(0, 120)}`,
+        error: lastSmtpError
+      };
+    }
+  }
+  if (cfg.resendKey) {
+    try {
+      const mailRes = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${cfg.resendKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          from: cfg.fromAddress || "Foodora BD <onboarding@resend.dev>",
+          to: [emailLower],
+          subject: params.subject,
+          html: params.html,
+          text: params.text
+        }),
+        signal: AbortSignal.timeout(8e3)
+      });
+      if (mailRes.ok) {
+        return { ok: true, provider: "resend", status: "sent" };
+      }
+      const errText = await mailRes.text().catch(() => "");
+      return {
+        ok: false,
+        provider: "resend",
+        status: `resend_error_http_${mailRes.status}`,
+        error: errText || lastSmtpError || `Resend returned HTTP ${mailRes.status}`
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Resend request timed out";
+      return {
+        ok: false,
+        provider: "resend",
+        status: `resend_error: ${message.slice(0, 120)}`,
+        error: lastSmtpError ? `${lastSmtpError} | Resend: ${message}` : message
+      };
+    }
+  }
+  return {
+    ok: false,
+    provider: "in_app_email_log",
+    status: "not_configured",
+    error: "Gmail SMTP or Resend API Key is not configured yet in Admin -> Backend Control."
+  };
+}
+async function sendTestEmail(toEmail, templateStatus = "confirmed") {
+  const cleanEmail = String(toEmail || "").trim().toLowerCase();
+  const payload = getOrderEmailTemplatePreview(
+    templateStatus || "confirmed",
+    process.env.PUBLIC_APP_URL || "https://foodora.bd",
+    cleanEmail
+  );
+  return sendTransactionalEmail({
+    to: cleanEmail,
+    subject: `[TEST] ${payload.subject}`,
+    html: payload.html,
+    text: payload.text
+  });
+}
+async function getRecentOrderEmailLogs(limit = 30) {
+  return db.select({
+    id: orderEmailLogs.id,
+    orderId: orderEmailLogs.orderId,
+    orderNumber: orderEmailLogs.orderNumber,
+    recipientEmail: orderEmailLogs.recipientEmail,
+    subject: orderEmailLogs.subject,
+    trackingUrl: orderEmailLogs.trackingUrl,
+    statusEvent: orderEmailLogs.statusEvent,
+    deliveryProvider: orderEmailLogs.deliveryProvider,
+    providerStatus: orderEmailLogs.providerStatus,
+    htmlPreview: orderEmailLogs.htmlPreview,
+    sentAt: orderEmailLogs.sentAt
+  }).from(orderEmailLogs).orderBy(desc2(orderEmailLogs.sentAt)).limit(Math.max(1, Math.min(100, limit)));
+}
+async function resendOrderEmailLog(logId) {
+  const rows = await db.select().from(orderEmailLogs).where(eq3(orderEmailLogs.id, logId)).limit(1);
+  if (rows.length === 0) {
+    return null;
+  }
+  const row = rows[0];
+  const html = row.htmlPreview || `<p>${row.subject}</p><p><a href="${row.trackingUrl}">${row.trackingUrl}</a></p>`;
+  const text2 = `${row.subject}
+Track order: ${row.trackingUrl}`;
+  const dispatchResult = await sendTransactionalEmail({
+    to: row.recipientEmail,
+    subject: row.subject,
+    html,
+    text: text2
+  });
+  const updated = await db.update(orderEmailLogs).set({
+    deliveryProvider: dispatchResult.provider,
+    providerStatus: dispatchResult.status,
+    sentAt: /* @__PURE__ */ new Date()
+  }).where(eq3(orderEmailLogs.id, row.id)).returning();
+  return {
+    ok: dispatchResult.ok,
+    dispatchResult,
+    log: updated[0] ?? row
   };
 }
 async function sendAndLogOrderTrackingEmail(params) {
@@ -3406,6 +4854,12 @@ async function sendAndLogOrderTrackingEmail(params) {
     restaurantName: params.restaurantName,
     deliveryArea: params.deliveryArea,
     deliveryAddress: params.deliveryAddress,
+    subtotal: params.subtotal,
+    discountAmount: params.discountAmount,
+    couponCode: params.couponCode,
+    deliveryFee: params.deliveryFee,
+    serviceFee: params.serviceFee,
+    taxAmount: params.taxAmount,
     totalAmount: params.totalAmount,
     paymentMethod: params.paymentMethod,
     paymentStatus: params.paymentStatus,
@@ -3414,73 +4868,15 @@ async function sendAndLogOrderTrackingEmail(params) {
     riderName: params.riderName,
     riderPhone: params.riderPhone,
     etaMinutes: params.etaMinutes,
+    createdAt: params.createdAt,
     items: params.items
   });
-  let deliveryProvider = "in_app_email_log";
-  let providerStatus = "recorded";
-  const smtpHost = (process.env.SMTP_HOST || "").trim();
-  const smtpUser = (process.env.SMTP_USER || "").trim();
-  const smtpPass = (process.env.SMTP_PASS || "").trim();
-  const smtpPort = Number(process.env.SMTP_PORT || 587);
-  const smtpSecure = process.env.SMTP_SECURE === "true" || !process.env.SMTP_SECURE && smtpPort === 465;
-  const resendKey = (process.env.RESEND_API_KEY || process.env.EMAIL_PROVIDER_API_KEY || "").trim();
-  if (smtpHost && smtpUser && smtpPass) {
-    try {
-      const transporter = nodemailer.createTransport({
-        host: smtpHost,
-        port: Number.isFinite(smtpPort) ? smtpPort : 587,
-        secure: smtpSecure,
-        auth: {
-          user: smtpUser,
-          pass: smtpPass
-        },
-        connectionTimeout: 6e3,
-        greetingTimeout: 6e3,
-        socketTimeout: 8e3
-      });
-      await transporter.sendMail({
-        from: (process.env.SMTP_FROM || `Foodora BD <${smtpUser}>`).trim(),
-        to: emailLower,
-        subject: payload.subject,
-        text: payload.text,
-        html: payload.html
-      });
-      deliveryProvider = "smtp";
-      providerStatus = "sent";
-    } catch (err) {
-      deliveryProvider = "smtp";
-      providerStatus = `fallback_recorded_smtp_error`;
-      console.warn("SMTP email dispatch failed, recorded in orderEmailLogs:", err instanceof Error ? err.message : err);
-    }
-  } else if (resendKey) {
-    try {
-      const mailRes = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          from: process.env.RESEND_FROM_EMAIL || "Foodora BD <onboarding@resend.dev>",
-          to: [emailLower],
-          subject: payload.subject,
-          html: payload.html,
-          text: payload.text
-        }),
-        signal: AbortSignal.timeout(5e3)
-      });
-      if (mailRes.ok) {
-        deliveryProvider = "resend";
-        providerStatus = "sent";
-      } else {
-        deliveryProvider = "resend";
-        providerStatus = `fallback_recorded_http_${mailRes.status}`;
-      }
-    } catch {
-      deliveryProvider = "in_app_email_log";
-      providerStatus = "recorded_offline_fallback";
-    }
-  }
+  const dispatchResult = await sendTransactionalEmail({
+    to: emailLower,
+    subject: payload.subject,
+    html: payload.html,
+    text: payload.text
+  });
   try {
     const inserted = await db.insert(orderEmailLogs).values({
       orderId: params.orderId,
@@ -3489,8 +4885,8 @@ async function sendAndLogOrderTrackingEmail(params) {
       subject: payload.subject,
       trackingUrl: payload.trackingUrl,
       statusEvent: params.statusEvent || params.status,
-      deliveryProvider,
-      providerStatus,
+      deliveryProvider: dispatchResult.provider,
+      providerStatus: dispatchResult.status,
       htmlPreview: payload.html
     }).returning();
     return inserted[0] ?? null;
@@ -3499,10 +4895,74 @@ async function sendAndLogOrderTrackingEmail(params) {
     return null;
   }
 }
+async function sendMerchantOrderAlertEmail(params) {
+  const status = await getEmailTransportStatus();
+  const stored = await readStoredConfig();
+  const configuredNotify = stored?.notifyEmail || (process.env.ORDER_ALERT_NOTIFY_EMAIL || "").trim() || PRIMARY_SUPER_ADMIN_EMAIL;
+  const recipients = collectMerchantOrderAlertRecipients({
+    restaurantEmail: params.restaurantEmail,
+    ownerEmail: params.ownerEmail,
+    adminNotifyEmail: configuredNotify,
+    fallbackAdminEmails: [PRIMARY_SUPER_ADMIN_EMAIL, "raqkibrony@gmail.com"]
+  });
+  if (recipients.length === 0) return [];
+  const payload = buildMerchantOrderAlertEmailPayload({
+    origin: params.origin,
+    orderId: params.orderId,
+    orderNumber: params.orderNumber,
+    trackingToken: params.trackingToken,
+    eventKind: params.eventKind,
+    restaurantName: params.restaurantName,
+    customerName: params.customerName,
+    customerPhone: params.customerPhone,
+    deliveryArea: params.deliveryArea,
+    deliveryAddress: params.deliveryAddress,
+    totalAmount: params.totalAmount,
+    paymentMethod: params.paymentMethod,
+    paymentStatus: params.paymentStatus,
+    status: params.status,
+    statusNote: params.statusNote,
+    riderName: params.riderName,
+    items: params.items
+  });
+  return Promise.allSettled(
+    recipients.map(async (to) => {
+      let dispatchResult = {
+        ok: false,
+        provider: "in_app_email_log",
+        status: "not_configured",
+        error: "SMTP not configured yet; email logged for audit."
+      };
+      if (status.configured) {
+        dispatchResult = await sendTransactionalEmail({
+          to,
+          subject: payload.subject,
+          html: payload.html,
+          text: payload.text
+        });
+      }
+      try {
+        await db.insert(orderEmailLogs).values({
+          orderId: params.orderId,
+          orderNumber: params.orderNumber,
+          recipientEmail: to,
+          subject: payload.subject,
+          trackingUrl: payload.trackingUrl,
+          statusEvent: `admin_alert_${params.eventKind}`,
+          deliveryProvider: dispatchResult.provider,
+          providerStatus: dispatchResult.status,
+          htmlPreview: payload.html
+        });
+      } catch (logErr) {
+      }
+      return dispatchResult;
+    })
+  );
+}
 
 // src/services/realtime.ts
 import { WebSocketServer, WebSocket } from "ws";
-import { eq as eq3 } from "drizzle-orm";
+import { eq as eq4 } from "drizzle-orm";
 var clients = /* @__PURE__ */ new Map();
 var wss = null;
 var heartbeatTimer = null;
@@ -3521,7 +4981,7 @@ async function resolveClientMetaFromQuery(params) {
         uid = user.uid;
         role = user.role;
         if (user.role === "restaurant_owner") {
-          const owned = await db.select({ id: restaurants.id }).from(restaurants).where(eq3(restaurants.ownerUid, user.uid));
+          const owned = await db.select({ id: restaurants.id }).from(restaurants).where(eq4(restaurants.ownerUid, user.uid));
           for (const r of owned) restaurantIds.add(r.id);
         }
       }
@@ -3535,7 +4995,7 @@ async function resolveClientMetaFromQuery(params) {
         customerUid: orders.customerUid,
         riderUid: orders.riderUid,
         trackingToken: orders.trackingToken
-      }).from(orders).where(eq3(orders.id, orderIdRaw)).limit(1);
+      }).from(orders).where(eq4(orders.id, orderIdRaw)).limit(1);
       const ord = rows[0];
       if (ord) {
         const isAdmin = role === "admin" || role === "super_admin";
@@ -3613,7 +5073,9 @@ async function attachSseRealtimeClient(res, params) {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders?.();
+  res.write("retry: 2000\n: stream-ready\n\n");
   const meta = {
     id: clientId,
     uid: auth.uid,
@@ -3689,15 +5151,15 @@ function broadcastNotificationEvent(payload) {
     payload,
     ts: Date.now()
   });
+  const recipient = String(payload.recipientUid || "").trim();
+  const isGlobalBroadcast = recipient === "broadcast-all" || !recipient && payload.roleTarget === "all";
+  const isExplicitRoleBroadcast = Boolean(payload.roleTarget) && (!recipient || recipient.startsWith("role-") || recipient === "demo-admin-uid");
   for (const client of clients.values()) {
-    const matchesUid = Boolean(
-      payload.recipientUid && client.uid && client.uid === payload.recipientUid
+    const matchesUid = Boolean(recipient && client.uid && client.uid === recipient);
+    const matchesRoleBroadcast = Boolean(
+      isExplicitRoleBroadcast && payload.roleTarget && client.role && (client.role === payload.roleTarget || (client.role === "admin" || client.role === "super_admin") && (payload.roleTarget === "admin" || payload.roleTarget === "super_admin"))
     );
-    const matchesRole = Boolean(
-      payload.roleTarget && (payload.roleTarget === "all" || client.role && client.role === payload.roleTarget)
-    );
-    const isAdmin = client.role === "admin" || client.role === "super_admin";
-    if (matchesUid || matchesRole || isAdmin && payload.roleTarget === "super_admin") {
+    if (matchesUid || isGlobalBroadcast || matchesRoleBroadcast) {
       try {
         client.send(serialized);
       } catch {
@@ -3708,7 +5170,7 @@ function broadcastNotificationEvent(payload) {
 }
 
 // src/services/payments.ts
-import crypto2 from "node:crypto";
+import crypto3 from "node:crypto";
 function getGatewayAvailability() {
   return {
     bkash: {
@@ -3736,7 +5198,7 @@ function isEnvConfiguredForGateway(code) {
 }
 function initiatePaymentSession(method, orderNumber, amountBdt, gatewayRow) {
   const cleanCode = normalizeGatewayCode(method) || "cod";
-  const rand = crypto2.randomBytes(4).toString("hex").toUpperCase();
+  const rand = crypto3.randomBytes(4).toString("hex").toUpperCase();
   if (cleanCode === "cod") {
     return {
       gateway: "cod",
@@ -3860,14 +5322,14 @@ async function settleOrderCommissionIdempotent(orderId) {
   await db.transaction(async (tx) => {
     const existing = await tx.select().from(commissionLedger).where(
       and2(
-        eq4(commissionLedger.orderId, orderId),
-        eq4(commissionLedger.entryType, "commission_earned")
+        eq5(commissionLedger.orderId, orderId),
+        eq5(commissionLedger.entryType, "commission_earned")
       )
     ).limit(1);
     if (existing.length > 0) {
       return;
     }
-    const orderRows = await tx.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
+    const orderRows = await tx.select().from(orders).where(eq5(orders.id, orderId)).limit(1);
     if (orderRows.length === 0) return;
     const order = orderRows[0];
     await tx.insert(commissionLedger).values({
@@ -3926,22 +5388,27 @@ app.get("/api/public-config", async (_req, res) => {
       db.select({
         id: orders.id,
         orderNumber: orders.orderNumber,
+        trackingToken: orders.trackingToken,
         restaurantName: orders.restaurantName,
         estimatedMinutes: orders.estimatedMinutes
-      }).from(orders).where(and2(ne(orders.status, "delivered"), ne(orders.status, "cancelled"))).orderBy(desc2(orders.createdAt)).limit(1).catch(() => [])
+      }).from(orders).where(and2(ne(orders.status, "delivered"), ne(orders.status, "cancelled"))).orderBy(desc3(orders.createdAt)).limit(30).catch(() => [])
     ]);
     const paymentGatewaysList = gatewayRows.map(
       (row) => toPublicPaymentGatewayView(row, isEnvConfiguredForGateway(row.code))
     );
-    const activeRow = activeOrderRows[0];
+    const emailTransport = await getEmailTransportStatus();
+    const sc = mergeStorefrontConfig(settings?.storefrontConfig);
+    const pinnedId = Number(sc.featuredActiveOrderId);
+    const activeRow = sc.showActiveDeliveryBar === false ? void 0 : (Number.isInteger(pinnedId) && pinnedId > 0 ? activeOrderRows.find((r) => r.id === pinnedId) : void 0) || activeOrderRows[0];
     res.json({
       mapsApiKey: process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || "",
       gateways: getGatewayAvailability(),
       paymentGateways: paymentGatewaysList,
-      emailTransport: getEmailTransportStatus(),
+      emailTransport,
       settings,
       featuredActiveOrder: activeRow ? {
         orderId: activeRow.id,
+        trackingToken: activeRow.trackingToken,
         orderNumber: activeRow.orderNumber,
         restaurantName: activeRow.restaurantName,
         estimatedMinutes: activeRow.estimatedMinutes
@@ -4001,17 +5468,17 @@ app.post("/api/auth/sandbox-session", async (req, res) => {
   res.json({ token, user: { ...p, isSandbox: true } });
 });
 function hashPasswordScrypt(password) {
-  const salt = crypto3.randomBytes(16).toString("hex");
-  const hash = crypto3.scryptSync(password, salt, 64).toString("hex");
+  const salt = crypto4.randomBytes(16).toString("hex");
+  const hash = crypto4.scryptSync(password, salt, 64).toString("hex");
   return `${salt}:${hash}`;
 }
 function verifyPasswordScrypt(password, stored) {
   const [salt, keyHex] = stored.split(":");
   if (!salt || !keyHex) return false;
-  const derived = crypto3.scryptSync(password, salt, 64);
+  const derived = crypto4.scryptSync(password, salt, 64);
   const storedBuf = Buffer.from(keyHex, "hex");
   if (derived.length !== storedBuf.length) return false;
-  return crypto3.timingSafeEqual(derived, storedBuf);
+  return crypto4.timingSafeEqual(derived, storedBuf);
 }
 var ADMIN_PIN_VAULT_KEY = "__admin_panel_pin__";
 var ADMIN_PIN_EMAIL_PREFIX = "__admin_pin__:";
@@ -4022,7 +5489,7 @@ function getFallbackAdminPin() {
   return process.env.ADMIN_ACCESS_PIN || "2026";
 }
 async function verifyAdminPinValue(pin) {
-  const rows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq4(localCredentials.email, ADMIN_PIN_VAULT_KEY)).limit(1);
+  const rows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq5(localCredentials.email, ADMIN_PIN_VAULT_KEY)).limit(1);
   if (rows.length > 0) {
     return verifyPasswordScrypt(pin, rows[0].passwordHash);
   }
@@ -4030,12 +5497,12 @@ async function verifyAdminPinValue(pin) {
   const a = Buffer.from(pin, "utf8");
   const b = Buffer.from(fallback, "utf8");
   if (a.length !== b.length) return false;
-  return crypto3.timingSafeEqual(a, b);
+  return crypto4.timingSafeEqual(a, b);
 }
 async function verifyAdminPinForEmail(email, pin) {
   const normalized = email.trim().toLowerCase();
   if (!normalized) return false;
-  const specificRows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq4(localCredentials.email, adminPinKeyForEmail(normalized))).limit(1);
+  const specificRows = await db.select({ passwordHash: localCredentials.passwordHash }).from(localCredentials).where(eq5(localCredentials.email, adminPinKeyForEmail(normalized))).limit(1);
   if (specificRows.length > 0) {
     return verifyPasswordScrypt(pin, specificRows[0].passwordHash);
   }
@@ -4067,11 +5534,11 @@ app.post("/api/auth/admin-pin", async (req, res) => {
     let dbUser = existingRows[0];
     if (dbUser) {
       if (dbUser.role !== assignedRole) {
-        const updated = await db.update(users).set({ role: assignedRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq4(users.id, dbUser.id)).returning();
+        const updated = await db.update(users).set({ role: assignedRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq5(users.id, dbUser.id)).returning();
         dbUser = updated[0];
       }
     } else {
-      const uid = `adm-${crypto3.randomBytes(8).toString("hex")}`;
+      const uid = `adm-${crypto4.randomBytes(8).toString("hex")}`;
       const defaultName = targetEmail === ADMIN_PIN_DEFAULT_EMAIL ? "Raqib Rony (Admin)" : targetEmail.split("@")[0];
       dbUser = await getOrCreateUser(uid, targetEmail, defaultName, assignedRole);
     }
@@ -4129,7 +5596,7 @@ app.post(
       }
       const nextHash = hashPasswordScrypt(parsed.data.newPin);
       const pinKey = adminPinKeyForEmail(targetEmail);
-      const pinUid = `admin-pin-${crypto3.createHash("sha256").update(targetEmail).digest("hex").slice(0, 16)}`;
+      const pinUid = `admin-pin-${crypto4.createHash("sha256").update(targetEmail).digest("hex").slice(0, 16)}`;
       await db.insert(localCredentials).values({
         email: pinKey,
         uid: pinUid,
@@ -4142,11 +5609,11 @@ app.post(
       const targetRole = isProtectedSuperAdminEmail(targetEmail) ? "super_admin" : existingTarget[0]?.role === "super_admin" ? "super_admin" : "admin";
       if (existingTarget.length > 0) {
         if (existingTarget[0].role !== targetRole) {
-          await db.update(users).set({ role: targetRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq4(users.id, existingTarget[0].id));
+          await db.update(users).set({ role: targetRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq5(users.id, existingTarget[0].id));
         }
       } else {
         await getOrCreateUser(
-          `adm-${crypto3.randomBytes(8).toString("hex")}`,
+          `adm-${crypto4.randomBytes(8).toString("hex")}`,
           targetEmail,
           targetEmail === ADMIN_PIN_DEFAULT_EMAIL ? "Raqib Rony (Admin)" : targetEmail.split("@")[0],
           targetRole
@@ -4193,7 +5660,7 @@ app.post("/api/auth/register", async (req, res) => {
   const fullName = parsed.data.fullName.trim();
   const requestedRole = parsed.data.role || "customer";
   const attemptRegister = async () => {
-    const existingCred = await db.select({ uid: localCredentials.uid }).from(localCredentials).where(eq4(localCredentials.email, emailLower)).limit(1);
+    const existingCred = await db.select({ uid: localCredentials.uid }).from(localCredentials).where(eq5(localCredentials.email, emailLower)).limit(1);
     if (existingCred.length > 0) {
       return { status: 409, body: { error: "An account with this email already exists. Please sign in." } };
     }
@@ -4206,7 +5673,7 @@ app.post("/api/auth/register", async (req, res) => {
         }
       };
     }
-    const uid = `usr-${crypto3.randomBytes(8).toString("hex")}`;
+    const uid = `usr-${crypto4.randomBytes(8).toString("hex")}`;
     const role = isProtectedSuperAdminEmail(emailLower) ? "super_admin" : requestedRole;
     const passwordHash = hashPasswordScrypt(parsed.data.password);
     await db.transaction(async (tx) => {
@@ -4275,7 +5742,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
   const emailLower = parsed.data.email.trim().toLowerCase();
   const attemptLogin = async () => {
-    const credRows = await db.select().from(localCredentials).where(eq4(localCredentials.email, emailLower)).limit(1);
+    const credRows = await db.select().from(localCredentials).where(eq5(localCredentials.email, emailLower)).limit(1);
     if (credRows.length === 0) {
       try {
         const { data: supaAuth, error: supaErr } = await supabaseServer.auth.signInWithPassword({
@@ -4316,7 +5783,7 @@ app.post("/api/auth/login", async (req, res) => {
     if (!verifyPasswordScrypt(parsed.data.password, storedHash)) {
       return { status: 401, body: { error: "Incorrect password. Please try again." } };
     }
-    const userRows = await db.select().from(users).where(eq4(users.uid, uid)).limit(1);
+    const userRows = await db.select().from(users).where(eq5(users.uid, uid)).limit(1);
     const dbUser = userRows[0];
     if (dbUser?.status === "suspended") {
       return { status: 403, body: { error: "This account has been suspended by an administrator." } };
@@ -4367,7 +5834,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   try {
     const [existingUsers, existingCreds] = await Promise.all([
       db.select().from(users).where(sql3`lower(${users.email}) = ${emailLower}`).limit(1),
-      db.select().from(localCredentials).where(eq4(localCredentials.email, emailLower)).limit(1)
+      db.select().from(localCredentials).where(eq5(localCredentials.email, emailLower)).limit(1)
     ]);
     const userRow = existingUsers[0];
     if (!userRow && existingCreds.length === 0) {
@@ -4394,11 +5861,11 @@ app.post("/api/auth/forgot-password", async (req, res) => {
         message: "Admin account verified. Enter your Admin PIN below (or open the password reset link in your email) to set a new password."
       });
     }
-    const otp = String(crypto3.randomInt(1e5, 1e6));
+    const otp = String(crypto4.randomInt(1e5, 1e6));
     const expiresAt = Date.now() + 15 * 60 * 1e3;
     const otpHash = hashPasswordScrypt(otp);
     const resetKey = pwResetKeyForEmail(emailLower);
-    const resetUid = `pw-reset-${crypto3.createHash("sha256").update(emailLower).digest("hex").slice(0, 16)}`;
+    const resetUid = `pw-reset-${crypto4.createHash("sha256").update(emailLower).digest("hex").slice(0, 16)}`;
     await db.insert(localCredentials).values({
       email: resetKey,
       uid: resetUid,
@@ -4407,30 +5874,21 @@ app.post("/api/auth/forgot-password", async (req, res) => {
       target: localCredentials.email,
       set: { passwordHash: `${expiresAt}|${otpHash}` }
     });
-    if (process.env.RESEND_API_KEY) {
-      try {
-        const mailRes = await fetch("https://api.resend.com/emails", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            from: process.env.RESEND_FROM_EMAIL || "Foodora BD <no-reply@foodora.bd>",
-            to: [emailLower],
-            subject: "Foodora BD Password Reset Code",
-            html: `<p>Your Foodora BD password reset code is <strong>${otp}</strong>. It expires in 15 minutes.</p>`
-          })
+    const emailTransport = await getEmailTransportStatus();
+    if (emailTransport.configured) {
+      const otpDispatch = await sendTransactionalEmail({
+        to: emailLower,
+        subject: "Foodora BD Password Reset Code",
+        html: `<p>Your Foodora BD password reset code is <strong>${otp}</strong>. It expires in 15 minutes.</p>`,
+        text: `Your Foodora BD password reset code is ${otp}. It expires in 15 minutes.`
+      });
+      if (otpDispatch.ok) {
+        return res.json({
+          ok: true,
+          mode: "email",
+          isAdminAccount: false,
+          message: "A 6-digit password reset code has been sent to your email address."
         });
-        if (mailRes.ok) {
-          return res.json({
-            ok: true,
-            mode: "email",
-            isAdminAccount: false,
-            message: "A 6-digit password reset code has been sent to your email address."
-          });
-        }
-      } catch {
       }
     }
     return res.json({
@@ -4461,7 +5919,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
   try {
     const [existingUsers, existingCreds] = await Promise.all([
       db.select().from(users).where(sql3`lower(${users.email}) = ${emailLower}`).limit(1),
-      db.select().from(localCredentials).where(eq4(localCredentials.email, emailLower)).limit(1)
+      db.select().from(localCredentials).where(eq5(localCredentials.email, emailLower)).limit(1)
     ]);
     const userRow = existingUsers[0];
     if (!userRow && existingCreds.length === 0) {
@@ -4480,7 +5938,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
       }
     } else {
       const resetKey = pwResetKeyForEmail(emailLower);
-      const tokenRows = await db.select().from(localCredentials).where(eq4(localCredentials.email, resetKey)).limit(1);
+      const tokenRows = await db.select().from(localCredentials).where(eq5(localCredentials.email, resetKey)).limit(1);
       if (tokenRows.length === 0) {
         return res.status(401).json({
           error: "Reset code not found or already used. Please request a new code."
@@ -4490,14 +5948,14 @@ app.post("/api/auth/reset-password", async (req, res) => {
       const expMs = Number(sepIdx > 0 ? tokenRows[0].passwordHash.slice(0, sepIdx) : "0");
       const storedOtpHash = sepIdx > 0 ? tokenRows[0].passwordHash.slice(sepIdx + 1) : "";
       if (!expMs || expMs < Date.now()) {
-        await db.delete(localCredentials).where(eq4(localCredentials.email, resetKey));
+        await db.delete(localCredentials).where(eq5(localCredentials.email, resetKey));
         return res.status(401).json({ error: "Reset code has expired. Please request a new one." });
       }
       if (!verifyPasswordScrypt(parsed.data.code, storedOtpHash)) {
         return res.status(401).json({ error: "Invalid verification code. Please check and try again." });
       }
     }
-    const uid = userRow?.uid || existingCreds[0]?.uid || `usr-${crypto3.randomBytes(8).toString("hex")}`;
+    const uid = userRow?.uid || existingCreds[0]?.uid || `usr-${crypto4.randomBytes(8).toString("hex")}`;
     const role = isProtectedSuperAdminEmail(emailLower) ? "super_admin" : userRow?.role || "customer";
     const fullName = userRow?.fullName || emailLower.split("@")[0];
     const nextPasswordHash = hashPasswordScrypt(parsed.data.newPassword);
@@ -4518,7 +5976,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
           role
         }).onConflictDoNothing();
       }
-      await tx.delete(localCredentials).where(eq4(localCredentials.email, pwResetKeyForEmail(emailLower)));
+      await tx.delete(localCredentials).where(eq5(localCredentials.email, pwResetKeyForEmail(emailLower)));
     });
     try {
       await db.insert(auditLogs).values({
@@ -4612,7 +6070,7 @@ app.post("/api/coupons/validate", async (req, res) => {
     return res.status(400).json({ error: "Invalid coupon request" });
   }
   try {
-    const rows = await db.select().from(coupons).where(eq4(coupons.code, parsed.data.code.trim().toUpperCase())).limit(1);
+    const rows = await db.select().from(coupons).where(eq5(coupons.code, parsed.data.code.trim().toUpperCase())).limit(1);
     if (rows.length === 0) {
       return res.status(404).json({ valid: false, reason: "Coupon code not found" });
     }
@@ -4647,7 +6105,9 @@ app.get("/api/free/weather", async (req, res) => {
 app.get("/api/free/geocode", async (req, res) => {
   const q = String(req.query.q || "").trim();
   if (!q) return res.json({ places: [] });
-  const places = await searchOsmPlaces(q);
+  const lat = req.query.lat !== void 0 ? Number(req.query.lat) : void 0;
+  const lng = req.query.lng !== void 0 ? Number(req.query.lng) : void 0;
+  const places = await searchOsmPlaces(q, { lat, lng });
   res.json({ places });
 });
 app.get("/api/free/reverse-geocode", async (req, res) => {
@@ -4689,7 +6149,7 @@ app.post("/api/delivery/quote", async (req, res) => {
     return res.status(400).json({ error: "Invalid delivery quote parameters" });
   }
   try {
-    const rows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
+    const rows = await db.select().from(restaurants).where(eq5(restaurants.id, parsed.data.restaurantId)).limit(1);
     if (rows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
     const rest = rows[0];
     const provider = getDeliveryProvider(parsed.data.deliveryMode);
@@ -4809,7 +6269,7 @@ app.get("/api/orders/track-by-email", async (req, res) => {
       const ord = matched[0];
       let matches = doesEmailMatchOrder(ord.customerEmail, email);
       if (!matches && ord.customerUid) {
-        const custUsers = await db.select().from(users).where(eq4(users.uid, ord.customerUid)).limit(1);
+        const custUsers = await db.select().from(users).where(eq5(users.uid, ord.customerUid)).limit(1);
         if (custUsers[0] && doesEmailMatchOrder(custUsers[0].email, email)) {
           matches = true;
         }
@@ -4820,11 +6280,11 @@ app.get("/api/orders/track-by-email", async (req, res) => {
         });
       }
     } else {
-      matched = await db.select().from(orders).where(sql3`lower(${orders.customerEmail}) = ${email}`).orderBy(desc2(orders.createdAt)).limit(1);
+      matched = await db.select().from(orders).where(sql3`lower(${orders.customerEmail}) = ${email}`).orderBy(desc3(orders.createdAt)).limit(1);
       if (matched.length === 0) {
         const custUsers = await db.select().from(users).where(sql3`lower(${users.email}) = ${email}`).limit(1);
         if (custUsers[0]) {
-          matched = await db.select().from(orders).where(eq4(orders.customerUid, custUsers[0].uid)).orderBy(desc2(orders.createdAt)).limit(1);
+          matched = await db.select().from(orders).where(eq5(orders.customerUid, custUsers[0].uid)).orderBy(desc3(orders.createdAt)).limit(1);
         }
       }
       if (matched.length === 0) {
@@ -4884,7 +6344,7 @@ app.post("/api/orders/:id/send-tracking-email", optionalAuth, async (req, res) =
     return res.status(400).json({ error: "Please enter a valid email address." });
   }
   try {
-    const orderRows = await db.select().from(orders).where(eq4(orders.id, id)).limit(1);
+    const orderRows = await db.select().from(orders).where(eq5(orders.id, id)).limit(1);
     if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
     let order = orderRows[0];
     const isAdmin = req.user?.role === "super_admin" || req.user?.role === "admin";
@@ -4899,40 +6359,51 @@ app.post("/api/orders/:id/send-tracking-email", optionalAuth, async (req, res) =
     if (!targetEmail || !targetEmail.includes("@")) {
       return res.status(400).json({ error: "Please provide an email address for tracking updates." });
     }
-    const nextToken = order.trackingToken || crypto3.randomBytes(12).toString("hex");
+    const nextToken = order.trackingToken || crypto4.randomBytes(12).toString("hex");
     if (targetEmail !== order.customerEmail || nextToken !== order.trackingToken) {
-      const upd = await db.update(orders).set({ customerEmail: targetEmail, trackingToken: nextToken, updatedAt: /* @__PURE__ */ new Date() }).where(eq4(orders.id, order.id)).returning();
+      const upd = await db.update(orders).set({ customerEmail: targetEmail, trackingToken: nextToken, updatedAt: /* @__PURE__ */ new Date() }).where(eq5(orders.id, order.id)).returning();
       order = upd[0] || order;
     }
     const [restRows, riderRows] = await Promise.all([
-      db.select({ lat: restaurants.lat, lng: restaurants.lng }).from(restaurants).where(eq4(restaurants.id, order.restaurantId)).limit(1),
-      order.riderUid ? db.select({ phone: riders.phone }).from(riders).where(eq4(riders.uid, order.riderUid)).limit(1) : Promise.resolve([])
+      db.select({ lat: restaurants.lat, lng: restaurants.lng }).from(restaurants).where(eq5(restaurants.id, order.restaurantId)).limit(1),
+      order.riderUid ? db.select({ phone: riders.phone }).from(riders).where(eq5(riders.uid, order.riderUid)).limit(1) : Promise.resolve([])
     ]);
-    const emailLog = await sendAndLogOrderTrackingEmail({
-      origin: getRequestOrigin(req),
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      trackingToken: nextToken,
-      customerName: order.customerName,
-      customerEmail: targetEmail,
-      restaurantName: order.restaurantName,
-      deliveryArea: order.deliveryArea,
-      deliveryAddress: order.deliveryAddress,
-      totalAmount: order.totalAmount,
-      paymentMethod: order.paymentMethod,
-      paymentStatus: order.paymentStatus,
-      status: order.status,
-      statusEvent: order.status,
-      statusNote: `Live tracking update requested (${order.status.replace(/_/g, " ")})`,
-      riderName: order.riderName,
-      riderPhone: riderRows[0]?.phone || null,
-      etaMinutes: order.estimatedMinutes,
-      items: order.itemsSnapshotJson
-    });
+    const [emailLog, emailTransport] = await Promise.all([
+      sendAndLogOrderTrackingEmail({
+        origin: getRequestOrigin(req),
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        trackingToken: nextToken,
+        customerName: order.customerName,
+        customerEmail: targetEmail,
+        restaurantName: order.restaurantName,
+        deliveryArea: order.deliveryArea,
+        deliveryAddress: order.deliveryAddress,
+        subtotal: order.subtotal,
+        discountAmount: order.discountAmount,
+        couponCode: order.couponCode,
+        deliveryFee: order.deliveryFee,
+        serviceFee: order.serviceFee,
+        taxAmount: order.taxAmount,
+        totalAmount: order.totalAmount,
+        paymentMethod: order.paymentMethod,
+        paymentStatus: order.paymentStatus,
+        status: order.status,
+        statusEvent: order.status,
+        statusNote: `Live tracking update requested (${order.status.replace(/_/g, " ")})`,
+        riderName: order.riderName,
+        riderPhone: riderRows[0]?.phone || null,
+        etaMinutes: order.estimatedMinutes,
+        createdAt: order.createdAt,
+        items: order.itemsSnapshotJson
+      }),
+      getEmailTransportStatus()
+    ]);
     return res.json({
       ok: true,
       customerEmail: targetEmail,
       emailLog,
+      emailTransport,
       trackingUrl: emailLog?.trackingUrl || "",
       restaurantLat: restRows[0]?.lat ?? null
     });
@@ -4970,7 +6441,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
   }
   const input = parsed.data;
   const resolvedCustomerEmail = (input.customerEmail?.trim() || (req.user.email && req.user.email.includes("@") ? req.user.email : "")).trim().toLowerCase();
-  const trackingToken = crypto3.randomBytes(12).toString("hex");
+  const trackingToken = crypto4.randomBytes(12).toString("hex");
   const normalizedMethod = normalizeGatewayCode(input.paymentMethod);
   try {
     const gatewayRows = await ensureDefaultPaymentGateways();
@@ -4983,7 +6454,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       });
     }
     const created = await db.transaction(async (tx) => {
-      const restRows = await tx.select().from(restaurants).where(eq4(restaurants.id, input.restaurantId)).limit(1);
+      const restRows = await tx.select().from(restaurants).where(eq5(restaurants.id, input.restaurantId)).limit(1);
       if (restRows.length === 0) throw new Error("Restaurant not found");
       const rest = restRows[0];
       if (rest.status !== "approved" || !rest.isOpen) {
@@ -4991,7 +6462,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
           buildRestaurantUnavailableMessage(rest.name, rest.status, rest.isOpen, "en")
         );
       }
-      const dbMenu = await tx.select().from(foodItems).where(eq4(foodItems.restaurantId, rest.id));
+      const dbMenu = await tx.select().from(foodItems).where(eq5(foodItems.restaurantId, rest.id));
       const snapshotItems = [];
       let subtotal = 0;
       for (const reqItem of input.items) {
@@ -5051,7 +6522,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       let deliveryFeeAfterCoupon = quote.fee;
       let appliedCouponCode = "";
       if (input.couponCode && input.couponCode.trim()) {
-        const cRows = await tx.select().from(coupons).where(eq4(coupons.code, input.couponCode.trim().toUpperCase())).limit(1);
+        const cRows = await tx.select().from(coupons).where(eq5(coupons.code, input.couponCode.trim().toUpperCase())).limit(1);
         if (cRows.length > 0) {
           const c = cRows[0];
           const evalRes = evaluateCoupon(
@@ -5074,7 +6545,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
             discountAmount = evalRes.discountAmount;
             deliveryFeeAfterCoupon = evalRes.deliveryFeeAfterCoupon;
             appliedCouponCode = c.code;
-            await tx.update(coupons).set({ usedCount: sql3`${coupons.usedCount} + 1` }).where(eq4(coupons.id, c.id));
+            await tx.update(coupons).set({ usedCount: sql3`${coupons.usedCount} + 1` }).where(eq5(coupons.id, c.id));
           }
         }
       }
@@ -5162,6 +6633,14 @@ app.post("/api/orders", requireAuth, async (req, res) => {
           relatedOrderId: newOrder.id
         },
         {
+          recipientUid: "role-super_admin",
+          roleTarget: "super_admin",
+          title: `New Order ${newOrder.orderNumber} \xB7 ${rest.name}`,
+          message: `\u09F3${newOrder.totalAmount} order from ${input.customerName} (${input.deliveryArea})`,
+          type: "order",
+          relatedOrderId: newOrder.id
+        },
+        {
           recipientUid: req.user.uid,
           roleTarget: "customer",
           title: `Order ${newOrder.orderNumber} Confirmed`,
@@ -5170,27 +6649,64 @@ app.post("/api/orders", requireAuth, async (req, res) => {
           relatedOrderId: newOrder.id
         }
       ]);
-      return { order: newOrder, paymentSession: paymentInit, deliveryDispatch, restaurantOwnerUid: rest.ownerUid };
+      return {
+        order: newOrder,
+        paymentSession: paymentInit,
+        deliveryDispatch,
+        restaurantOwnerUid: rest.ownerUid,
+        restaurantEmail: rest.email
+      };
     });
-    const emailLog = resolvedCustomerEmail ? await sendAndLogOrderTrackingEmail({
-      origin: getRequestOrigin(req),
-      orderId: created.order.id,
-      orderNumber: created.order.orderNumber,
-      trackingToken: created.order.trackingToken,
-      customerName: created.order.customerName,
-      customerEmail: resolvedCustomerEmail,
-      restaurantName: created.order.restaurantName,
-      deliveryArea: created.order.deliveryArea,
-      deliveryAddress: created.order.deliveryAddress,
-      totalAmount: created.order.totalAmount,
-      paymentMethod: created.order.paymentMethod,
-      paymentStatus: created.order.paymentStatus,
-      status: created.order.status,
-      statusEvent: "confirmed",
-      statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`,
-      etaMinutes: created.order.estimatedMinutes,
-      items: created.order.itemsSnapshotJson
-    }) : null;
+    const ownerEmailRows = created.restaurantOwnerUid ? await db.select({ email: users.email }).from(users).where(eq5(users.uid, created.restaurantOwnerUid)).limit(1) : [];
+    const [emailLog, emailTransport] = await Promise.all([
+      resolvedCustomerEmail ? sendAndLogOrderTrackingEmail({
+        origin: getRequestOrigin(req),
+        orderId: created.order.id,
+        orderNumber: created.order.orderNumber,
+        trackingToken: created.order.trackingToken,
+        customerName: created.order.customerName,
+        customerEmail: resolvedCustomerEmail,
+        restaurantName: created.order.restaurantName,
+        deliveryArea: created.order.deliveryArea,
+        deliveryAddress: created.order.deliveryAddress,
+        subtotal: created.order.subtotal,
+        discountAmount: created.order.discountAmount,
+        couponCode: created.order.couponCode,
+        deliveryFee: created.order.deliveryFee,
+        serviceFee: created.order.serviceFee,
+        taxAmount: created.order.taxAmount,
+        totalAmount: created.order.totalAmount,
+        paymentMethod: created.order.paymentMethod,
+        paymentStatus: created.order.paymentStatus,
+        status: created.order.status,
+        statusEvent: "confirmed",
+        statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`,
+        etaMinutes: created.order.estimatedMinutes,
+        createdAt: created.order.createdAt,
+        items: created.order.itemsSnapshotJson
+      }) : Promise.resolve(null),
+      getEmailTransportStatus(),
+      sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: created.order.id,
+        orderNumber: created.order.orderNumber,
+        trackingToken: created.order.trackingToken,
+        eventKind: "new_order",
+        restaurantName: created.order.restaurantName,
+        restaurantEmail: created.restaurantEmail,
+        ownerEmail: ownerEmailRows[0]?.email || null,
+        customerName: created.order.customerName,
+        customerPhone: created.order.customerPhone,
+        deliveryArea: created.order.deliveryArea,
+        deliveryAddress: created.order.deliveryAddress,
+        totalAmount: created.order.totalAmount,
+        paymentMethod: created.order.paymentMethod,
+        paymentStatus: created.order.paymentStatus,
+        status: created.order.status,
+        statusNote: `Order placed via ${input.paymentMethod.toUpperCase()}`,
+        items: created.order.itemsSnapshotJson
+      }).catch(() => [])
+    ]);
     broadcastOrderEvent("order:created", {
       orderId: created.order.id,
       orderNumber: created.order.orderNumber,
@@ -5213,6 +6729,14 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       relatedOrderId: created.order.id
     });
     broadcastNotificationEvent({
+      recipientUid: "role-super_admin",
+      roleTarget: "super_admin",
+      title: `New Order ${created.order.orderNumber} \xB7 ${created.order.restaurantName}`,
+      message: `\u09F3${created.order.totalAmount} order from ${created.order.customerName} (${created.order.deliveryArea})`,
+      type: "order",
+      relatedOrderId: created.order.id
+    });
+    broadcastNotificationEvent({
       recipientUid: created.order.customerUid,
       roleTarget: "customer",
       title: `Order ${created.order.orderNumber} Confirmed`,
@@ -5220,7 +6744,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       type: "order",
       relatedOrderId: created.order.id
     });
-    res.status(201).json({ ...created, emailLog });
+    res.status(201).json({ ...created, emailLog, emailTransport });
   } catch (error) {
     console.error("Order creation failed:", error);
     res.status(400).json({ error: error.message || "Could not place order" });
@@ -5234,7 +6758,7 @@ app.post("/api/payments/verify", requireAuth, async (req, res) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid verification payload" });
   try {
-    const orderRows = await db.select().from(orders).where(eq4(orders.id, parsed.data.orderId)).limit(1);
+    const orderRows = await db.select().from(orders).where(eq5(orders.id, parsed.data.orderId)).limit(1);
     if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
     const order = orderRows[0];
     if (order.paymentStatus === "paid") {
@@ -5257,24 +6781,35 @@ app.post("/api/payments/verify", requireAuth, async (req, res) => {
       paymentStatus: "paid",
       paymentTxId: verification.transactionId,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(eq4(orders.id, order.id)).returning();
+    }).where(eq5(orders.id, order.id)).returning();
     await db.insert(orderStatusHistory).values({
       orderId: order.id,
       status: order.status,
       note: verification.message,
       actorUid: req.user.uid
     });
-    if (updated[0].customerEmail) {
+    const restRowsForBroadcast = await db.select({ ownerUid: restaurants.ownerUid }).from(restaurants).where(eq5(restaurants.id, updated[0].restaurantId)).limit(1);
+    const verifyRecipientEmail = await resolveCustomerEmailForOrder(
+      updated[0].customerEmail,
+      updated[0].customerUid
+    );
+    if (verifyRecipientEmail) {
       await sendAndLogOrderTrackingEmail({
         origin: getRequestOrigin(req),
         orderId: updated[0].id,
         orderNumber: updated[0].orderNumber,
         trackingToken: updated[0].trackingToken,
         customerName: updated[0].customerName,
-        customerEmail: updated[0].customerEmail,
+        customerEmail: verifyRecipientEmail,
         restaurantName: updated[0].restaurantName,
         deliveryArea: updated[0].deliveryArea,
         deliveryAddress: updated[0].deliveryAddress,
+        subtotal: updated[0].subtotal,
+        discountAmount: updated[0].discountAmount,
+        couponCode: updated[0].couponCode,
+        deliveryFee: updated[0].deliveryFee,
+        serviceFee: updated[0].serviceFee,
+        taxAmount: updated[0].taxAmount,
         totalAmount: updated[0].totalAmount,
         paymentMethod: updated[0].paymentMethod,
         paymentStatus: updated[0].paymentStatus,
@@ -5283,6 +6818,7 @@ app.post("/api/payments/verify", requireAuth, async (req, res) => {
         statusNote: verification.message,
         riderName: updated[0].riderName,
         etaMinutes: updated[0].estimatedMinutes,
+        createdAt: updated[0].createdAt,
         items: updated[0].itemsSnapshotJson
       });
     }
@@ -5291,6 +6827,7 @@ app.post("/api/payments/verify", requireAuth, async (req, res) => {
       orderNumber: updated[0].orderNumber,
       restaurantId: updated[0].restaurantId,
       restaurantName: updated[0].restaurantName,
+      restaurantOwnerUid: restRowsForBroadcast[0]?.ownerUid || null,
       customerUid: updated[0].customerUid,
       riderUid: updated[0].riderUid,
       riderName: updated[0].riderName,
@@ -5308,7 +6845,7 @@ app.post("/api/payments/webhook/:code", async (req, res) => {
   const code = normalizeGatewayCode(String(req.params.code || ""));
   if (!code) return res.status(400).json({ error: "Invalid gateway code" });
   try {
-    const gwRows = await db.select().from(paymentGateways).where(eq4(paymentGateways.code, code)).limit(1);
+    const gwRows = await db.select().from(paymentGateways).where(eq5(paymentGateways.code, code)).limit(1);
     const gateway = gwRows[0];
     if (!gateway) return res.status(404).json({ error: `Payment gateway "${code}" not registered` });
     const expectedSecret = String(gateway.webhookSecret || "").trim();
@@ -5327,7 +6864,7 @@ app.post("/api/payments/webhook/:code", async (req, res) => {
     if (!orderNumber && !txId) {
       return res.status(400).json({ error: "orderNumber or transactionId is required" });
     }
-    const matchingOrders = orderNumber ? await db.select().from(orders).where(eq4(orders.orderNumber, orderNumber)).limit(1) : await db.select().from(orders).where(eq4(orders.paymentTxId, txId)).limit(1);
+    const matchingOrders = orderNumber ? await db.select().from(orders).where(eq5(orders.orderNumber, orderNumber)).limit(1) : await db.select().from(orders).where(eq5(orders.paymentTxId, txId)).limit(1);
     if (matchingOrders.length === 0) {
       return res.status(404).json({ error: "Matching order not found" });
     }
@@ -5336,12 +6873,80 @@ app.post("/api/payments/webhook/:code", async (req, res) => {
       paymentStatus: nextPaymentStatus,
       paymentTxId: txId || targetOrder.paymentTxId,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(eq4(orders.id, targetOrder.id)).returning();
+    }).where(eq5(orders.id, targetOrder.id)).returning();
     await db.insert(orderStatusHistory).values({
       orderId: targetOrder.id,
       status: targetOrder.status,
       note: `Webhook (${gateway.name}) marked payment as ${nextPaymentStatus}`,
       actorUid: `webhook:${code}`
+    });
+    const restOwnerRows = await db.select({ ownerUid: restaurants.ownerUid, email: restaurants.email }).from(restaurants).where(eq5(restaurants.id, updated[0].restaurantId)).limit(1);
+    const webhookRecipient = await resolveCustomerEmailForOrder(
+      updated[0].customerEmail,
+      updated[0].customerUid
+    );
+    if (webhookRecipient && nextPaymentStatus === "paid") {
+      await sendAndLogOrderTrackingEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        customerName: updated[0].customerName,
+        customerEmail: webhookRecipient,
+        restaurantName: updated[0].restaurantName,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        subtotal: updated[0].subtotal,
+        discountAmount: updated[0].discountAmount,
+        couponCode: updated[0].couponCode,
+        deliveryFee: updated[0].deliveryFee,
+        serviceFee: updated[0].serviceFee,
+        taxAmount: updated[0].taxAmount,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: "payment_verified",
+        statusEvent: "payment_verified",
+        statusNote: `${gateway.name} confirmed payment`,
+        riderName: updated[0].riderName,
+        etaMinutes: updated[0].estimatedMinutes,
+        createdAt: updated[0].createdAt,
+        items: updated[0].itemsSnapshotJson
+      });
+    }
+    await sendMerchantOrderAlertEmail({
+      origin: getRequestOrigin(req),
+      orderId: updated[0].id,
+      orderNumber: updated[0].orderNumber,
+      trackingToken: updated[0].trackingToken,
+      eventKind: "status_update",
+      restaurantName: updated[0].restaurantName,
+      restaurantEmail: restOwnerRows[0]?.email || null,
+      customerName: updated[0].customerName,
+      customerPhone: updated[0].customerPhone,
+      deliveryArea: updated[0].deliveryArea,
+      deliveryAddress: updated[0].deliveryAddress,
+      totalAmount: updated[0].totalAmount,
+      paymentMethod: updated[0].paymentMethod,
+      paymentStatus: updated[0].paymentStatus,
+      status: updated[0].status,
+      statusNote: `Webhook (${gateway.name}): ${nextPaymentStatus}`,
+      riderName: updated[0].riderName,
+      items: updated[0].itemsSnapshotJson
+    }).catch(() => []);
+    broadcastOrderEvent("order:updated", {
+      orderId: updated[0].id,
+      orderNumber: updated[0].orderNumber,
+      restaurantId: updated[0].restaurantId,
+      restaurantName: updated[0].restaurantName,
+      restaurantOwnerUid: restOwnerRows[0]?.ownerUid || null,
+      customerUid: updated[0].customerUid,
+      riderUid: updated[0].riderUid,
+      riderName: updated[0].riderName,
+      status: updated[0].status,
+      deliveryMode: updated[0].deliveryMode,
+      deliveryArea: updated[0].deliveryArea,
+      totalAmount: updated[0].totalAmount
     });
     res.json({ ok: true, order: updated[0] });
   } catch (error) {
@@ -5368,12 +6973,12 @@ app.post("/api/reviews", requireAuth, async (req, res) => {
       foodRating: parsed.data.foodRating,
       comment: parsed.data.comment
     }).returning();
-    const allReviews = await db.select().from(reviews).where(eq4(reviews.restaurantId, parsed.data.restaurantId));
+    const allReviews = await db.select().from(reviews).where(eq5(reviews.restaurantId, parsed.data.restaurantId));
     const avg = allReviews.reduce((s, r) => s + r.rating, 0) / Math.max(1, allReviews.length);
     await db.update(restaurants).set({
       rating: avg.toFixed(1),
       reviewCount: sql3`${restaurants.reviewCount} + 1`
-    }).where(eq4(restaurants.id, parsed.data.restaurantId));
+    }).where(eq5(restaurants.id, parsed.data.restaurantId));
     res.status(201).json({ review: inserted[0] });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -5436,7 +7041,7 @@ app.post("/api/restaurants/register", requireAuth, async (req, res) => {
       status: isOwnerAdmin ? "approved" : "pending"
     }).returning();
     if (req.user.role === "customer") {
-      await db.update(users).set({ role: "restaurant_owner", fullName: parsed.data.ownerName }).where(eq4(users.uid, req.user.uid));
+      await db.update(users).set({ role: "restaurant_owner", fullName: parsed.data.ownerName }).where(eq5(users.uid, req.user.uid));
     }
     await db.insert(notifications).values({
       recipientUid: "demo-admin-uid",
@@ -5486,7 +7091,7 @@ app.post(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid food item details" });
     try {
-      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, parsed.data.restaurantId)).limit(1);
       if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
@@ -5519,9 +7124,9 @@ app.patch(
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId)) return res.status(400).json({ error: "Invalid item ID" });
     try {
-      const itemRows = await db.select().from(foodItems).where(eq4(foodItems.id, itemId)).limit(1);
+      const itemRows = await db.select().from(foodItems).where(eq5(foodItems.id, itemId)).limit(1);
       if (itemRows.length === 0) return res.status(404).json({ error: "Food item not found" });
-      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, itemRows[0].restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, itemRows[0].restaurantId)).limit(1);
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && restRows[0]?.ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden" });
@@ -5538,7 +7143,7 @@ app.patch(
         price: typeof req.body.price === "number" && req.body.price > 0 ? req.body.price : itemRows[0].price,
         discountPrice: req.body.discountPrice === null ? null : typeof req.body.discountPrice === "number" && req.body.discountPrice > 0 ? req.body.discountPrice : itemRows[0].discountPrice,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(foodItems.id, itemId)).returning();
+      }).where(eq5(foodItems.id, itemId)).returning();
       res.json({ item: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5553,14 +7158,14 @@ app.delete(
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId)) return res.status(400).json({ error: "Invalid item ID" });
     try {
-      const itemRows = await db.select().from(foodItems).where(eq4(foodItems.id, itemId)).limit(1);
+      const itemRows = await db.select().from(foodItems).where(eq5(foodItems.id, itemId)).limit(1);
       if (itemRows.length === 0) return res.status(404).json({ error: "Item not found" });
-      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, itemRows[0].restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, itemRows[0].restaurantId)).limit(1);
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && restRows[0]?.ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      await db.delete(foodItems).where(eq4(foodItems.id, itemId));
+      await db.delete(foodItems).where(eq5(foodItems.id, itemId));
       res.json({ deleted: true });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5568,7 +7173,7 @@ app.delete(
   }
 );
 function hashPartnerApiKey(rawKey) {
-  return crypto3.createHash("sha256").update(rawKey.trim()).digest("hex");
+  return crypto4.createHash("sha256").update(rawKey.trim()).digest("hex");
 }
 function extractPartnerApiKey(req) {
   const headerKey = req.header("x-partner-api-key")?.trim();
@@ -5583,18 +7188,18 @@ async function resolvePartnerRestaurant(req) {
   const rawKey = extractPartnerApiKey(req);
   if (!rawKey) return { ok: false, error: "Missing X-Partner-API-Key header", status: 401 };
   const keyHash = hashPartnerApiKey(rawKey);
-  const keyRows = await db.select().from(partnerApiKeys).where(eq4(partnerApiKeys.keyHash, keyHash)).limit(1);
+  const keyRows = await db.select().from(partnerApiKeys).where(eq5(partnerApiKeys.keyHash, keyHash)).limit(1);
   if (keyRows.length === 0) {
     return { ok: false, error: "Invalid or revoked Partner API key", status: 401 };
   }
-  const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, keyRows[0].restaurantId)).limit(1);
+  const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, keyRows[0].restaurantId)).limit(1);
   if (restRows.length === 0) {
     return { ok: false, error: "Linked restaurant no longer exists", status: 404 };
   }
   if (restRows[0].status === "suspended" || restRows[0].status === "rejected") {
     return { ok: false, error: "Restaurant account is not active for Partner API access", status: 403 };
   }
-  await db.update(partnerApiKeys).set({ lastUsedAt: /* @__PURE__ */ new Date() }).where(eq4(partnerApiKeys.id, keyRows[0].id));
+  await db.update(partnerApiKeys).set({ lastUsedAt: /* @__PURE__ */ new Date() }).where(eq5(partnerApiKeys.id, keyRows[0].id));
   return { ok: true, restaurant: restRows[0], apiKeyRow: keyRows[0] };
 }
 app.get(
@@ -5605,7 +7210,7 @@ app.get(
     try {
       const requestedId = Number(req.query.restaurantId);
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
-      let restRows = Number.isInteger(requestedId) && requestedId > 0 ? await db.select().from(restaurants).where(eq4(restaurants.id, requestedId)).limit(1) : await db.select().from(restaurants).where(eq4(restaurants.ownerUid, req.user.uid)).limit(1);
+      let restRows = Number.isInteger(requestedId) && requestedId > 0 ? await db.select().from(restaurants).where(eq5(restaurants.id, requestedId)).limit(1) : await db.select().from(restaurants).where(eq5(restaurants.ownerUid, req.user.uid)).limit(1);
       if (restRows.length === 0 && isAdmin && !(Number.isInteger(requestedId) && requestedId > 0)) {
         restRows = await db.select().from(restaurants).limit(1);
       }
@@ -5615,7 +7220,7 @@ app.get(
       if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      const keyRows = await db.select().from(partnerApiKeys).where(eq4(partnerApiKeys.restaurantId, restRows[0].id)).limit(1);
+      const keyRows = await db.select().from(partnerApiKeys).where(eq5(partnerApiKeys.restaurantId, restRows[0].id)).limit(1);
       if (keyRows.length === 0) {
         return res.json({
           hasKey: false,
@@ -5653,13 +7258,13 @@ app.post(
       return res.status(400).json({ error: "Invalid API key rotation request" });
     }
     try {
-      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, parsed.data.restaurantId)).limit(1);
       if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      const rawKey = `fbd_live_${crypto3.randomBytes(16).toString("hex")}`;
+      const rawKey = `fbd_live_${crypto4.randomBytes(16).toString("hex")}`;
       const keyHash = hashPartnerApiKey(rawKey);
       const keyPrefix = `${rawKey.slice(0, 14)}...${rawKey.slice(-4)}`;
       const label = parsed.data.label?.trim() || "Partner Menu API Key";
@@ -5702,7 +7307,7 @@ app.get("/api/partner/v1/products", async (req, res) => {
   try {
     const auth = await resolvePartnerRestaurant(req);
     if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
-    const products = await db.select().from(foodItems).where(eq4(foodItems.restaurantId, auth.restaurant.id)).orderBy(desc2(foodItems.id));
+    const products = await db.select().from(foodItems).where(eq5(foodItems.restaurantId, auth.restaurant.id)).orderBy(desc3(foodItems.id));
     res.json({
       restaurant: {
         id: auth.restaurant.id,
@@ -5785,7 +7390,7 @@ app.patch("/api/partner/v1/products/:id", async (req, res) => {
   try {
     const auth = await resolvePartnerRestaurant(req);
     if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
-    const existing = await db.select().from(foodItems).where(and2(eq4(foodItems.id, itemId), eq4(foodItems.restaurantId, auth.restaurant.id))).limit(1);
+    const existing = await db.select().from(foodItems).where(and2(eq5(foodItems.id, itemId), eq5(foodItems.restaurantId, auth.restaurant.id))).limit(1);
     if (existing.length === 0) {
       return res.status(404).json({ error: "Product not found for this partner restaurant" });
     }
@@ -5825,7 +7430,7 @@ app.patch("/api/partner/v1/products/:id", async (req, res) => {
       variationsJson: merged.product.variationsJson,
       addonsJson: merged.product.addonsJson,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(and2(eq4(foodItems.id, itemId), eq4(foodItems.restaurantId, auth.restaurant.id))).returning();
+    }).where(and2(eq5(foodItems.id, itemId), eq5(foodItems.restaurantId, auth.restaurant.id))).returning();
     res.json({ product: updated[0] });
   } catch (error) {
     res.status(500).json({ error: error.message || "Failed to update partner product" });
@@ -5839,7 +7444,7 @@ app.delete("/api/partner/v1/products/:id", async (req, res) => {
   try {
     const auth = await resolvePartnerRestaurant(req);
     if (auth.ok === false) return res.status(auth.status).json({ error: auth.error });
-    const deleted = await db.delete(foodItems).where(and2(eq4(foodItems.id, itemId), eq4(foodItems.restaurantId, auth.restaurant.id))).returning();
+    const deleted = await db.delete(foodItems).where(and2(eq5(foodItems.id, itemId), eq5(foodItems.restaurantId, auth.restaurant.id))).returning();
     if (deleted.length === 0) {
       return res.status(404).json({ error: "Product not found for this partner restaurant" });
     }
@@ -5871,7 +7476,7 @@ app.patch(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid restaurant settings" });
     try {
-      const rows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
+      const rows = await db.select().from(restaurants).where(eq5(restaurants.id, parsed.data.restaurantId)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && rows[0].ownerUid !== req.user.uid) {
@@ -5891,7 +7496,7 @@ app.patch(
         coverUrl: parsed.data.coverUrl !== void 0 && parsed.data.coverUrl.trim() ? parsed.data.coverUrl.trim() : rows[0].coverUrl,
         description: parsed.data.description !== void 0 ? parsed.data.description.trim() : rows[0].description,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(restaurants.id, rows[0].id)).returning();
+      }).where(eq5(restaurants.id, rows[0].id)).returning();
       res.json({ restaurant: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -5913,10 +7518,10 @@ app.patch(
       return res.status(400).json({ error: "Invalid status update" });
     }
     try {
-      const orderRows = await db.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
+      const orderRows = await db.select().from(orders).where(eq5(orders.id, orderId)).limit(1);
       if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
       const order = orderRows[0];
-      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, order.restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, order.restaurantId)).limit(1);
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       if (!isAdmin && restRows[0]?.ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden: Order belongs to another restaurant" });
@@ -5930,7 +7535,7 @@ app.patch(
         status: parsed.data.status,
         cancelReason: parsed.data.status === "cancelled" ? parsed.data.note || "Cancelled by restaurant" : order.cancelReason,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(orders.id, order.id)).returning();
+      }).where(eq5(orders.id, order.id)).returning();
       await db.insert(orderStatusHistory).values({
         orderId: order.id,
         status: parsed.data.status,
@@ -5948,17 +7553,27 @@ app.patch(
         type: "order",
         relatedOrderId: order.id
       });
-      if (updated[0].customerEmail) {
+      const vendorStatusRecipient = await resolveCustomerEmailForOrder(
+        updated[0].customerEmail,
+        updated[0].customerUid
+      );
+      if (vendorStatusRecipient) {
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: updated[0].id,
           orderNumber: updated[0].orderNumber,
           trackingToken: updated[0].trackingToken,
           customerName: updated[0].customerName,
-          customerEmail: updated[0].customerEmail,
+          customerEmail: vendorStatusRecipient,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
+          subtotal: updated[0].subtotal,
+          discountAmount: updated[0].discountAmount,
+          couponCode: updated[0].couponCode,
+          deliveryFee: updated[0].deliveryFee,
+          serviceFee: updated[0].serviceFee,
+          taxAmount: updated[0].taxAmount,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
           paymentStatus: updated[0].paymentStatus,
@@ -5967,9 +7582,30 @@ app.patch(
           statusNote: parsed.data.note || `${order.restaurantName} updated order status`,
           riderName: updated[0].riderName,
           etaMinutes: updated[0].estimatedMinutes,
+          createdAt: updated[0].createdAt,
           items: updated[0].itemsSnapshotJson
         });
       }
+      await sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        eventKind: "status_update",
+        restaurantName: updated[0].restaurantName,
+        restaurantEmail: restRows[0]?.email || null,
+        customerName: updated[0].customerName,
+        customerPhone: updated[0].customerPhone,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: updated[0].status,
+        statusNote: parsed.data.note || `${order.restaurantName} updated order status`,
+        riderName: updated[0].riderName,
+        items: updated[0].itemsSnapshotJson
+      }).catch(() => []);
       broadcastOrderEvent("order:updated", {
         orderId: updated[0].id,
         orderNumber: updated[0].orderNumber,
@@ -5993,6 +7629,14 @@ app.patch(
         type: "order",
         relatedOrderId: order.id
       });
+      broadcastNotificationEvent({
+        recipientUid: "role-super_admin",
+        roleTarget: "super_admin",
+        title: `Order ${order.orderNumber}: ${parsed.data.status.replace("_", " ")}`,
+        message: `${order.restaurantName} updated order ${order.orderNumber}.`,
+        type: "order",
+        relatedOrderId: order.id
+      });
       res.json({ order: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -6011,7 +7655,7 @@ app.post(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid payout request" });
     try {
-      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, parsed.data.restaurantId)).limit(1);
       if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const rest = restRows[0];
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
@@ -6066,7 +7710,7 @@ app.post("/api/riders/apply", async (req, res) => {
           error: "This email belongs to an Admin account. Please use a separate rider email."
         });
       }
-      const credRows = await db.select().from(localCredentials).where(eq4(localCredentials.email, emailLower)).limit(1);
+      const credRows = await db.select().from(localCredentials).where(eq5(localCredentials.email, emailLower)).limit(1);
       if (credRows.length > 0 && parsed.data.password) {
         if (!verifyPasswordScrypt(parsed.data.password, credRows[0].passwordHash)) {
           return res.status(401).json({
@@ -6079,9 +7723,9 @@ app.post("/api/riders/apply", async (req, res) => {
         phone: parsed.data.phone,
         role: existingUsers[0].role === "restaurant_owner" ? "rider" : "rider",
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(users.uid, uid));
+      }).where(eq5(users.uid, uid));
     } else {
-      uid = `rdr-${crypto3.randomBytes(8).toString("hex")}`;
+      uid = `rdr-${crypto4.randomBytes(8).toString("hex")}`;
       await db.insert(users).values({
         uid,
         email: emailLower,
@@ -6197,7 +7841,7 @@ app.post("/api/riders/register", requireAuth, async (req, res) => {
     }).returning();
     let nextUser = req.user;
     if (req.user.role === "customer") {
-      await db.update(users).set({ role: "rider", fullName: parsed.data.fullName }).where(eq4(users.uid, req.user.uid));
+      await db.update(users).set({ role: "rider", fullName: parsed.data.fullName }).where(eq5(users.uid, req.user.uid));
       nextUser = { ...req.user, role: "rider", fullName: parsed.data.fullName };
     }
     const freshToken = signSandboxToken({
@@ -6243,7 +7887,7 @@ app.patch(
     }
     try {
       const riderUid = req.user.role === "super_admin" || req.user.role === "admin" ? "demo-rider-uid" : req.user.uid;
-      const existing = await db.select().from(riders).where(eq4(riders.uid, riderUid)).limit(1);
+      const existing = await db.select().from(riders).where(eq5(riders.uid, riderUid)).limit(1);
       if (existing.length === 0) {
         return res.status(404).json({ error: "Rider profile not found." });
       }
@@ -6254,7 +7898,7 @@ app.patch(
         locationUpdatedAt: /* @__PURE__ */ new Date(),
         isAvailable: typeof parsed.data.isAvailable === "boolean" ? parsed.data.isAvailable : cur.isAvailable,
         zone: parsed.data.zone ? parsed.data.zone.trim() : cur.zone
-      }).where(eq4(riders.uid, riderUid)).returning();
+      }).where(eq5(riders.uid, riderUid)).returning();
       const activeRiderOrders = await db.select({
         id: orders.id,
         orderNumber: orders.orderNumber,
@@ -6262,7 +7906,7 @@ app.patch(
         restaurantName: orders.restaurantName,
         customerUid: orders.customerUid,
         status: orders.status
-      }).from(orders).where(eq4(orders.riderUid, riderUid));
+      }).from(orders).where(eq5(orders.riderUid, riderUid));
       for (const ord of activeRiderOrders) {
         if (!["delivered", "cancelled"].includes(ord.status)) {
           broadcastOrderEvent("rider:location", {
@@ -6294,7 +7938,7 @@ app.post(
     if (!Number.isInteger(orderId)) return res.status(400).json({ error: "Invalid order ID" });
     try {
       const riderUid = req.user.role === "super_admin" || req.user.role === "admin" ? "demo-rider-uid" : req.user.uid;
-      const orderRows = await db.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
+      const orderRows = await db.select().from(orders).where(eq5(orders.id, orderId)).limit(1);
       if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
       const existingOrder = orderRows[0];
       if (["delivered", "cancelled"].includes(existingOrder.status)) {
@@ -6303,14 +7947,14 @@ app.post(
       if (existingOrder.riderUid && existingOrder.riderUid !== riderUid) {
         return res.status(409).json({ error: "Order has already been claimed by another rider." });
       }
-      const riderRows = await db.select().from(riders).where(eq4(riders.uid, riderUid)).limit(1);
+      const riderRows = await db.select().from(riders).where(eq5(riders.uid, riderUid)).limit(1);
       const riderName = riderRows[0]?.fullName || req.user.fullName;
       const updated = await db.update(orders).set({
         riderUid,
         riderName,
         status: "rider_assigned",
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(orders.id, orderId)).returning();
+      }).where(eq5(orders.id, orderId)).returning();
       await db.insert(orderStatusHistory).values({
         orderId,
         status: "rider_assigned",
@@ -6325,17 +7969,28 @@ app.post(
         type: "order",
         relatedOrderId: existingOrder.id
       });
-      if (updated[0].customerEmail) {
+      const restOwnerRows = await db.select({ ownerUid: restaurants.ownerUid, email: restaurants.email }).from(restaurants).where(eq5(restaurants.id, updated[0].restaurantId)).limit(1);
+      const riderAcceptRecipient = await resolveCustomerEmailForOrder(
+        updated[0].customerEmail,
+        updated[0].customerUid
+      );
+      if (riderAcceptRecipient) {
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: updated[0].id,
           orderNumber: updated[0].orderNumber,
           trackingToken: updated[0].trackingToken,
           customerName: updated[0].customerName,
-          customerEmail: updated[0].customerEmail,
+          customerEmail: riderAcceptRecipient,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
+          subtotal: updated[0].subtotal,
+          discountAmount: updated[0].discountAmount,
+          couponCode: updated[0].couponCode,
+          deliveryFee: updated[0].deliveryFee,
+          serviceFee: updated[0].serviceFee,
+          taxAmount: updated[0].taxAmount,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
           paymentStatus: updated[0].paymentStatus,
@@ -6345,14 +8000,36 @@ app.post(
           riderName,
           riderPhone: riderRows[0]?.phone || null,
           etaMinutes: updated[0].estimatedMinutes,
+          createdAt: updated[0].createdAt,
           items: updated[0].itemsSnapshotJson
         });
       }
+      await sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        eventKind: "status_update",
+        restaurantName: updated[0].restaurantName,
+        restaurantEmail: restOwnerRows[0]?.email || null,
+        customerName: updated[0].customerName,
+        customerPhone: updated[0].customerPhone,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: updated[0].status,
+        statusNote: `Rider ${riderName} accepted delivery assignment`,
+        riderName,
+        items: updated[0].itemsSnapshotJson
+      }).catch(() => []);
       broadcastOrderEvent("order:updated", {
         orderId: updated[0].id,
         orderNumber: updated[0].orderNumber,
         restaurantId: updated[0].restaurantId,
         restaurantName: updated[0].restaurantName,
+        restaurantOwnerUid: restOwnerRows[0]?.ownerUid || null,
         customerUid: updated[0].customerUid,
         riderUid: updated[0].riderUid,
         riderName: updated[0].riderName,
@@ -6366,6 +8043,14 @@ app.post(
         roleTarget: "customer",
         title: "Rider Assigned to Your Order",
         message: `${riderName} is assigned for ${existingOrder.orderNumber}. Track live rider GPS on your map.`,
+        type: "order",
+        relatedOrderId: existingOrder.id
+      });
+      broadcastNotificationEvent({
+        recipientUid: "role-super_admin",
+        roleTarget: "super_admin",
+        title: `Rider Assigned \xB7 ${existingOrder.orderNumber}`,
+        message: `${riderName} accepted ${existingOrder.orderNumber} (${existingOrder.restaurantName}).`,
         type: "order",
         relatedOrderId: existingOrder.id
       });
@@ -6389,7 +8074,7 @@ app.patch(
       return res.status(400).json({ error: "Invalid rider status update" });
     }
     try {
-      const orderRows = await db.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
+      const orderRows = await db.select().from(orders).where(eq5(orders.id, orderId)).limit(1);
       if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
       const order = orderRows[0];
       const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
@@ -6403,7 +8088,7 @@ app.patch(
         status: parsed.data.status,
         paymentStatus: parsed.data.status === "delivered" && order.paymentMethod === "cod" ? "paid" : order.paymentStatus,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(orders.id, order.id)).returning();
+      }).where(eq5(orders.id, order.id)).returning();
       await db.insert(orderStatusHistory).values({
         orderId: order.id,
         status: parsed.data.status,
@@ -6429,21 +8114,32 @@ app.patch(
           await db.update(riders).set({
             totalDeliveries: sql3`${riders.totalDeliveries} + 1`,
             totalEarnings: sql3`${riders.totalEarnings} + ${Math.max(40, order.deliveryFee)}`
-          }).where(eq4(riders.uid, order.riderUid));
+          }).where(eq5(riders.uid, order.riderUid));
         }
       }
-      if (updated[0].customerEmail) {
-        const assignedRiderRows = updated[0].riderUid ? await db.select({ phone: riders.phone }).from(riders).where(eq4(riders.uid, updated[0].riderUid)).limit(1) : [];
+      const restOwnerRows = await db.select({ ownerUid: restaurants.ownerUid, email: restaurants.email }).from(restaurants).where(eq5(restaurants.id, updated[0].restaurantId)).limit(1);
+      const riderStatusRecipient = await resolveCustomerEmailForOrder(
+        updated[0].customerEmail,
+        updated[0].customerUid
+      );
+      if (riderStatusRecipient) {
+        const assignedRiderRows = updated[0].riderUid ? await db.select({ phone: riders.phone }).from(riders).where(eq5(riders.uid, updated[0].riderUid)).limit(1) : [];
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: updated[0].id,
           orderNumber: updated[0].orderNumber,
           trackingToken: updated[0].trackingToken,
           customerName: updated[0].customerName,
-          customerEmail: updated[0].customerEmail,
+          customerEmail: riderStatusRecipient,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
+          subtotal: updated[0].subtotal,
+          discountAmount: updated[0].discountAmount,
+          couponCode: updated[0].couponCode,
+          deliveryFee: updated[0].deliveryFee,
+          serviceFee: updated[0].serviceFee,
+          taxAmount: updated[0].taxAmount,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
           paymentStatus: updated[0].paymentStatus,
@@ -6453,14 +8149,36 @@ app.patch(
           riderName: updated[0].riderName,
           riderPhone: assignedRiderRows[0]?.phone || null,
           etaMinutes: updated[0].estimatedMinutes,
+          createdAt: updated[0].createdAt,
           items: updated[0].itemsSnapshotJson
         });
       }
+      await sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        eventKind: "status_update",
+        restaurantName: updated[0].restaurantName,
+        restaurantEmail: restOwnerRows[0]?.email || null,
+        customerName: updated[0].customerName,
+        customerPhone: updated[0].customerPhone,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: updated[0].status,
+        statusNote: statusLabels[parsed.data.status] || "Delivery Update",
+        riderName: updated[0].riderName,
+        items: updated[0].itemsSnapshotJson
+      }).catch(() => []);
       broadcastOrderEvent("order:updated", {
         orderId: updated[0].id,
         orderNumber: updated[0].orderNumber,
         restaurantId: updated[0].restaurantId,
         restaurantName: updated[0].restaurantName,
+        restaurantOwnerUid: restOwnerRows[0]?.ownerUid || null,
         customerUid: updated[0].customerUid,
         riderUid: updated[0].riderUid,
         riderName: updated[0].riderName,
@@ -6473,6 +8191,14 @@ app.patch(
         recipientUid: order.customerUid,
         roleTarget: "customer",
         title: statusLabels[parsed.data.status] || "Delivery Update",
+        message: `${order.orderNumber} (${order.restaurantName}) is now ${parsed.data.status.replace(/_/g, " ")}.`,
+        type: "order",
+        relatedOrderId: order.id
+      });
+      broadcastNotificationEvent({
+        recipientUid: "role-super_admin",
+        roleTarget: "super_admin",
+        title: `${statusLabels[parsed.data.status] || "Delivery Update"} \xB7 ${order.orderNumber}`,
         message: `${order.orderNumber} (${order.restaurantName}) is now ${parsed.data.status.replace(/_/g, " ")}.`,
         type: "order",
         relatedOrderId: order.id
@@ -6641,7 +8367,7 @@ app.patch(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid admin restaurant update" });
     try {
-      const rows = await db.select().from(restaurants).where(eq4(restaurants.id, id)).limit(1);
+      const rows = await db.select().from(restaurants).where(eq5(restaurants.id, id)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const current = rows[0];
       const updated = await db.update(restaurants).set({
@@ -6668,7 +8394,7 @@ app.patch(
         subscriptionPlan: parsed.data.subscriptionPlan ?? current.subscriptionPlan,
         isSponsored: parsed.data.isSponsored ?? current.isSponsored,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(restaurants.id, id)).returning();
+      }).where(eq5(restaurants.id, id)).returning();
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
         action: `restaurant_update_${parsed.data.status || "config"}`,
@@ -6706,7 +8432,7 @@ app.post(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid product payload" });
     try {
-      const restRows = await db.select().from(restaurants).where(eq4(restaurants.id, parsed.data.restaurantId)).limit(1);
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, parsed.data.restaurantId)).limit(1);
       if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
       const inserted = await db.insert(foodItems).values({
         restaurantId: parsed.data.restaurantId,
@@ -6767,7 +8493,7 @@ app.patch(
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid product update payload" });
     try {
-      const existing = await db.select().from(foodItems).where(eq4(foodItems.id, id)).limit(1);
+      const existing = await db.select().from(foodItems).where(eq5(foodItems.id, id)).limit(1);
       if (existing.length === 0) return res.status(404).json({ error: "Product not found" });
       const cur = existing[0];
       const updated = await db.update(foodItems).set({
@@ -6786,7 +8512,7 @@ app.patch(
         variationsJson: parsed.data.variationsJson ?? cur.variationsJson,
         addonsJson: parsed.data.addonsJson ?? cur.addonsJson,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(foodItems.id, id)).returning();
+      }).where(eq5(foodItems.id, id)).returning();
       const visibilityChanged = parsed.data.isVisibleOnStorefront !== void 0 && parsed.data.isVisibleOnStorefront !== cur.isVisibleOnStorefront;
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
@@ -6813,7 +8539,7 @@ app.delete(
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid product ID" });
     try {
-      const deleted = await db.delete(foodItems).where(eq4(foodItems.id, id)).returning();
+      const deleted = await db.delete(foodItems).where(eq5(foodItems.id, id)).returning();
       if (deleted.length === 0) return res.status(404).json({ error: "Product not found" });
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
@@ -6854,7 +8580,7 @@ app.patch(
       return res.status(400).json({ error: "Invalid admin order status payload" });
     }
     try {
-      const rows = await db.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
+      const rows = await db.select().from(orders).where(eq5(orders.id, orderId)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: "Order not found" });
       const order = rows[0];
       let nextRiderUid = order.riderUid;
@@ -6864,7 +8590,7 @@ app.patch(
           nextRiderUid = null;
           nextRiderName = null;
         } else {
-          const riderRows = await db.select().from(riders).where(eq4(riders.uid, parsed.data.riderUid)).limit(1);
+          const riderRows = await db.select().from(riders).where(eq5(riders.uid, parsed.data.riderUid)).limit(1);
           nextRiderUid = parsed.data.riderUid;
           nextRiderName = riderRows[0]?.fullName || parsed.data.riderUid;
         }
@@ -6875,7 +8601,7 @@ app.patch(
         riderName: nextRiderName,
         paymentStatus: parsed.data.status === "delivered" && order.paymentMethod === "cod" ? "paid" : order.paymentStatus,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(orders.id, orderId)).returning();
+      }).where(eq5(orders.id, orderId)).returning();
       await db.insert(orderStatusHistory).values({
         orderId,
         status: parsed.data.status,
@@ -6892,18 +8618,29 @@ app.patch(
         targetId: String(orderId),
         details: JSON.stringify(parsed.data)
       });
-      if (updated[0].customerEmail) {
-        const assignedRiderRows = updated[0].riderUid ? await db.select({ phone: riders.phone }).from(riders).where(eq4(riders.uid, updated[0].riderUid)).limit(1) : [];
+      const restOwnerRows = await db.select({ ownerUid: restaurants.ownerUid, email: restaurants.email }).from(restaurants).where(eq5(restaurants.id, updated[0].restaurantId)).limit(1);
+      const adminStatusRecipient = await resolveCustomerEmailForOrder(
+        updated[0].customerEmail,
+        updated[0].customerUid
+      );
+      if (adminStatusRecipient) {
+        const assignedRiderRows = updated[0].riderUid ? await db.select({ phone: riders.phone }).from(riders).where(eq5(riders.uid, updated[0].riderUid)).limit(1) : [];
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: updated[0].id,
           orderNumber: updated[0].orderNumber,
           trackingToken: updated[0].trackingToken,
           customerName: updated[0].customerName,
-          customerEmail: updated[0].customerEmail,
+          customerEmail: adminStatusRecipient,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
+          subtotal: updated[0].subtotal,
+          discountAmount: updated[0].discountAmount,
+          couponCode: updated[0].couponCode,
+          deliveryFee: updated[0].deliveryFee,
+          serviceFee: updated[0].serviceFee,
+          taxAmount: updated[0].taxAmount,
           totalAmount: updated[0].totalAmount,
           paymentMethod: updated[0].paymentMethod,
           paymentStatus: updated[0].paymentStatus,
@@ -6913,14 +8650,36 @@ app.patch(
           riderName: updated[0].riderName,
           riderPhone: assignedRiderRows[0]?.phone || null,
           etaMinutes: updated[0].estimatedMinutes,
+          createdAt: updated[0].createdAt,
           items: updated[0].itemsSnapshotJson
         });
       }
+      await sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        eventKind: "status_update",
+        restaurantName: updated[0].restaurantName,
+        restaurantEmail: restOwnerRows[0]?.email || null,
+        customerName: updated[0].customerName,
+        customerPhone: updated[0].customerPhone,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: updated[0].status,
+        statusNote: parsed.data.note || `Order update: ${parsed.data.status.replace(/_/g, " ")}`,
+        riderName: updated[0].riderName,
+        items: updated[0].itemsSnapshotJson
+      }).catch(() => []);
       broadcastOrderEvent("order:updated", {
         orderId: updated[0].id,
         orderNumber: updated[0].orderNumber,
         restaurantId: updated[0].restaurantId,
         restaurantName: updated[0].restaurantName,
+        restaurantOwnerUid: restOwnerRows[0]?.ownerUid || null,
         customerUid: updated[0].customerUid,
         riderUid: updated[0].riderUid,
         riderName: updated[0].riderName,
@@ -6929,6 +8688,24 @@ app.patch(
         deliveryArea: updated[0].deliveryArea,
         totalAmount: updated[0].totalAmount
       });
+      broadcastNotificationEvent({
+        recipientUid: updated[0].customerUid,
+        roleTarget: "customer",
+        title: `Order ${updated[0].orderNumber}: ${parsed.data.status.replace("_", " ")}`,
+        message: parsed.data.note || `${updated[0].restaurantName} order updated.`,
+        type: "order",
+        relatedOrderId: updated[0].id
+      });
+      if (restOwnerRows[0]?.ownerUid) {
+        broadcastNotificationEvent({
+          recipientUid: restOwnerRows[0].ownerUid,
+          roleTarget: "restaurant_owner",
+          title: `Order ${updated[0].orderNumber}: ${parsed.data.status.replace("_", " ")}`,
+          message: `Order status updated to ${parsed.data.status.replace("_", " ")}.`,
+          type: "order",
+          relatedOrderId: updated[0].id
+        });
+      }
       res.json({ order: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -6944,7 +8721,7 @@ app.patch(
     if (!Number.isInteger(orderId)) return res.status(400).json({ error: "Invalid order ID" });
     try {
       const result = await db.transaction(async (tx) => {
-        const rows = await tx.select().from(orders).where(eq4(orders.id, orderId)).limit(1);
+        const rows = await tx.select().from(orders).where(eq5(orders.id, orderId)).limit(1);
         if (rows.length === 0) throw new Error("Order not found");
         const order = rows[0];
         const updated = await tx.update(orders).set({
@@ -6952,11 +8729,11 @@ app.patch(
           paymentStatus: order.paymentStatus === "paid" ? "refunded" : "failed",
           cancelReason: req.body.reason || "Cancelled & refunded by Super Admin",
           updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq4(orders.id, order.id)).returning();
+        }).where(eq5(orders.id, order.id)).returning();
         const existingReversal = await tx.select().from(commissionLedger).where(
           and2(
-            eq4(commissionLedger.orderId, order.id),
-            eq4(commissionLedger.entryType, "commission_reversal")
+            eq5(commissionLedger.orderId, order.id),
+            eq5(commissionLedger.entryType, "commission_reversal")
           )
         ).limit(1);
         if (existingReversal.length === 0 && order.platformCommission > 0) {
@@ -6986,17 +8763,28 @@ app.patch(
         });
         return updated[0];
       });
-      if (result.customerEmail) {
+      const restOwnerRows = await db.select({ ownerUid: restaurants.ownerUid, email: restaurants.email }).from(restaurants).where(eq5(restaurants.id, result.restaurantId)).limit(1);
+      const refundRecipient = await resolveCustomerEmailForOrder(
+        result.customerEmail,
+        result.customerUid
+      );
+      if (refundRecipient) {
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: result.id,
           orderNumber: result.orderNumber,
           trackingToken: result.trackingToken,
           customerName: result.customerName,
-          customerEmail: result.customerEmail,
+          customerEmail: refundRecipient,
           restaurantName: result.restaurantName,
           deliveryArea: result.deliveryArea,
           deliveryAddress: result.deliveryAddress,
+          subtotal: result.subtotal,
+          discountAmount: result.discountAmount,
+          couponCode: result.couponCode,
+          deliveryFee: result.deliveryFee,
+          serviceFee: result.serviceFee,
+          taxAmount: result.taxAmount,
           totalAmount: result.totalAmount,
           paymentMethod: result.paymentMethod,
           paymentStatus: result.paymentStatus,
@@ -7005,14 +8793,36 @@ app.patch(
           statusNote: result.cancelReason || "Order cancelled & refunded by Admin",
           riderName: result.riderName,
           etaMinutes: result.estimatedMinutes,
+          createdAt: result.createdAt,
           items: result.itemsSnapshotJson
         });
       }
+      await sendMerchantOrderAlertEmail({
+        origin: getRequestOrigin(req),
+        orderId: result.id,
+        orderNumber: result.orderNumber,
+        trackingToken: result.trackingToken,
+        eventKind: "status_update",
+        restaurantName: result.restaurantName,
+        restaurantEmail: restOwnerRows[0]?.email || null,
+        customerName: result.customerName,
+        customerPhone: result.customerPhone,
+        deliveryArea: result.deliveryArea,
+        deliveryAddress: result.deliveryAddress,
+        totalAmount: result.totalAmount,
+        paymentMethod: result.paymentMethod,
+        paymentStatus: result.paymentStatus,
+        status: result.status,
+        statusNote: result.cancelReason || "Order cancelled & refunded by Admin",
+        riderName: result.riderName,
+        items: result.itemsSnapshotJson
+      }).catch(() => []);
       broadcastOrderEvent("order:updated", {
         orderId: result.id,
         orderNumber: result.orderNumber,
         restaurantId: result.restaurantId,
         restaurantName: result.restaurantName,
+        restaurantOwnerUid: restOwnerRows[0]?.ownerUid || null,
         customerUid: result.customerUid,
         riderUid: result.riderUid,
         riderName: result.riderName,
@@ -7021,6 +8831,24 @@ app.patch(
         deliveryArea: result.deliveryArea,
         totalAmount: result.totalAmount
       });
+      broadcastNotificationEvent({
+        recipientUid: result.customerUid,
+        roleTarget: "customer",
+        title: `Order ${result.orderNumber}: Cancelled & Refunded`,
+        message: result.cancelReason || `${result.restaurantName} order cancelled and refunded.`,
+        type: "order",
+        relatedOrderId: result.id
+      });
+      if (restOwnerRows[0]?.ownerUid) {
+        broadcastNotificationEvent({
+          recipientUid: restOwnerRows[0].ownerUid,
+          roleTarget: "restaurant_owner",
+          title: `Order ${result.orderNumber}: Cancelled`,
+          message: result.cancelReason || "Order cancelled and commission reversed by Admin.",
+          type: "order",
+          relatedOrderId: result.id
+        });
+      }
       res.json({ order: result });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -7040,7 +8868,7 @@ app.patch(
         status,
         referenceId: status === "paid" ? `PAY-${Date.now().toString(36).toUpperCase()}` : "",
         processedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(restaurantPayouts.id, id)).returning();
+      }).where(eq5(restaurantPayouts.id, id)).returning();
       if (updated.length === 0) return res.status(404).json({ error: "Payout not found" });
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
@@ -7101,11 +8929,11 @@ app.patch(
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid coupon ID" });
     try {
-      const rows = await db.select().from(coupons).where(eq4(coupons.id, id)).limit(1);
+      const rows = await db.select().from(coupons).where(eq5(coupons.id, id)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: "Coupon not found" });
       const updated = await db.update(coupons).set({
         isActive: typeof req.body.isActive === "boolean" ? req.body.isActive : rows[0].isActive
-      }).where(eq4(coupons.id, id)).returning();
+      }).where(eq5(coupons.id, id)).returning();
       res.json({ coupon: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -7120,7 +8948,7 @@ app.delete(
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid coupon ID" });
     try {
-      await db.delete(coupons).where(eq4(coupons.id, id));
+      await db.delete(coupons).where(eq5(coupons.id, id));
       res.json({ deleted: true });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -7152,7 +8980,7 @@ app.patch(
         sslcommerzSandbox: req.body.sslcommerzSandbox ?? cur.sslcommerzSandbox,
         storefrontConfig: nextStorefront,
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq4(platformSettings.id, cur.id)).returning();
+      }).where(eq5(platformSettings.id, cur.id)).returning();
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
         action: "platform_settings_updated",
@@ -7175,7 +9003,7 @@ app.patch(
     if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid user ID" });
     const allowedRoles = ["customer", "restaurant_owner", "rider", "admin", "super_admin"];
     try {
-      const existing = await db.select().from(users).where(eq4(users.id, id)).limit(1);
+      const existing = await db.select().from(users).where(eq5(users.id, id)).limit(1);
       if (existing.length === 0) return res.status(404).json({ error: "User not found" });
       const target = existing[0];
       const nextStatus = req.body.status === "suspended" || req.body.status === "active" ? req.body.status : target.status;
@@ -7192,7 +9020,7 @@ app.patch(
       if (!decision.allowed) {
         return res.status(403).json({ error: decision.reason || "Forbidden: Role change not permitted." });
       }
-      const updated = await db.update(users).set({ status: nextStatus, role: nextRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq4(users.id, id)).returning();
+      const updated = await db.update(users).set({ status: nextStatus, role: nextRole, updatedAt: /* @__PURE__ */ new Date() }).where(eq5(users.id, id)).returning();
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
         action: "user_updated",
@@ -7226,7 +9054,7 @@ app.patch(
       return res.status(400).json({ error: "Invalid rider update payload" });
     }
     try {
-      const existing = await db.select().from(riders).where(eq4(riders.id, id)).limit(1);
+      const existing = await db.select().from(riders).where(eq5(riders.id, id)).limit(1);
       if (existing.length === 0) return res.status(404).json({ error: "Rider not found" });
       const cur = existing[0];
       const hasCoords = typeof parsed.data.currentLat === "number" || typeof parsed.data.currentLng === "number";
@@ -7238,7 +9066,7 @@ app.patch(
         currentLat: typeof parsed.data.currentLat === "number" ? Math.round(parsed.data.currentLat * 1e6) / 1e6 : cur.currentLat,
         currentLng: typeof parsed.data.currentLng === "number" ? Math.round(parsed.data.currentLng * 1e6) / 1e6 : cur.currentLng,
         locationUpdatedAt: hasCoords ? /* @__PURE__ */ new Date() : cur.locationUpdatedAt
-      }).where(eq4(riders.id, id)).returning();
+      }).where(eq5(riders.id, id)).returning();
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
         action: hasCoords ? "rider_gps_override" : "rider_updated",
@@ -7300,7 +9128,7 @@ app.put(
     }
     try {
       await ensureDefaultPaymentGateways();
-      const existing = await db.select().from(paymentGateways).where(eq4(paymentGateways.code, code)).limit(1);
+      const existing = await db.select().from(paymentGateways).where(eq5(paymentGateways.code, code)).limit(1);
       const keepOrReplaceSecret = (incoming, prev) => {
         if (incoming === void 0) return prev || "";
         const clean = incoming.trim();
@@ -7341,7 +9169,7 @@ app.put(
               sslcommerzSandbox: nextValues.mode !== "live",
               updatedAt: /* @__PURE__ */ new Date()
             }
-          ).where(eq4(platformSettings.id, settingsRows[0].id));
+          ).where(eq5(platformSettings.id, settingsRows[0].id));
         }
       }
       await db.insert(auditLogs).values({
@@ -7377,7 +9205,7 @@ app.post(
     if (!code) return res.status(400).json({ error: "Invalid gateway code" });
     try {
       await ensureDefaultPaymentGateways();
-      const rows = await db.select().from(paymentGateways).where(eq4(paymentGateways.code, code)).limit(1);
+      const rows = await db.select().from(paymentGateways).where(eq5(paymentGateways.code, code)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: "Gateway not found" });
       const result = validatePaymentGatewayConfiguration(
         rows[0],
@@ -7402,7 +9230,7 @@ app.delete(
       });
     }
     try {
-      await db.delete(paymentGateways).where(eq4(paymentGateways.code, code));
+      await db.delete(paymentGateways).where(eq5(paymentGateways.code, code));
       await db.insert(auditLogs).values({
         actorUid: req.user.uid,
         action: "payment_gateway_deleted",
@@ -7449,6 +9277,7 @@ app.get(
       const connStr = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.SUPABASE_DB_URL || "";
       const databaseProvider = connStr ? "supabase-or-external-url" : process.env.SQL_HOST ? "cloudsql-pg" : "local-pg";
       const sslActive = Boolean(connStr) && !connStr.includes("localhost") && !connStr.includes("127.0.0.1");
+      const emailStatus = await getEmailTransportStatus();
       res.json({
         ok: true,
         checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -7470,7 +9299,9 @@ app.get(
           ),
           pathaoLiveConfigured: Boolean(
             process.env.PATHAO_CLIENT_ID && process.env.PATHAO_CLIENT_SECRET
-          )
+          ),
+          emailConfigured: emailStatus.configured,
+          emailProvider: emailStatus.provider
         },
         tableCounts: {
           users: Number(usersCount[0]?.count ?? 0),
@@ -7486,6 +9317,153 @@ app.get(
       });
     } catch (error) {
       res.status(500).json({ error: error.message || "Database health check failed" });
+    }
+  }
+);
+app.get(
+  "/api/admin/email-settings",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (_req, res) => {
+    try {
+      const settings = await getAdminEmailSettingsView();
+      res.json({ settings });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to load email settings" });
+    }
+  }
+);
+app.put(
+  "/api/admin/email-settings",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    const schema = z.object({
+      provider: z.enum(["gmail", "smtp", "resend"]),
+      smtpHost: z.string().trim().max(200).optional(),
+      smtpPort: z.number().int().min(1).max(65535).optional(),
+      smtpSecure: z.boolean().optional(),
+      smtpUser: z.string().trim().max(200).optional(),
+      smtpPass: z.string().max(200).optional(),
+      fromAddress: z.string().trim().max(200).optional(),
+      notifyEmail: z.string().trim().email().or(z.literal("")).optional(),
+      resendApiKey: z.string().max(300).optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid email transport configuration payload" });
+    }
+    try {
+      const saved = await saveAdminEmailSettings(parsed.data);
+      const verification = saved.configured ? await verifyEmailTransportConnection() : { ok: false, message: "Credentials incomplete", error: void 0 };
+      await db.insert(auditLogs).values({
+        actorUid: req.user.uid,
+        action: "email_settings_updated",
+        targetType: "email_transport",
+        targetId: saved.provider,
+        details: `Updated email delivery provider to ${saved.provider} (configured: ${saved.configured}, verified: ${verification.ok})`
+      });
+      res.json({
+        ok: true,
+        settings: saved,
+        verified: verification.ok,
+        verifyMessage: verification.message,
+        verifyError: verification.error
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to save email settings" });
+    }
+  }
+);
+app.post(
+  "/api/admin/email-settings/verify",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (_req, res) => {
+    try {
+      const result = await verifyEmailTransportConnection();
+      if (!result.ok) {
+        return res.status(400).json(result);
+      }
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error.message || "SMTP verification failed" });
+    }
+  }
+);
+app.post(
+  "/api/admin/email-settings/test",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    const schema = z.object({
+      to: z.string().trim().email(),
+      templateStatus: z.string().trim().max(40).optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Please enter a valid recipient email address." });
+    }
+    try {
+      const result = await sendTestEmail(parsed.data.to, parsed.data.templateStatus);
+      if (!result.ok) {
+        return res.status(400).json({
+          ok: false,
+          provider: result.provider,
+          status: result.status,
+          error: result.error || "Failed to send test invoice email"
+        });
+      }
+      res.json({
+        ok: true,
+        provider: result.provider,
+        message: `Test "${(parsed.data.templateStatus || "confirmed").replace(/_/g, " ")}" template email sent to ${parsed.data.to} via ${result.provider.toUpperCase()}.`
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to send test email" });
+    }
+  }
+);
+app.get(
+  "/api/admin/email-logs",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    try {
+      const limit = Number(req.query.limit || 25);
+      const logs = await getRecentOrderEmailLogs(limit);
+      res.json({ logs });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to load order email logs" });
+    }
+  }
+);
+app.post(
+  "/api/admin/email-logs/:id/resend",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    const logId = Number(req.params.id);
+    if (!Number.isInteger(logId) || logId <= 0) {
+      return res.status(400).json({ error: "Invalid email log ID" });
+    }
+    try {
+      const result = await resendOrderEmailLog(logId);
+      if (!result) return res.status(404).json({ error: "Email log record not found" });
+      if (!result.ok) {
+        return res.status(400).json({
+          ok: false,
+          error: result.dispatchResult.error || "Email resend failed",
+          log: result.log
+        });
+      }
+      res.json({
+        ok: true,
+        message: `Email re-sent to ${result.log.recipientEmail} via ${result.dispatchResult.provider.toUpperCase()}.`,
+        log: result.log
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to resend email" });
     }
   }
 );
@@ -7683,9 +9661,9 @@ app.get("/api/notifications", requireAuth, async (req, res) => {
 app.post("/api/notifications/read-all", requireAuth, async (req, res) => {
   await db.update(notifications).set({ isRead: true }).where(
     or2(
-      eq4(notifications.recipientUid, req.user.uid),
-      eq4(notifications.roleTarget, req.user.role),
-      eq4(notifications.roleTarget, "all")
+      eq5(notifications.recipientUid, req.user.uid),
+      eq5(notifications.roleTarget, req.user.role),
+      eq5(notifications.roleTarget, "all")
     )
   );
   res.json({ ok: true });
@@ -7695,11 +9673,11 @@ app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
   if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid notification ID" });
   await db.update(notifications).set({ isRead: true }).where(
     and2(
-      eq4(notifications.id, id),
+      eq5(notifications.id, id),
       or2(
-        eq4(notifications.recipientUid, req.user.uid),
-        eq4(notifications.roleTarget, req.user.role),
-        eq4(notifications.roleTarget, "all")
+        eq5(notifications.recipientUid, req.user.uid),
+        eq5(notifications.roleTarget, req.user.role),
+        eq5(notifications.roleTarget, "all")
       )
     )
   );

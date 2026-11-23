@@ -35,12 +35,19 @@ import {
   Trash2,
   Upload,
   Users,
+  Volume2,
+  VolumeX,
   Wallet,
   X,
 } from 'lucide-react';
 import { apiFetch, getAuthToken } from '../lib/api';
 import { BANGLADESH_AREAS, DHAKA_DELIVERY_ZONES, getBangladeshAreaSelectPresets } from '../lib/i18n';
-import { emitLocalRealtimeSignal, playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
+import {
+  emitLocalRealtimeSignal,
+  playOrderAlertChime,
+  useOrderSoundSetting,
+  useRealtimeEvents,
+} from '../lib/realtime';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
 import {
@@ -51,8 +58,10 @@ import {
   FOOD_CATEGORY_PRESET_OPTIONS,
   formatBdt,
   formatResolvedMapAddress,
+  getOrderEmailTemplatePreview,
   isOwnerRestaurant,
   isProtectedSuperAdminEmail,
+  ORDER_EMAIL_TEMPLATE_PRESETS,
   OrderStatus,
   PRIMARY_SUPER_ADMIN_EMAIL,
   VEHICLE_TYPE_PRESET_OPTIONS,
@@ -68,6 +77,7 @@ import type {
   FoodItem,
   Lang,
   LedgerEntry,
+  OrderEmailLog,
   OrderRecord,
   PayoutRecord,
   PlatformSettings,
@@ -242,8 +252,16 @@ export function AdminDashboard({
   const [emailNotifyEmail, setEmailNotifyEmail] = useState(PRIMARY_SUPER_ADMIN_EMAIL);
   const [emailResendKey, setEmailResendKey] = useState('');
   const [savingEmailSettings, setSavingEmailSettings] = useState(false);
+  const [verifyingEmail, setVerifyingEmail] = useState(false);
+  const [emailVerifyStatus, setEmailVerifyStatus] = useState<{ ok: boolean; message: string } | null>(null);
   const [testingEmail, setTestingEmail] = useState(false);
-  const [testEmailRecipient, setTestEmailRecipient] = useState(currentUser.email || '');
+  const [testEmailRecipient, setTestEmailRecipient] = useState(PRIMARY_SUPER_ADMIN_EMAIL);
+  const [previewTemplateStatus, setPreviewTemplateStatus] = useState<
+    'confirmed' | 'preparing' | 'rider_assigned' | 'on_the_way' | 'delivered' | 'cancelled'
+  >('confirmed');
+  const [emailLogs, setEmailLogs] = useState<OrderEmailLog[]>([]);
+  const [resendingLogId, setResendingLogId] = useState<number | null>(null);
+  const [orderSoundEnabled, setOrderSoundEnabled] = useOrderSoundSetting();
   const orderSnapshotMapRef = useRef<Map<number, { status: string; paymentStatus?: string }> | null>(
     null
   );
@@ -300,9 +318,10 @@ export function AdminDashboard({
   const loadBackendStatus = useCallback(async () => {
     setLoadingBackend(true);
     try {
-      const [statusRes, emailRes] = await Promise.all([
+      const [statusRes, emailRes, logsRes] = await Promise.all([
         apiFetch<BackendStatusSummary>('/api/admin/backend/status'),
         apiFetch<{ settings: AdminEmailSettingsView }>('/api/admin/email-settings').catch(() => null),
+        apiFetch<{ logs: OrderEmailLog[] }>('/api/admin/email-logs?limit=20').catch(() => null),
       ]);
       setBackendStatus(statusRes);
       if (emailRes?.settings) {
@@ -315,6 +334,9 @@ export function AdminDashboard({
         setEmailSmtpUser(s.smtpUser || '');
         setEmailFromAddress(s.fromAddress || '');
         setEmailNotifyEmail(s.notifyEmail || PRIMARY_SUPER_ADMIN_EMAIL);
+      }
+      if (logsRes?.logs) {
+        setEmailLogs(logsRes.logs);
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to load backend status');
@@ -409,7 +431,7 @@ export function AdminDashboard({
   useRealtimeEvents({
     enabled: Boolean(currentUser?.uid),
     token: getAuthToken(),
-    pollFallbackMs: 6000,
+    pollFallbackMs: 4000,
     onSync: () => loadAdmin(true),
     onEvent: (ev) => {
       if (ev.type === 'order:created' || ev.type === 'order:updated' || ev.type === 'notification:created') {
@@ -737,36 +759,51 @@ export function AdminDashboard({
     e.preventDefault();
     setErrorMsg(null);
     setFeedback(null);
+    setEmailVerifyStatus(null);
     setSavingEmailSettings(true);
     try {
-      const res = await apiFetch<{ ok: boolean; settings: AdminEmailSettingsView }>(
-        '/api/admin/email-settings',
-        {
-          method: 'PUT',
-          body: JSON.stringify({
-            provider: emailProviderMode,
-            smtpHost: emailProviderMode === 'gmail' ? 'smtp.gmail.com' : emailSmtpHost.trim(),
-            smtpPort: Number(emailSmtpPort) || 465,
-            smtpSecure: emailSmtpSecure,
-            smtpUser: emailSmtpUser.trim(),
-            smtpPass: emailSmtpPass.trim() || undefined,
-            fromAddress: emailFromAddress.trim() || undefined,
-            notifyEmail: emailNotifyEmail.trim() || undefined,
-            resendApiKey: emailResendKey.trim() || undefined,
-          }),
-        }
-      );
+      const res = await apiFetch<{
+        ok: boolean;
+        settings: AdminEmailSettingsView;
+        verified?: boolean;
+        verifyMessage?: string;
+        verifyError?: string;
+      }>('/api/admin/email-settings', {
+        method: 'PUT',
+        body: JSON.stringify({
+          provider: emailProviderMode,
+          smtpHost: emailProviderMode === 'gmail' ? 'smtp.gmail.com' : emailSmtpHost.trim(),
+          smtpPort: Number(emailSmtpPort) || 465,
+          smtpSecure: emailSmtpSecure,
+          smtpUser: emailSmtpUser.trim(),
+          smtpPass: emailSmtpPass.trim() || undefined,
+          fromAddress: emailFromAddress.trim() || undefined,
+          notifyEmail: emailNotifyEmail.trim() || undefined,
+          resendApiKey: emailResendKey.trim() || undefined,
+        }),
+      });
       setEmailSettings(res.settings);
       setEmailNotifyEmail(res.settings.notifyEmail || PRIMARY_SUPER_ADMIN_EMAIL);
       setEmailSmtpPass('');
       setEmailResendKey('');
-      setFeedback(
-        res.settings.configured
-          ? lang === 'bn'
-            ? 'ইমেইল ইনভয়েস ডেলিভারি সেটিংস সংরক্ষণ হয়েছে।'
-            : `Email invoice transport saved (${res.settings.activeProvider.toUpperCase()} active).`
-          : 'Settings saved — enter your Gmail App Password or Resend API key to enable live inbox delivery.'
-      );
+      if (res.settings.configured) {
+        if (res.verified) {
+          setEmailVerifyStatus({ ok: true, message: res.verifyMessage || 'SMTP verified & ready.' });
+          setFeedback(
+            lang === 'bn'
+              ? 'SMTP কানেকশন যাচাই ও সেভ হয়েছে — এখন কাস্টমারদের ইমেইলে সব অর্ডার আপডেট যাবে!'
+              : res.verifyMessage || `Email transport verified (${res.settings.activeProvider.toUpperCase()} live).`
+          );
+        } else {
+          setEmailVerifyStatus({
+            ok: false,
+            message: res.verifyError || res.verifyMessage || 'SMTP verification failed.',
+          });
+          setErrorMsg(res.verifyError || 'Settings saved, but SMTP verification failed.');
+        }
+      } else {
+        setFeedback('Settings saved — enter your Gmail App Password or Resend API key to enable live inbox delivery.');
+      }
       await loadBackendStatus();
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to save email settings');
@@ -775,7 +812,28 @@ export function AdminDashboard({
     }
   };
 
-  const handleSendTestEmail = async (e: React.FormEvent) => {
+  const handleVerifySmtp = async () => {
+    setErrorMsg(null);
+    setFeedback(null);
+    setEmailVerifyStatus(null);
+    setVerifyingEmail(true);
+    try {
+      const res = await apiFetch<{ ok: boolean; message: string; error?: string }>(
+        '/api/admin/email-settings/verify',
+        { method: 'POST' }
+      );
+      setEmailVerifyStatus({ ok: true, message: res.message });
+      setFeedback(res.message);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'SMTP verification failed';
+      setEmailVerifyStatus({ ok: false, message: msg });
+      setErrorMsg(msg);
+    } finally {
+      setVerifyingEmail(false);
+    }
+  };
+
+  const handleSendTestEmail = async (e: React.FormEvent, customStatus?: string) => {
     e.preventDefault();
     if (!testEmailRecipient.trim()) return;
     setErrorMsg(null);
@@ -784,13 +842,33 @@ export function AdminDashboard({
     try {
       const res = await apiFetch<{ ok: boolean; message: string }>('/api/admin/email-settings/test', {
         method: 'POST',
-        body: JSON.stringify({ to: testEmailRecipient.trim() }),
+        body: JSON.stringify({
+          to: testEmailRecipient.trim(),
+          templateStatus: customStatus || previewTemplateStatus,
+        }),
       });
       setFeedback(res.message);
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Test email failed');
     } finally {
       setTestingEmail(false);
+    }
+  };
+
+  const handleResendEmailLog = async (logId: number) => {
+    setErrorMsg(null);
+    setFeedback(null);
+    setResendingLogId(logId);
+    try {
+      const res = await apiFetch<{ ok: boolean; message: string }>(`/api/admin/email-logs/${logId}/resend`, {
+        method: 'POST',
+      });
+      setFeedback(res.message);
+      await loadBackendStatus();
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to resend email');
+    } finally {
+      setResendingLogId(null);
     }
   };
 
@@ -1374,6 +1452,78 @@ export function AdminDashboard({
         </button>
 
         <div className="flex flex-wrap items-center gap-2.5">
+          {/* Sound Notification Chime Control */}
+          <button
+            type="button"
+            onClick={() => {
+              const next = !orderSoundEnabled;
+              setOrderSoundEnabled(next);
+              if (next) {
+                void playOrderAlertChime('new_order', { force: true });
+                setFeedback(
+                  lang === 'bn'
+                    ? 'অর্ডার নোটিফিকেশন সাউন্ড চালু হয়েছে (নতুন অর্ডার/আপডেটে বাজবে)।'
+                    : 'Order notification sound enabled (chimes on new incoming orders and updates).'
+                );
+              } else {
+                setFeedback(
+                  lang === 'bn' ? 'অর্ডার সাউন্ড মিউট করা হয়েছে।' : 'Order sound chime muted.'
+                );
+              }
+            }}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${
+              orderSoundEnabled
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                : 'bg-neutral-100 text-neutral-600 border-neutral-300 hover:bg-neutral-200'
+            }`}
+            title={lang === 'bn' ? 'অর্ডার নোটিফিকেশন সাউন্ড কন্ট্রোল' : 'Order sound alert toggle'}
+          >
+            {orderSoundEnabled ? (
+              <Volume2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            ) : (
+              <VolumeX className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
+            )}
+            <span>
+              {orderSoundEnabled
+                ? lang === 'bn'
+                  ? 'সাউন্ড সক্রিয় 🔔'
+                  : 'Sound Active 🔔'
+                : lang === 'bn'
+                ? 'সাউন্ড মিউট 🔕'
+                : 'Sound Muted 🔕'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              void playOrderAlertChime('new_order', { force: true });
+              setFeedback(
+                lang === 'bn'
+                  ? 'অর্ডার সাউন্ড টেস্ট বাজানো হয়েছে!'
+                  : 'Order alert chime audio test played successfully!'
+              );
+            }}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-700 text-xs font-semibold transition-colors"
+            title={lang === 'bn' ? 'অর্ডার সাউন্ড টেস্ট করুন' : 'Test order notification chime'}
+          >
+            <Bell className="w-3.5 h-3.5 text-[#E21B70] shrink-0" />
+            <span>{lang === 'bn' ? 'টেস্ট সাউন্ড' : 'Test Chime'}</span>
+          </button>
+
+          {/* Continuous Realtime Sync Indicator */}
+          <div
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-pink-50 border border-pink-200 text-[#E21B70] text-xs font-semibold"
+            title={
+              lang === 'bn'
+                ? 'ম্যানুয়াল রিলোড ছাড়া প্রতি ৪ সেকেন্ডে স্বয়ংক্রিয়ভাবে নতুন অর্ডার ও স্ট্যাটাস আপডেট হবে।'
+                : 'Realtime live sync active. Automatically checks and updates new orders every 4s without manual reload.'
+            }
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+            <span>{lang === 'bn' ? 'অটো-আপডেট লাইভ' : 'Auto-Sync Live'}</span>
+          </div>
+
           <a
             href="/api/export/project-zip"
             download="foodora-bd-project.zip"
@@ -2192,6 +2342,15 @@ export function AdminDashboard({
                   : 'Connect a Gmail + Google App Password (recommended) or Resend API key so every order sends a real itemized invoice (INV-) directly to customer Gmail inboxes.'}
               </p>
 
+              {emailProviderMode === 'gmail' && (
+                <div className="rounded-xl bg-blue-50/70 border border-blue-200 p-2.5 text-[11px] text-blue-900 leading-relaxed">
+                  <strong>{lang === 'bn' ? 'Gmail App Password গাইড:' : 'Gmail App Password Guide:'}</strong>{' '}
+                  {lang === 'bn'
+                    ? 'Google Account → Security → 2-Step Verification চালু করে App Passwords থেকে ১৬-অক্ষরের পাসওয়ার্ড তৈরি করে এখানে দিন (স্পেস থাকলেও অটো-ঠিক হবে)। কাস্টমারের সব অর্ডার আপডেট (Confirmed, Preparing, Rider Assigned, On the way, Delivered, Cancelled) স্বয়ংক্রিয়ভাবে তাদের মেইলে যাবে।'
+                    : 'Enable Google 2-Step Verification → Security → App Passwords to generate a 16-character password (spaces are stripped automatically). All customer order updates & invoices will automatically send.'}
+                </div>
+              )}
+
               <form onSubmit={handleSaveEmailSettings} className="space-y-3 text-xs">
                 <div className="grid grid-cols-3 gap-2">
                   {(
@@ -2265,7 +2424,10 @@ export function AdminDashboard({
                           <input
                             type="number"
                             value={emailSmtpPort}
-                            onChange={(e) => setEmailSmtpPort(e.target.value)}
+                            onChange={(e) => {
+                              setEmailSmtpPort(e.target.value);
+                              setEmailSmtpSecure(e.target.value === '465');
+                            }}
                             placeholder="465"
                             className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
                           />
@@ -2330,26 +2492,48 @@ export function AdminDashboard({
                   />
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={savingEmailSettings}
-                  className="px-4 py-2 rounded-xl bg-[#2E3138] hover:bg-black text-white font-semibold disabled:opacity-50"
-                >
-                  {savingEmailSettings
-                    ? 'Saving...'
-                    : lang === 'bn'
-                    ? 'ইমেইল সেটিংস সংরক্ষণ করুন'
-                    : 'Save Email Settings'}
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="submit"
+                    disabled={savingEmailSettings}
+                    className="px-4 py-2 rounded-xl bg-[#2E3138] hover:bg-black text-white font-semibold disabled:opacity-50"
+                  >
+                    {savingEmailSettings
+                      ? 'Saving & Verifying...'
+                      : lang === 'bn'
+                      ? 'সেভ ও SMTP যাচাই করুন'
+                      : 'Save & Verify SMTP'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={verifyingEmail}
+                    onClick={handleVerifySmtp}
+                    className="px-3.5 py-2 rounded-xl border border-neutral-300 hover:border-[#2E3138] text-neutral-700 font-semibold disabled:opacity-50"
+                  >
+                    {verifyingEmail ? 'Checking...' : 'Test Connection'}
+                  </button>
+                </div>
               </form>
 
-              <form onSubmit={handleSendTestEmail} className="pt-2 border-t border-neutral-100 flex gap-2 text-xs">
+              {emailVerifyStatus && (
+                <div
+                  className={`rounded-lg px-3 py-2 text-xs font-medium border ${
+                    emailVerifyStatus.ok
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : 'bg-red-50 border-red-200 text-red-700'
+                  }`}
+                >
+                  {emailVerifyStatus.message}
+                </div>
+              )}
+
+              <form onSubmit={(e) => handleSendTestEmail(e)} className="pt-2 border-t border-neutral-100 flex gap-2 text-xs">
                 <input
                   type="email"
                   required
                   value={testEmailRecipient}
                   onChange={(e) => setTestEmailRecipient(e.target.value)}
-                  placeholder="test-recipient@gmail.com"
+                  placeholder="raqkibrony@gmail.com"
                   className="flex-1 min-w-0 px-3 py-2 border border-neutral-200 rounded-lg"
                 />
                 <button
@@ -2358,9 +2542,147 @@ export function AdminDashboard({
                   className="px-3.5 py-2 rounded-lg border border-[#E21B70] text-[#E21B70] hover:bg-[#FFF0F6] font-bold inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>{testingEmail ? 'Sending...' : 'Send Test Invoice'}</span>
+                  <span>{testingEmail ? 'Sending...' : 'Send Test Email'}</span>
                 </button>
               </form>
+            </div>
+
+            {/* Interactive Order Update Email Templates & Live Delivery Logs */}
+            <div className="lg:col-span-12 grid grid-cols-1 lg:grid-cols-12 gap-5">
+              <div className="lg:col-span-7 bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                      <LayoutTemplate className="w-4 h-4 text-[#E21B70]" />
+                      <span>
+                        {lang === 'bn'
+                          ? 'অর্ডার আপডেট ইমেইল টেমপ্লেট (কাস্টমার মেইল প্রিভিউ)'
+                          : 'Customer Order Update Email Templates (Live Preview)'}
+                      </span>
+                    </h3>
+                    <p className="text-xs text-neutral-500 mt-0.5">
+                      {lang === 'bn'
+                        ? 'প্রতিটি অর্ডার ধাপে কাস্টমারের Gmail ইনবক্সে যে বাংলা+ইংরেজি ইনভয়েস ও আপডেট টেমপ্লেট যাবে:'
+                        : 'Automatic bilingual templates sent to customer email on every status change:'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={testingEmail || !testEmailRecipient.trim()}
+                    onClick={(e) => handleSendTestEmail(e, previewTemplateStatus)}
+                    className="px-3 py-1.5 rounded-lg bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Send className="w-3 h-3" />
+                    <span>{lang === 'bn' ? 'এই টেমপ্লেট টেস্ট পাঠান' : 'Send Selected Template Test'}</span>
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {ORDER_EMAIL_TEMPLATE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.status}
+                      type="button"
+                      onClick={() => setPreviewTemplateStatus(preset.status)}
+                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-colors ${
+                        previewTemplateStatus === preset.status
+                          ? 'bg-[#2E3138] text-white border-[#2E3138]'
+                          : 'bg-neutral-50 text-neutral-700 border-neutral-200 hover:border-neutral-400'
+                      }`}
+                    >
+                      {lang === 'bn' ? preset.titleBn : preset.titleEn}
+                    </button>
+                  ))}
+                </div>
+
+                {(() => {
+                  const preview = getOrderEmailTemplatePreview(
+                    previewTemplateStatus,
+                    typeof window !== 'undefined' ? window.location.origin : 'https://foodora.bd',
+                    testEmailRecipient || PRIMARY_SUPER_ADMIN_EMAIL
+                  );
+                  return (
+                    <div className="rounded-xl border border-neutral-200 overflow-hidden bg-neutral-50">
+                      <div className="px-3 py-2 bg-neutral-100 border-b border-neutral-200 text-[11px] text-neutral-700 truncate">
+                        <strong>Subject:</strong> {preview.subject}
+                      </div>
+                      <iframe
+                        title="Order Email Template Preview"
+                        srcDoc={preview.html}
+                        sandbox=""
+                        className="w-full h-[340px] bg-white border-0"
+                      />
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <div className="lg:col-span-5 bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                    <Mail className="w-4 h-4 text-[#E21B70]" />
+                    <span>
+                      {lang === 'bn' ? 'ইমেইল ডেলিভারি লগ ও রিসেন্ড' : 'Order Email Logs & Resend'}
+                    </span>
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => loadBackendStatus()}
+                    className="p-1.5 rounded-lg border border-neutral-200 hover:bg-neutral-50 text-neutral-600"
+                    title="Refresh email logs"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {emailLogs.length === 0 ? (
+                  <p className="text-xs text-neutral-500 py-8 text-center">
+                    {lang === 'bn'
+                      ? 'এখনো কোনো অর্ডার ইমেইল লগ নেই।'
+                      : 'No order email logs recorded yet.'}
+                  </p>
+                ) : (
+                  <div className="space-y-2 max-h-[410px] overflow-y-auto pr-1">
+                    {emailLogs.map((log) => {
+                      const isSent = log.providerStatus === 'sent';
+                      return (
+                        <div
+                          key={log.id}
+                          className="p-2.5 rounded-xl border border-neutral-200 bg-neutral-50/70 text-xs space-y-1"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-[#2E3138] truncate">
+                              {log.orderNumber} · {log.statusEvent}
+                            </span>
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0 ${
+                                isSent
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-amber-50 text-amber-800 border border-amber-200'
+                              }`}
+                            >
+                              {isSent ? `Sent (${log.deliveryProvider})` : log.providerStatus}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-neutral-600 truncate">To: {log.recipientEmail}</p>
+                          <div className="flex items-center justify-between gap-2 pt-0.5">
+                            <span className="text-[10px] text-neutral-400">
+                              {new Date(log.sentAt).toLocaleString()}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={resendingLogId === log.id}
+                              onClick={() => handleResendEmailLog(log.id)}
+                              className="px-2 py-0.5 rounded border border-neutral-300 hover:border-[#E21B70] text-[10px] font-bold text-neutral-700 hover:text-[#E21B70] disabled:opacity-50"
+                            >
+                              {resendingLogId === log.id ? 'Sending...' : 'Resend'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Gateway Modes + Extensible Payment API Integrations */}
@@ -4292,6 +4614,8 @@ export function AdminDashboard({
                       lng: Number(selectedRider.currentLng) || BANGLADESH_AREAS[0].lng,
                     }}
                     markerLabel={`Selected: ${selectedRider.fullName}`}
+                    pinType="user"
+                    userName={selectedRider.fullName}
                     extraRiders={riders.map((r) => ({
                       id: r.id,
                       label: `${r.fullName} (${r.zone})`,
@@ -4841,6 +5165,8 @@ export function AdminDashboard({
                   lang={lang}
                   center={{ lat: restaurantModal.lat, lng: restaurantModal.lng }}
                   markerLabel={restaurantModal.name || restaurantModal.area}
+                  pinType="vendor"
+                  restaurantName={restaurantModal.name}
                   interactive
                   heightClass="h-[190px]"
                   onSelectLocation={(c) => {

@@ -447,6 +447,8 @@ export function CustomerDashboard({
                 lang={lang}
                 center={coords}
                 markerLabel={label}
+                pinType="user"
+                userName={user.fullName}
                 interactive
                 heightClass="h-[220px]"
                 onSelectLocation={(c) => {

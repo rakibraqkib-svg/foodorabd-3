@@ -303,9 +303,46 @@ const NATIONWIDE_BD_AREAS: BangladeshAreaPreset[] = [
   { name: 'Jashore (Town)', nameBn: 'যশোর (শহর)', division: 'Khulna', zoneLabel: 'Nationwide Bangladesh Cities', lat: 23.1664, lng: 89.2081 },
 ];
 
+export interface BangladeshLandmarkPreset extends BangladeshAreaPreset {
+  keywords?: string;
+  addressHint?: string;
+}
+
+export const BANGLADESH_LANDMARKS: BangladeshLandmarkPreset[] = [
+  { name: 'Saad Musa City Center', nameBn: 'সাদ মুসা সিটি সেন্টার', division: 'Dhaka', zoneCode: 'ZONE 07', zoneLabel: 'Pragati Sarani · Kuril / Nikunja', addressHint: 'Ka-96-E Pragati Sarani, Kuril, Nikunja 1, Dhaka 1229', keywords: 'sad musa city center citycenter corporate tower kuril nikunja', lat: 23.81801, lng: 90.42001 },
+  { name: 'Saad Musa Tower (Agrabad)', nameBn: 'সাদ মুসা টাওয়ার (আগ্রাবাদ)', division: 'Chattogram', zoneLabel: 'Agrabad C/A · Chattogram', addressHint: 'Agrabad Commercial Area, Chattogram', keywords: 'sad musa tower building commercial chittagong agrabad', lat: 22.3264, lng: 91.8122 },
+  { name: 'Saad Musa Industrial Park', nameBn: 'সাদ মুসা ইন্ডাস্ট্রিয়াল পার্ক', division: 'Chattogram', zoneLabel: 'Kalurghat · Chattogram', addressHint: 'Kalurghat Heavy Industrial Area, Chattogram', keywords: 'sad musa group factory textile chittagong', lat: 22.3911, lng: 91.8842 },
+  { name: 'Jamuna Future Park', nameBn: 'যমুনা ফিউচার পার্ক', division: 'Dhaka', zoneCode: 'ZONE 07', zoneLabel: 'ZONE 07 · Kuril / Bashundhara', addressHint: 'Ka-244 Pragati Sarani, Kuril, Dhaka 1229', keywords: 'futurepark shopping mall kuril bashundhara', lat: 23.8135, lng: 90.4242 },
+  { name: 'Bashundhara City Shopping Complex', nameBn: 'বসুন্ধরা সিটি শপিং মল', division: 'Dhaka', zoneCode: 'ZONE 11', zoneLabel: 'Panthapath · Karwan Bazar', addressHint: 'Panthapath, West Karwan Bazar, Dhaka 1215', keywords: 'bashundhara city shopping mall panthapath farmgate', lat: 23.7509, lng: 90.3905 },
+  { name: 'Police Plaza Concord', nameBn: 'পুলিশ প্লাজা কনকর্ড', division: 'Dhaka', zoneCode: 'ZONE 01', zoneLabel: 'Hatirjheel · Gulshan 1', addressHint: 'Plot 2, Road 144, Gulshan 1 (Hatirjheel Link), Dhaka 1212', keywords: 'policeplaza concord mall shopping tower gulshan', lat: 23.7731, lng: 90.4156 },
+  { name: 'Gulshan Pink City Shopping Mall', nameBn: 'গুলশান পিংক সিটি', division: 'Dhaka', zoneCode: 'ZONE 01', zoneLabel: 'ZONE 01 · Gulshan 2', addressHint: 'Plot 15, Road 103, Gulshan Avenue, Dhaka 1212', keywords: 'pinkcity shopping mall gulshan 2', lat: 23.7924, lng: 90.4153 },
+  { name: 'Navana Tower (Gulshan 1)', nameBn: 'নাভানা টাওয়ার (গুলশান ১)', division: 'Dhaka', zoneCode: 'ZONE 01', zoneLabel: 'ZONE 01 · Gulshan 1', addressHint: '45 Gulshan South C/A, Circle 1, Dhaka 1212', keywords: 'navana tower commercial office gulshan 1', lat: 23.7808, lng: 90.4169 },
+  { name: 'Shimanto Square', nameBn: 'সীমান্ত স্কয়ার', division: 'Dhaka', zoneCode: 'ZONE 03', zoneLabel: 'ZONE 03 · Dhanmondi', addressHint: 'Road 2, Dhanmondi (Jigatola), Dhaka 1205', keywords: 'shimanto square rifles square shopping mall dhanmondi', lat: 23.7385, lng: 90.3752 },
+  { name: 'Tokyo Square', nameBn: 'টোকিও স্কয়ার', division: 'Dhaka', zoneCode: 'ZONE 06', zoneLabel: 'ZONE 06 · Mohammadpur', addressHint: 'Japan Garden City, Ring Road, Mohammadpur, Dhaka 1207', keywords: 'tokyo square mall japan garden city mohammadpur', lat: 23.7689, lng: 90.3587 },
+  { name: 'Mascot Plaza (Uttara)', nameBn: 'মাসকট প্লাজা (উত্তরা)', division: 'Dhaka', zoneCode: 'ZONE 05', zoneLabel: 'ZONE 05 · Uttara Sector 7', addressHint: 'Sector 7, Sonargaon Janapath, Uttara, Dhaka 1230', keywords: 'mascot plaza shopping mall uttara sector 7', lat: 23.8698, lng: 90.3999 },
+  { name: 'Rajlokkhi Complex (Uttara)', nameBn: 'রাজলক্ষ্মী কমপ্লেক্স (উত্তরা)', division: 'Dhaka', zoneCode: 'ZONE 05', zoneLabel: 'ZONE 05 · Uttara Sector 3', addressHint: 'Sector 3, Dhaka-Mymensingh Hwy, Uttara, Dhaka 1230', keywords: 'rajlaxmi rajlokkhi complex market uttara', lat: 23.8644, lng: 90.4002 },
+  { name: 'North Tower (Uttara)', nameBn: 'নর্থ টাওয়ার (উত্তরা)', division: 'Dhaka', zoneCode: 'ZONE 05', zoneLabel: 'ZONE 05 · Uttara Sector 7', addressHint: 'Sector 7, House Building, Uttara, Dhaka 1230', keywords: 'north tower shopping center uttara house building', lat: 23.8744, lng: 90.4005 },
+  { name: 'Evercare Hospital Dhaka', nameBn: 'এভারকেয়ার হাসপাতাল ঢাকা', division: 'Dhaka', zoneCode: 'ZONE 07', zoneLabel: 'Bashundhara R/A', addressHint: 'Plot 81, Block E, Bashundhara R/A, Dhaka 1229', keywords: 'apollo hospital evercare medical bashundhara', lat: 23.8099, lng: 90.4314 },
+  { name: 'United Hospital (Gulshan)', nameBn: 'ইউনাইটেড হাসপাতাল (গুলশান)', division: 'Dhaka', zoneCode: 'ZONE 01', zoneLabel: 'Gulshan 2', addressHint: 'Plot 15, Road 71, Gulshan 2, Dhaka 1212', keywords: 'united hospital medical gulshan 2', lat: 23.8047, lng: 90.4158 },
+  { name: 'Square Hospital (Panthapath)', nameBn: 'স্কয়ার হাসপাতাল (পান্থপথ)', division: 'Dhaka', zoneCode: 'ZONE 03', zoneLabel: 'Panthapath · Dhanmondi', addressHint: '18/F Bir Uttam Qazi Nuruzzaman Sarak, Panthapath, Dhaka 1205', keywords: 'square hospital medical panthapath green road', lat: 23.7529, lng: 90.3816 },
+  { name: 'Dhaka Medical College Hospital', nameBn: 'ঢাকা মেডিকেল কলেজ হাসপাতাল', division: 'Dhaka', zoneCode: 'ZONE 10', zoneLabel: 'Shahbagh · Bakshibazar', addressHint: 'Secretariat Road, Ramna / Shahbagh, Dhaka 1000', keywords: 'dmch medicalcollege hospital shahbagh buet', lat: 23.7259, lng: 90.3976 },
+  { name: 'North South University (NSU)', nameBn: 'নর্থ সাউথ ইউনিভার্সিটি (NSU)', division: 'Dhaka', zoneCode: 'ZONE 07', zoneLabel: 'Bashundhara R/A', addressHint: 'Plot 15, Block B, Bashundhara R/A, Dhaka 1229', keywords: 'nsu north south university campus bashundhara', lat: 23.8151, lng: 90.4255 },
+  { name: 'BRAC University (Merul Badda)', nameBn: 'ব্র্যাক ইউনিভার্সিটি (মেরুল বাড্ডা)', division: 'Dhaka', zoneCode: 'ZONE 08', zoneLabel: 'Merul Badda', addressHint: 'Kha 224 Bir Uttam Rafiqul Islam Ave, Merul Badda, Dhaka 1212', keywords: 'bracu brac university campus merul badda mohakhali', lat: 23.7725, lng: 90.4249 },
+  { name: 'University of Dhaka (TSC / Shahbagh)', nameBn: 'ঢাকা বিশ্ববিদ্যালয় (টিএসসি)', division: 'Dhaka', zoneCode: 'ZONE 03', zoneLabel: 'Shahbagh · Nilkhet', addressHint: 'TSC Road, University of Dhaka, Shahbagh, Dhaka 1000', keywords: 'du dhaka university tsc shahbagh nilkhet', lat: 23.7339, lng: 90.3953 },
+  { name: 'Hazrat Shahjalal International Airport', nameBn: 'হযরত শাহজালাল আন্তর্জাতিক বিমানবন্দর', division: 'Dhaka', zoneCode: 'ZONE 05', zoneLabel: 'Airport Road · Kurmitola', addressHint: 'Airport Road, Kurmitola, Dhaka 1229', keywords: 'hsia airport terminal 1 2 3 kurmitola dhaka', lat: 23.8433, lng: 90.3978 },
+  { name: 'Kamalapur Railway Station', nameBn: 'কমলাপুর রেলওয়ে স্টেশন', division: 'Dhaka', zoneCode: 'ZONE 09', zoneLabel: 'Motijheel · Kamalapur', addressHint: 'Kamalapur Station Road, Motijheel, Dhaka 1217', keywords: 'railwaystation train station komlapur motijheel', lat: 23.7317, lng: 90.4262 },
+  { name: 'Sanmar Ocean City (Chattogram)', nameBn: 'সানমার ওশান সিটি (চট্টগ্রাম)', division: 'Chattogram', zoneLabel: 'CDA Avenue · GEC Circle', addressHint: 'CDA Avenue, East Nasirabad, GEC Circle, Chattogram', keywords: 'sanmar oceancity mall gec chittagong', lat: 22.3596, lng: 91.8219 },
+  { name: 'Al-Hamra Shopping City (Sylhet)', nameBn: 'আল-হামরা শপিং সিটি (সিলেট)', division: 'Sylhet', zoneLabel: 'Zindabazar · Sylhet', addressHint: 'Zindabazar Main Road, Sylhet 3100', keywords: 'al hamra shopping city mall zindabazar sylhet', lat: 24.8965, lng: 91.8682 },
+];
+
 export const BANGLADESH_AREAS: BangladeshAreaPreset[] = [
   ...DHAKA_DELIVERY_ZONES.flatMap((z) => z.areas),
   ...NATIONWIDE_BD_AREAS,
+];
+
+export const BANGLADESH_SEARCH_PLACES: BangladeshLandmarkPreset[] = [
+  ...BANGLADESH_AREAS,
+  ...BANGLADESH_LANDMARKS,
 ];
 
 export function getBangladeshAreaSelectPresets(lang: Lang) {

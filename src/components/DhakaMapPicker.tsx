@@ -4,19 +4,27 @@ import {
   APIProvider,
   APILoadingStatus,
   Map as GoogleMap,
-  Pin,
   useApiLoadingStatus,
   useMap,
   useMapsLibrary,
 } from '@vis.gl/react-google-maps';
-import { Bike, LocateFixed, MapPin } from 'lucide-react';
+import {
+  Bike,
+  ChevronDown,
+  ChevronUp,
+  Info,
+  LocateFixed,
+  MapPin,
+  Radio,
+  Satellite,
+  Wifi,
+} from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { BANGLADESH_AREAS, DHAKA_AREAS } from '../lib/i18n';
 import {
-  extractCleanGoogleGeocodeAddress,
-  type GoogleGeocodeResultLike,
   haversineDistanceKm,
   matchCanonicalAreaFromHints,
+  resolveMapPinAppearance,
   resolveNearestAreaFromList,
 } from '../lib/marketplace-logic';
 import type { Lang } from '../types/marketplace';
@@ -35,6 +43,9 @@ interface DhakaMapPickerProps {
   lang: Lang;
   center: { lat: number; lng: number };
   markerLabel?: string;
+  pinType?: 'user' | 'vendor';
+  userName?: string;
+  restaurantName?: string;
   secondaryPoint?: { lat: number; lng: number; label: string };
   riderPoint?: { lat: number; lng: number; label: string };
   riderTarget?: { lat: number; lng: number };
@@ -70,6 +81,43 @@ const MAJOR_BD_CITY_NAMES = new Set([
 
 function isPointInsideDhakaMetro(lat: number, lng: number): boolean {
   return lat >= 23.66 && lat <= 23.92 && lng >= 90.28 && lng <= 90.52;
+}
+
+function MapPinMarkerBadge({
+  label,
+  role,
+}: {
+  label: string;
+  role: 'user' | 'vendor';
+}) {
+  const isVendor = role === 'vendor';
+  return (
+    <div className="flex flex-col items-center pointer-events-none select-none">
+      <span
+        className={`px-2 py-0.5 rounded-md border text-white text-[11px] font-bold shadow-md whitespace-nowrap mb-1 leading-tight ${
+          isVendor ? 'bg-[#111827] border-black' : 'bg-[#DC2626] border-[#991B1B]'
+        }`}
+      >
+        {label}
+      </span>
+      <svg
+        width="28"
+        height="36"
+        viewBox="0 0 28 36"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        className="drop-shadow-md"
+      >
+        <path
+          d="M14 1.5C7.09644 1.5 1.5 7.09644 1.5 14C1.5 23.25 14 34.5 14 34.5C14 34.5 26.5 23.25 26.5 14C26.5 7.09644 20.9036 1.5 14 1.5Z"
+          fill={isVendor ? '#111827' : '#DC2626'}
+          stroke={isVendor ? '#000000' : '#991B1B'}
+          strokeWidth="2"
+        />
+        <circle cx="14" cy="13.5" r="4.8" fill="#FFFFFF" />
+      </svg>
+    </div>
+  );
 }
 
 function RouteOverlay({
@@ -281,6 +329,9 @@ function GoogleMapInner({
   lang,
   center,
   markerLabel,
+  pinType,
+  userName,
+  restaurantName,
   secondaryPoint,
   riderPoint,
   riderTarget,
@@ -294,6 +345,13 @@ function GoogleMapInner({
   const skipPanRef = useRef<{ lat: number; lng: number } | null>(null);
   const reverseSeqRef = useRef(0);
   const [resolving, setResolving] = useState(false);
+  const pinAppearance = resolveMapPinAppearance({
+    pinType,
+    userName,
+    restaurantName,
+    markerLabel,
+    secondaryLabel: secondaryPoint?.label,
+  });
 
   const emitLocation = (lat: number, lng: number, shouldSkipPan = true) => {
     if (!onSelectLocation || !Number.isFinite(lat) || !Number.isFinite(lng)) return;
@@ -349,46 +407,6 @@ function GoogleMapInner({
           }
         });
 
-    try {
-      const gMaps = (window as unknown as {
-        google?: {
-          maps?: {
-            Geocoder?: new () => {
-              geocode: (
-                req: { location: { lat: number; lng: number }; language?: string },
-                cb: (
-                  results: GoogleGeocodeResultLike[] | null,
-                  status: string
-                ) => void
-              ) => void;
-            };
-          };
-        };
-      }).google?.maps;
-      if (gMaps?.Geocoder) {
-        const geocoder = new gMaps.Geocoder();
-        geocoder.geocode({ location: { lat, lng }, language: lang }, (results, geoStatus) => {
-          if (seq !== reverseSeqRef.current) return;
-          if (geoStatus === 'OK' && results && results.length > 0) {
-            const parsed = extractCleanGoogleGeocodeAddress(results, lat, lng, BANGLADESH_AREAS);
-            skipPanRef.current = { lat, lng };
-            onSelectLocation({
-              lat,
-              lng,
-              areaName: parsed.areaName,
-              displayName: parsed.displayName,
-            });
-            setResolving(false);
-          } else {
-            void resolveViaBackend();
-          }
-        });
-        return;
-      }
-    } catch {
-      // fall through to backend reverse geocode
-    }
-
     void resolveViaBackend();
   };
 
@@ -398,6 +416,9 @@ function GoogleMapInner({
         lang={lang}
         center={center}
         markerLabel={markerLabel}
+        pinType={pinType}
+        userName={userName}
+        restaurantName={restaurantName}
         secondaryPoint={secondaryPoint}
         riderPoint={riderPoint}
         extraRiders={extraRiders}
@@ -440,7 +461,7 @@ function GoogleMapInner({
         <MapCenterSync center={center} skipPanRef={skipPanRef} />
         <AdvancedMarker
           position={center}
-          title={markerLabel || 'User Location'}
+          title={pinAppearance.primaryLabel}
           draggable={Boolean(interactive)}
           onDragEnd={(ev) => {
             if (interactive && ev.latLng) {
@@ -448,24 +469,20 @@ function GoogleMapInner({
             }
           }}
         >
-          <div className="flex flex-col items-center">
-            <span className="px-2 py-0.5 rounded bg-[#E21B70] text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5">
-              {markerLabel || 'User Location'}
-            </span>
-            <Pin background="#E21B70" borderColor="#9E0B52" glyphColor="#FFFFFF" />
-          </div>
+          <MapPinMarkerBadge
+            label={pinAppearance.primaryLabel}
+            role={pinAppearance.primaryRole}
+          />
         </AdvancedMarker>
         {secondaryPoint && (
           <AdvancedMarker
             position={{ lat: secondaryPoint.lat, lng: secondaryPoint.lng }}
-            title={secondaryPoint.label}
+            title={pinAppearance.secondaryLabel || secondaryPoint.label}
           >
-            <div className="flex flex-col items-center">
-              <span className="px-2 py-0.5 rounded bg-[#2E3138] text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5">
-                {secondaryPoint.label}
-              </span>
-              <Pin background="#2E3138" borderColor="#111827" glyphColor="#FFFFFF" />
-            </div>
+            <MapPinMarkerBadge
+              label={pinAppearance.secondaryLabel || secondaryPoint.label}
+              role="vendor"
+            />
           </AdvancedMarker>
         )}
         {riderPoint && (
@@ -556,6 +573,9 @@ function FallbackDhakaMap({
   lang,
   center,
   markerLabel,
+  pinType,
+  userName,
+  restaurantName,
   secondaryPoint,
   riderPoint,
   extraRiders,
@@ -565,6 +585,13 @@ function FallbackDhakaMap({
   onSelectLocation,
 }: Omit<DhakaMapPickerProps, 'mapsApiKey'>) {
   const reverseSeqRef = useRef(0);
+  const pinAppearance = resolveMapPinAppearance({
+    pinType,
+    userName,
+    restaurantName,
+    markerLabel,
+    secondaryLabel: secondaryPoint?.label,
+  });
   const distance = secondaryPoint
     ? haversineDistanceKm(center.lat, center.lng, secondaryPoint.lat, secondaryPoint.lng)
     : null;
@@ -726,15 +753,25 @@ function FallbackDhakaMap({
           );
         })}
 
-      {/* Primary Pin (User Delivery - Red) */}
+      {/* Primary Pin (Red for User, Black for Vendor/Restaurant) */}
       <div
         style={{ left: `${p1.x}%`, top: `${p1.y}%` }}
         className="absolute -translate-x-1/2 -translate-y-full z-20 flex flex-col items-center pointer-events-none"
       >
-        <span className="px-2 py-0.5 rounded bg-[#E21B70] text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5">
-          {markerLabel || 'User Location'}
+        <span
+          className={`px-2 py-0.5 rounded text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5 ${
+            pinAppearance.primaryRole === 'vendor' ? 'bg-[#111827]' : 'bg-[#DC2626]'
+          }`}
+        >
+          {pinAppearance.primaryLabel}
         </span>
-        <MapPin className="w-5 h-5 text-[#E21B70] fill-[#E21B70]/20" />
+        <MapPin
+          className={`w-5 h-5 ${
+            pinAppearance.primaryRole === 'vendor'
+              ? 'text-[#111827] fill-[#111827]/25'
+              : 'text-[#DC2626] fill-[#DC2626]/25'
+          }`}
+        />
       </div>
 
       {/* Restaurant / Origin Pin (Black) */}
@@ -743,10 +780,10 @@ function FallbackDhakaMap({
           style={{ left: `${p2.x}%`, top: `${p2.y}%` }}
           className="absolute -translate-x-1/2 -translate-y-full z-20 flex flex-col items-center pointer-events-none"
         >
-          <span className="px-2 py-0.5 rounded bg-[#2E3138] text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5">
-            {secondaryPoint.label}
+          <span className="px-2 py-0.5 rounded bg-[#111827] text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5">
+            {pinAppearance.secondaryLabel || secondaryPoint.label}
           </span>
-          <MapPin className="w-5 h-5 text-[#2E3138] fill-[#2E3138]/20" />
+          <MapPin className="w-5 h-5 text-[#111827] fill-[#111827]/25" />
         </div>
       )}
 
@@ -821,41 +858,300 @@ function FallbackDhakaMap({
 
 export function DhakaMapPicker(props: DhakaMapPickerProps) {
   const [useFallback] = useState(false);
+  const [activeMethod, setActiveMethod] = useState<'gps' | 'google_maps' | 'wifi' | 'cell_tower' | 'pin'>('google_maps');
+  const [positioningNote, setPositioningNote] = useState<string>('');
+  const [showGuide, setShowGuide] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+
   const effectiveApiKey =
     props.mapsApiKey || (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || '';
 
-  if (!effectiveApiKey || useFallback) {
-    return (
+  const handleSelectLocation = (coords: {
+    lat: number;
+    lng: number;
+    areaName?: string;
+    displayName?: string;
+  }) => {
+    setActiveMethod('pin');
+    setPositioningNote(
+      props.lang === 'bn'
+        ? `📍 ম্যাপ পিন: গ্রাহক নির্ধারিত সুনির্দিষ্ট ঠিকানা (${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)})`
+        : `📍 Location Pin: Doorstep pinpoint (${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)})`
+    );
+    props.onSelectLocation?.(coords);
+  };
+
+  const handleDetectGps = () => {
+    if (!navigator.geolocation) {
+      setPositioningNote(
+        props.lang === 'bn' ? 'ব্রাউজারে GPS সাপোর্ট নেই' : 'Geolocation not supported in browser'
+      );
+      return;
+    }
+    setDetecting(true);
+    setPositioningNote(
+      props.lang === 'bn' ? 'স্যাটেলাইট জিপিএস সিগন্যাল খোঁজা হচ্ছে...' : 'Acquiring GPS / GNSS satellite signal...'
+    );
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setDetecting(false);
+        setActiveMethod('gps');
+        const acc = Math.round(pos.coords.accuracy);
+        setPositioningNote(
+          props.lang === 'bn'
+            ? `🛰️ GPS / GNSS স্যাটেলাইট লক (নির্ভুলতা: ±${acc} মি)`
+            : `🛰️ GPS / GNSS Satellite Locked (accuracy: ±${acc}m)`
+        );
+        props.onSelectLocation?.({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+        });
+      },
+      () => {
+        setDetecting(false);
+        setPositioningNote(
+          props.lang === 'bn'
+            ? 'জিপিএস সিগন্যাল পাওয়া যায়নি, ডিফল্ট লোকেশন সক্রিয়'
+            : 'Satellite fix timed out, falling back to default location'
+        );
+        props.onSelectLocation?.({
+          lat: 23.7949,
+          lng: 90.4144,
+          areaName: 'Gulshan 2',
+        });
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  };
+
+  const handleDetectWifiOrCell = () => {
+    if (!navigator.geolocation) {
+      setPositioningNote(
+        props.lang === 'bn' ? 'ব্রাউজারে নেটওয়ার্ক লোকেশন সাপোর্ট নেই' : 'Network location not supported'
+      );
+      return;
+    }
+    setDetecting(true);
+    setPositioningNote(
+      props.lang === 'bn'
+        ? 'ওয়াইফাই / মোবাইল টাওয়ার অবস্থান যাচাই হচ্ছে...'
+        : 'Estimating location via Wi-Fi / Cell tower...'
+    );
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setDetecting(false);
+        setActiveMethod('wifi');
+        const acc = Math.round(pos.coords.accuracy);
+        setPositioningNote(
+          props.lang === 'bn'
+            ? `📶 ওয়াইফাই / সেলুলার টাওয়ার অবস্থান (±${acc} মি)`
+            : `📶 Wi-Fi / Cell Tower Network Estimated (±${acc}m)`
+        );
+        props.onSelectLocation?.({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+        });
+      },
+      () => {
+        setDetecting(false);
+        setPositioningNote(
+          props.lang === 'bn'
+            ? 'নেটওয়ার্ক পজিশনিং ব্যর্থ, ম্যাপ পিন দিয়ে নির্বাচন করুন'
+            : 'Network estimate unavailable, please drag map pin'
+        );
+      },
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 }
+    );
+  };
+
+  const mapContent =
+    !effectiveApiKey || useFallback ? (
       <FallbackDhakaMap
         lang={props.lang}
         center={props.center}
         markerLabel={props.markerLabel}
+        pinType={props.pinType}
+        userName={props.userName}
+        restaurantName={props.restaurantName}
         secondaryPoint={props.secondaryPoint}
         riderPoint={props.riderPoint}
         extraRiders={props.extraRiders}
         onSelectRiderPin={props.onSelectRiderPin}
         interactive={props.interactive}
         heightClass={props.heightClass}
-        onSelectLocation={props.onSelectLocation}
+        onSelectLocation={handleSelectLocation}
       />
+    ) : (
+      <APIProvider apiKey={effectiveApiKey} language={props.lang} region="BD" libraries={['places']}>
+        <GoogleMapInner
+          lang={props.lang}
+          center={props.center}
+          markerLabel={props.markerLabel}
+          pinType={props.pinType}
+          userName={props.userName}
+          restaurantName={props.restaurantName}
+          secondaryPoint={props.secondaryPoint}
+          riderPoint={props.riderPoint}
+          riderTarget={props.riderTarget}
+          extraRiders={props.extraRiders}
+          onSelectRiderPin={props.onSelectRiderPin}
+          interactive={props.interactive}
+          heightClass={props.heightClass}
+          onSelectLocation={handleSelectLocation}
+        />
+      </APIProvider>
     );
+
+  if (!props.interactive) {
+    return mapContent;
   }
 
   return (
-    <APIProvider apiKey={effectiveApiKey} language={props.lang} region="BD">
-      <GoogleMapInner
-        lang={props.lang}
-        center={props.center}
-        markerLabel={props.markerLabel}
-        secondaryPoint={props.secondaryPoint}
-        riderPoint={props.riderPoint}
-        riderTarget={props.riderTarget}
-        extraRiders={props.extraRiders}
-        onSelectRiderPin={props.onSelectRiderPin}
-        interactive={props.interactive}
-        heightClass={props.heightClass}
-        onSelectLocation={props.onSelectLocation}
-      />
-    </APIProvider>
+    <div className="space-y-2">
+      {mapContent}
+
+      {/* Clean Single-Row Positioning Controls & Expandable 5-Method Guide */}
+      <div className="rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2 space-y-2 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              disabled={detecting}
+              onClick={handleDetectGps}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border font-semibold text-[11px] transition-colors disabled:opacity-50 ${
+                activeMethod === 'gps'
+                  ? 'bg-emerald-600 border-emerald-600 text-white'
+                  : 'bg-white border-neutral-200 hover:border-emerald-500 text-neutral-700'
+              }`}
+              title="GPS / GNSS Satellite Positioning"
+            >
+              <Satellite className="w-3 h-3 shrink-0" />
+              <span>{props.lang === 'bn' ? 'GPS' : 'GPS'}</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={detecting}
+              onClick={handleDetectWifiOrCell}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border font-semibold text-[11px] transition-colors disabled:opacity-50 ${
+                activeMethod === 'wifi' || activeMethod === 'cell_tower'
+                  ? 'bg-blue-600 border-blue-600 text-white'
+                  : 'bg-white border-neutral-200 hover:border-blue-500 text-neutral-700'
+              }`}
+              title="Wi-Fi / Cell Tower Positioning"
+            >
+              <Wifi className="w-3 h-3 shrink-0" />
+              <span>{props.lang === 'bn' ? 'ওয়াইফাই / সেল' : 'Wi-Fi / Cell'}</span>
+            </button>
+
+            <span className="hidden sm:inline-flex items-center gap-1 px-2 py-1 text-[11px] text-neutral-500">
+              <MapPin className="w-3 h-3 text-[#E21B70] shrink-0" />
+              <span>
+                {activeMethod === 'gps'
+                  ? 'GPS/GNSS'
+                  : activeMethod === 'wifi'
+                  ? 'Wi-Fi'
+                  : activeMethod === 'cell_tower'
+                  ? 'Cell Tower'
+                  : activeMethod === 'pin'
+                  ? 'Location Pin'
+                  : effectiveApiKey && !useFallback
+                  ? 'Google Maps'
+                  : 'Map Pin'}
+              </span>
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowGuide((v) => !v)}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-neutral-200/60 text-neutral-600 hover:text-[#2E3138] text-[11px] font-medium transition-colors"
+            title="View all 5 location positioning methods"
+          >
+            <Info className="w-3 h-3 shrink-0 text-[#E21B70]" />
+            <span>{props.lang === 'bn' ? 'লোকেশন পদ্ধতি' : 'Methods Guide'}</span>
+            {showGuide ? <ChevronUp className="w-3 h-3 shrink-0" /> : <ChevronDown className="w-3 h-3 shrink-0" />}
+          </button>
+        </div>
+
+        {/* Live status feedback line */}
+        {positioningNote && (
+          <p className="text-[11px] text-neutral-700 font-medium flex items-center gap-1.5 pt-0.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#E21B70] shrink-0" />
+            <span>{positioningNote}</span>
+          </p>
+        )}
+
+        {/* Expandable Location Positioning Methods Details (Exact User Specifications) */}
+        {showGuide && (
+          <div className="pt-2 border-t border-neutral-200 space-y-1.5 text-[11px] text-neutral-700 bg-white rounded-lg p-2.5">
+            <p className="font-bold text-[#2E3138] text-xs">
+              {props.lang === 'bn' ? 'সিস্টেমের ৫টি লোকেশন ও পজিশনিং পদ্ধতি:' : '5 Integrated Location Positioning Mechanisms:'}
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] leading-relaxed">
+              <div className="p-1.5 rounded bg-emerald-50/70 border border-emerald-200">
+                <p className="font-bold text-emerald-800 flex items-center gap-1">
+                  <Satellite className="w-3 h-3 shrink-0" />
+                  <span>GPS / GNSS (স্যাটেলাইট)</span>
+                </p>
+                <p className="text-neutral-600">
+                  {props.lang === 'bn'
+                    ? 'স্যাটেলাইট থেকে আপনার বর্তমান অবস্থান ও latitude-longitude নির্ণয় করে।'
+                    : 'Determines precise geographical latitude & longitude directly from global satellites.'}
+                </p>
+              </div>
+
+              <div className="p-1.5 rounded bg-pink-50/70 border border-pink-200">
+                <p className="font-bold text-[#E21B70] flex items-center gap-1">
+                  <MapPin className="w-3 h-3 shrink-0" />
+                  <span>Google Maps Platform</span>
+                </p>
+                <p className="text-neutral-600">
+                  {props.lang === 'bn'
+                    ? 'অনেক ক্ষেত্রে ম্যাপ দেখানো, রাস্তা, লোকেশন ও address selection-এর জন্য Google Maps services ব্যবহার করে।'
+                    : 'Renders map views, driving roads, place search, and reverse geocoding services.'}
+                </p>
+              </div>
+
+              <div className="p-1.5 rounded bg-blue-50/70 border border-blue-200">
+                <p className="font-bold text-blue-800 flex items-center gap-1">
+                  <Wifi className="w-3 h-3 shrink-0" />
+                  <span>Wi-Fi positioning</span>
+                </p>
+                <p className="text-neutral-600">
+                  {props.lang === 'bn'
+                    ? 'আশেপাশের Wi-Fi নেটওয়ার্ক থেকে location estimate করতে পারে।'
+                    : 'Estimates indoor and urban location by triangulating nearby Wi-Fi network signals.'}
+                </p>
+              </div>
+
+              <div className="p-1.5 rounded bg-amber-50/70 border border-amber-200">
+                <p className="font-bold text-amber-800 flex items-center gap-1">
+                  <Radio className="w-3 h-3 shrink-0" />
+                  <span>Cell tower (Mobile network)</span>
+                </p>
+                <p className="text-neutral-600">
+                  {props.lang === 'bn'
+                    ? 'মোবাইল নেটওয়ার্কের tower থেকেও আনুমানিক অবস্থান শনাক্ত করা সম্ভব।'
+                    : 'Detects coarse geographic location from cellular carrier base-station towers.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-1.5 rounded bg-neutral-100 border border-neutral-300">
+              <p className="font-bold text-neutral-800 flex items-center gap-1">
+                <MapPin className="w-3 h-3 text-[#E21B70] shrink-0" />
+                <span>Location pin (ম্যাপ পিন)</span>
+              </p>
+              <p className="text-neutral-600">
+                {props.lang === 'bn'
+                  ? 'গ্রাহক নিজে ম্যাপে pin সরিয়ে delivery address নির্ধারণ করতে পারেন।'
+                  : 'Customer can manually drag or tap the pin on the map to accurately pinpoint delivery doorstep.'}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

@@ -495,11 +495,12 @@ export function advanceRiderAlongRoute(
   };
 }
 
-export const PRIMARY_SUPER_ADMIN_EMAIL = 'rakibraqkib@gmail.com';
+export const PRIMARY_SUPER_ADMIN_EMAIL = 'raqkibrony@gmail.com';
 export const ADMIN_PIN_DEFAULT_EMAIL = 'raqkibrony@gmail.com';
+export const SECONDARY_SUPER_ADMIN_EMAIL = 'rakibraqkib@gmail.com';
 export const PROTECTED_SUPER_ADMIN_EMAILS = [
   PRIMARY_SUPER_ADMIN_EMAIL,
-  ADMIN_PIN_DEFAULT_EMAIL,
+  SECONDARY_SUPER_ADMIN_EMAIL,
 ] as const;
 
 export function isProtectedSuperAdminEmail(email: string): boolean {
@@ -1406,19 +1407,100 @@ export function buildOrderTrackingEmailPayload(input: {
   const trackingUrl = buildOrderTrackingUrl(input.origin, input.orderId, input.trackingToken);
   const niceStatus = input.status.replace(/_/g, ' ').toUpperCase();
   const invoiceNumber = `INV-${input.orderNumber}`;
-  const statusDisplayMap: Record<string, { en: string; bn: string; step: number }> = {
-    confirmed: { en: 'Order Confirmed & Invoice Ready', bn: 'অর্ডার কনফার্ম ও ইনভয়েস তৈরি হয়েছে', step: 1 },
-    accepted: { en: 'Accepted by Kitchen', bn: 'রেস্টুরেন্ট অর্ডার গ্রহণ করেছে', step: 2 },
-    preparing: { en: 'Preparing Food', bn: 'খাবার তৈরি হচ্ছে', step: 2 },
-    ready: { en: 'Ready for Pickup', bn: 'পিকআপের জন্য প্রস্তুত', step: 3 },
-    rider_assigned: { en: 'Rider Assigned', bn: 'রাইডার নির্ধারিত হয়েছে', step: 3 },
-    picked_up: { en: 'Order Picked Up', bn: 'রাইডার খাবার সংগ্রহ করেছেন', step: 4 },
-    on_the_way: { en: 'Rider Is On The Way', bn: 'রাইডার আপনার ঠিকানায় আসছেন', step: 4 },
-    delivered: { en: 'Order Delivered', bn: 'ডেলিভারি সম্পন্ন হয়েছে', step: 5 },
-    cancelled: { en: 'Order Cancelled', bn: 'অর্ডার বাতিল হয়েছে', step: 0 },
+  const statusDisplayMap: Record<
+    string,
+    { en: string; bn: string; subEn: string; subBn: string; accent: string; step: number }
+  > = {
+    confirmed: {
+      en: 'Order Confirmed & Invoice Ready',
+      bn: 'অর্ডার কনফার্ম ও ইনভয়েস তৈরি হয়েছে',
+      subEn: 'We have sent your order to the kitchen and will notify you when cooking begins.',
+      subBn: 'আপনার অর্ডারটি রেস্টুরেন্টে পাঠানো হয়েছে, রান্না শুরু হলেই আপডেট পাবেন।',
+      accent: '#E21B70',
+      step: 1,
+    },
+    payment_verified: {
+      en: 'Payment Confirmed & Receipt Updated',
+      bn: 'পেমেন্ট সম্পন্ন ও রসিদ আপডেট হয়েছে',
+      subEn: 'Your digital payment is verified and your order is moving ahead.',
+      subBn: 'আপনার পেমেন্ট যাচাই সম্পন্ন হয়েছে এবং অর্ডার প্রস্তুত হচ্ছে।',
+      accent: '#059669',
+      step: 1,
+    },
+    accepted: {
+      en: 'Accepted by Kitchen',
+      bn: 'রেস্টুরেন্ট অর্ডার গ্রহণ করেছে',
+      subEn: 'The restaurant chef accepted your order and is queueing preparation.',
+      subBn: 'রেস্টুরেন্ট আপনার অর্ডারটি গ্রহণ করেছে ও প্রস্তুতি শুরু করছে।',
+      accent: '#E21B70',
+      step: 2,
+    },
+    preparing: {
+      en: 'Preparing Fresh Food',
+      bn: 'আপনার খাবার তৈরি হচ্ছে',
+      subEn: 'Your meal is being freshly cooked and packed carefully at the kitchen.',
+      subBn: 'রেস্টুরেন্টের কিচেনে আপনার খাবার গরম ও ফ্রেশভাবে তৈরি ও প্যাক করা হচ্ছে।',
+      accent: '#D97706',
+      step: 2,
+    },
+    ready: {
+      en: 'Ready for Pickup',
+      bn: 'পিকআপের জন্য প্রস্তুত',
+      subEn: 'Your food is packed and sealed, waiting for our rider to pick it up.',
+      subBn: 'আপনার খাবার প্যাকিং সম্পন্ন — রাইডার পিকআপের জন্য অপেক্ষমাণ।',
+      accent: '#2563EB',
+      step: 3,
+    },
+    rider_assigned: {
+      en: 'Rider Assigned to Your Order',
+      bn: 'আপনার অর্ডারে রাইডার নির্ধারিত হয়েছে',
+      subEn: 'Your delivery partner is heading to the restaurant to collect your order.',
+      subBn: 'আমাদের রাইডার আপনার খাবার আনতে রেস্টুরেন্টের উদ্দেশ্যে রওনা দিয়েছেন।',
+      accent: '#2563EB',
+      step: 3,
+    },
+    picked_up: {
+      en: 'Order Picked Up by Rider',
+      bn: 'রাইডার খাবার সংগ্রহ করেছেন',
+      subEn: 'Your rider has collected the sealed bag and is starting your delivery.',
+      subBn: 'রাইডার রেস্টুরেন্ট থেকে খাবার সংগ্রহ করেছেন এবং আপনার দিকে আসছেন।',
+      accent: '#059669',
+      step: 4,
+    },
+    on_the_way: {
+      en: 'Rider Is On The Way',
+      bn: 'রাইডার আপনার ঠিকানায় আসছেন',
+      subEn: 'Get ready! Follow live rider GPS on the map link below.',
+      subBn: 'প্রস্তুত থাকুন! নিচের লিংকে রাইডারের লাইভ অবস্থান ম্যাপে দেখতে পারবেন।',
+      accent: '#059669',
+      step: 4,
+    },
+    delivered: {
+      en: 'Order Delivered — Enjoy Your Meal!',
+      bn: 'ডেলিভারি সম্পন্ন হয়েছে — খাবার উপভোগ করুন!',
+      subEn: 'Thank you for ordering with Foodora BD. Keep this invoice for your records.',
+      subBn: 'ফুডোরা বিডি-তে অর্ডার করার জন্য ধন্যবাদ! অনুগ্রহ করে অ্যাপে রিভিউ দিন।',
+      accent: '#059669',
+      step: 5,
+    },
+    cancelled: {
+      en: 'Order Cancelled',
+      bn: 'অর্ডার বাতিল হয়েছে',
+      subEn: 'This order was cancelled. Any eligible prepaid amount will be refunded automatically.',
+      subBn: 'অর্ডারটি বাতিল করা হয়েছে। অগ্রিম পেমেন্ট থাকলে রিফান্ড প্রসেস করা হবে।',
+      accent: '#DC2626',
+      step: 0,
+    },
   };
-  const info = statusDisplayMap[input.status] || { en: niceStatus, bn: niceStatus, step: 1 };
-  const subject = `Foodora BD Invoice ${invoiceNumber} (${input.orderNumber}) — ${niceStatus}`;
+  const info = statusDisplayMap[input.status] || {
+    en: `Order Status: ${niceStatus}`,
+    bn: `অর্ডার আপডেট: ${niceStatus}`,
+    subEn: 'Here is the latest update on your Foodora BD order.',
+    subBn: 'আপনার অর্ডারের সর্বশেষ অবস্থা নিচে দেওয়া হলো।',
+    accent: '#E21B70',
+    step: 1,
+  };
+  const subject = `Foodora BD · ${info.en} (${input.orderNumber} / ${invoiceNumber})`;
   const riderLine = input.riderName
     ? `<p style="margin:4px 0;"><strong>Assigned Rider:</strong> ${escapeXml(input.riderName)}${
         input.riderPhone ? ` (${escapeXml(input.riderPhone)})` : ''
@@ -1529,25 +1611,32 @@ export function buildOrderTrackingEmailPayload(input: {
   const html = `<!doctype html>
 <html>
   <body style="font-family:Arial,sans-serif;background:#f7f7f7;padding:24px;color:#2E3138;">
-    <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;padding:24px;border:1px solid #e5e7eb;">
-      <p style="margin:0 0 4px;font-size:11px;font-weight:bold;letter-spacing:0.06em;text-transform:uppercase;color:#E21B70;">Foodora BD · Order Invoice &amp; Live Tracking</p>
-      <h2 style="margin:0 0 6px;color:#2E3138;font-size:20px;">${escapeXml(info.en)}</h2>
-      <p style="margin:0 0 10px;font-size:13px;color:#E21B70;font-weight:bold;">${escapeXml(info.bn)}</p>
-      <p style="margin:0 0 10px;font-size:12px;color:#6B7280;">Invoice: <strong>${escapeXml(invoiceNumber)}</strong> · Issued: ${escapeXml(issuedAt)}</p>
-      <p style="margin:0 0 10px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
-      <p style="margin:0 0 12px;font-size:14px;">Your order <strong>${escapeXml(input.orderNumber)}</strong> from <strong>${escapeXml(input.restaurantName)}</strong> is now <strong>${escapeXml(niceStatus)}</strong>.</p>
-      ${progressHtml}
-      <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
-        <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
-        ${addressLine}
-        <p style="margin:4px 0;"><strong>Payment:</strong> ${escapeXml(input.paymentMethod.toUpperCase())}${paymentBadge} · <strong>Total: ৳${input.totalAmount}</strong></p>
-        ${etaLine}
-        ${riderLine}
-        ${noteLine}
-        ${itemsBlock}
+    <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+      <div style="background:${info.accent};padding:14px 24px;color:#ffffff;">
+        <p style="margin:0;font-size:11px;font-weight:bold;letter-spacing:0.06em;text-transform:uppercase;opacity:0.92;">Foodora BD · Order Invoice &amp; Live Tracking</p>
+        <h2 style="margin:4px 0 2px;font-size:20px;color:#ffffff;">${escapeXml(info.en)}</h2>
+        <p style="margin:0;font-size:13px;font-weight:bold;opacity:0.95;">${escapeXml(info.bn)}</p>
       </div>
-      <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Track Order &amp; Rider Live · লাইভ ট্র্যাক করুন</a>
-      <p style="margin:16px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Direct tracking link: ${escapeXml(trackingUrl)}</p>
+      <div style="padding:22px 24px;">
+        <p style="margin:0 0 10px;font-size:12px;color:#6B7280;">Invoice: <strong>${escapeXml(invoiceNumber)}</strong> · Issued: ${escapeXml(issuedAt)}</p>
+        <p style="margin:0 0 8px;font-size:14px;">Hi ${escapeXml(input.customerName)},</p>
+        <p style="margin:0 0 6px;font-size:14px;">Your order <strong>${escapeXml(input.orderNumber)}</strong> from <strong>${escapeXml(input.restaurantName)}</strong> is now <strong>${escapeXml(niceStatus)}</strong>.</p>
+        <p style="margin:0 0 4px;font-size:12px;color:#4B5563;">${escapeXml(info.subEn)}</p>
+        <p style="margin:0 0 12px;font-size:12px;color:#6B7280;">${escapeXml(info.subBn)}</p>
+        ${progressHtml}
+        <div style="background:#FFF0F6;border:1px solid #FBCFE8;border-radius:12px;padding:14px;font-size:13px;margin-bottom:16px;">
+          <p style="margin:4px 0;"><strong>Delivery Area:</strong> ${escapeXml(input.deliveryArea)}</p>
+          ${addressLine}
+          <p style="margin:4px 0;"><strong>Payment:</strong> ${escapeXml(input.paymentMethod.toUpperCase())}${paymentBadge} · <strong>Total: ৳${input.totalAmount}</strong></p>
+          ${etaLine}
+          ${riderLine}
+          ${noteLine}
+          ${itemsBlock}
+        </div>
+        <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Track Order &amp; Rider Live · লাইভ ট্র্যাক করুন</a>
+        <p style="margin:16px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Direct tracking link: ${escapeXml(trackingUrl)}</p>
+        <p style="margin:14px 0 0;padding-top:12px;border-top:1px solid #F3F4F6;font-size:11px;color:#9CA3AF;">Foodora BD Customer Order Updates · Automatic notification email for every order stage.</p>
+      </div>
     </div>
   </body>
 </html>`;
@@ -1565,6 +1654,8 @@ export function buildOrderTrackingEmailPayload(input: {
       : '';
 
   const text = `Foodora BD — Invoice ${invoiceNumber} | Order ${input.orderNumber} (${info.en} / ${info.bn})
+${info.subEn}
+${info.subBn}
 Restaurant: ${input.restaurantName}
 Delivery Area: ${input.deliveryArea}${input.deliveryAddress ? `\nAddress: ${input.deliveryAddress}` : ''}${itemsText}
 Total: BDT ${input.totalAmount} (${input.paymentMethod.toUpperCase()}${input.paymentStatus ? ` · ${input.paymentStatus}` : ''})
@@ -1575,6 +1666,69 @@ ${input.etaMinutes ? `Estimated Arrival: ~${input.etaMinutes} mins\n` : ''}${
   }${input.statusNote ? `Update: ${input.statusNote}\n` : ''}Track live on map: ${trackingUrl}`;
 
   return { subject, trackingUrl, html, text };
+}
+
+export interface OrderEmailTemplatePreset {
+  status: 'confirmed' | 'preparing' | 'rider_assigned' | 'on_the_way' | 'delivered' | 'cancelled';
+  titleEn: string;
+  titleBn: string;
+  badgeColor: string;
+}
+
+export const ORDER_EMAIL_TEMPLATE_PRESETS: readonly OrderEmailTemplatePreset[] = [
+  { status: 'confirmed', titleEn: 'Order Confirmed', titleBn: 'অর্ডার কনফার্ম', badgeColor: '#E21B70' },
+  { status: 'preparing', titleEn: 'Kitchen Preparing', titleBn: 'খাবার তৈরি হচ্ছে', badgeColor: '#D97706' },
+  { status: 'rider_assigned', titleEn: 'Rider Assigned', titleBn: 'রাইডার নির্ধারিত', badgeColor: '#2563EB' },
+  { status: 'on_the_way', titleEn: 'Rider On The Way', titleBn: 'রাইডার পথে আছেন', badgeColor: '#059669' },
+  { status: 'delivered', titleEn: 'Order Delivered', titleBn: 'ডেলিভারি সম্পন্ন', badgeColor: '#059669' },
+  { status: 'cancelled', titleEn: 'Order Cancelled', titleBn: 'অর্ডার বাতিল', badgeColor: '#DC2626' },
+];
+
+export function getOrderEmailTemplatePreview(
+  status: string,
+  origin: string = 'https://foodora.bd',
+  recipientEmail: string = 'customer@gmail.com'
+) {
+  return buildOrderTrackingEmailPayload({
+    origin,
+    orderId: 99999,
+    orderNumber: 'FD-BD-84210',
+    trackingToken: 'demo-preview-token',
+    customerName: 'Tanjim Rahman',
+    customerEmail: recipientEmail,
+    restaurantName: "Sultan's Dine — Gulshan",
+    deliveryArea: 'Banani',
+    deliveryAddress: 'House 14, Road 11, Banani, Dhaka 1213',
+    subtotal: 650,
+    discountAmount: 50,
+    couponCode: 'FOODORA50',
+    deliveryFee: 45,
+    serviceFee: 10,
+    taxAmount: 0,
+    totalAmount: 655,
+    paymentMethod: 'bkash',
+    paymentStatus: status === 'cancelled' ? 'refunded' : 'paid',
+    status,
+    statusNote:
+      status === 'delivered'
+        ? 'Handed to customer at reception desk.'
+        : status === 'cancelled'
+        ? 'Cancelled per customer support request.'
+        : 'Live order update notification from Foodora BD.',
+    riderName:
+      status === 'rider_assigned' || status === 'on_the_way' || status === 'delivered'
+        ? 'Ariful Islam'
+        : null,
+    riderPhone:
+      status === 'rider_assigned' || status === 'on_the_way' || status === 'delivered'
+        ? '01711-000222'
+        : null,
+    etaMinutes: status === 'on_the_way' ? 12 : 25,
+    items: [
+      { name: 'Mutton Kacchi (Half)', quantity: 1, unitPrice: 450, lineTotal: 450 },
+      { name: 'Jali Kabab & Borhani', quantity: 1, unitPrice: 200, lineTotal: 200 },
+    ],
+  });
 }
 
 export const CUISINE_PRESET_OPTIONS: readonly string[] = [
@@ -1653,7 +1807,7 @@ export function mergeCustomSelectOptions(
     const key = clean.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ value: clean, label: `${clean} (Custom)` });
+    out.push({ value: clean, label: `${clean} (Custom)`, group: 'Saved Custom' });
   }
 
   const cleanCurrent = normalizeCustomOptionValue(currentValue || '');
@@ -2086,7 +2240,8 @@ export function buildMerchantOrderAlertEmailPayload(input: {
         ${itemsHtml}
       </div>
       <a href="${escapeXml(trackingUrl)}" style="display:inline-block;background:#E21B70;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:10px;font-size:14px;">Open Live Order View · অর্ডার দেখুন</a>
-      <p style="margin:14px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Direct link: ${escapeXml(trackingUrl)}</p>
+      <p style="margin:12px 0 0;font-size:11px;color:#9CA3AF;">Notification dispatched to Admin (${escapeXml(PRIMARY_SUPER_ADMIN_EMAIL)}) &amp; Store Kitchen.</p>
+      <p style="margin:6px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">Direct link: ${escapeXml(trackingUrl)}</p>
     </div>
   </body>
 </html>`;
@@ -2143,8 +2298,312 @@ export function detectOrderBatchChanges<T extends OrderSnapshotItem>(
   return { newOrders, updatedOrders, nextMap };
 }
 
+export interface AddressSuggestionOption {
+  shortName: string;
+  shortNameBn?: string;
+  displayName: string;
+  subtitle?: string;
+  lat: number;
+  lng: number;
+  source: 'area' | 'map' | 'recent';
+}
 
+export interface AddressPresetInput {
+  name: string;
+  nameBn?: string;
+  division?: string;
+  zoneCode?: string;
+  zoneLabel?: string;
+  addressHint?: string;
+  keywords?: string;
+  lat: number;
+  lng: number;
+}
 
+const JOINED_PLACE_WORDS: Array<[RegExp, string]> = [
+  [/citycent(?:er|re)/gi, 'city center'],
+  [/futurepark/gi, 'future park'],
+  [/shoppingmall/gi, 'shopping mall'],
+  [/shoppingcent(?:er|re)/gi, 'shopping center'],
+  [/medicalcollege/gi, 'medical college'],
+  [/railwaystation/gi, 'railway station'],
+  [/policeplaza/gi, 'police plaza'],
+  [/pinkcity/gi, 'pink city'],
+  [/oceancity/gi, 'ocean city'],
+  [/housingestate/gi, 'housing estate'],
+  [/busstand/gi, 'bus stand'],
+  [/supermarket/gi, 'super market'],
+  [/([a-z]{3,})(\d+)/gi, '$1 $2'],
+];
 
+export function normalizeFuzzyAddressText(raw: string): string {
+  let out = raw.toLowerCase().trim();
+  for (const [pattern, replacement] of JOINED_PLACE_WORDS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out
+    .replace(/aa+/g, 'a')
+    .replace(/ee+/g, 'i')
+    .replace(/oo+/g, 'u')
+    .replace(/[,.;:/()_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
+export function expandAddressSearchQueries(rawQuery: string): string[] {
+  const clean = rawQuery.trim();
+  if (!clean) return [];
+  let spaced = clean;
+  for (const [pattern, replacement] of JOINED_PLACE_WORDS) {
+    spaced = spaced.replace(pattern, replacement);
+  }
+  spaced = spaced.replace(/\s+/g, ' ').trim();
+  const phoneticSaad = spaced.replace(/\bsad\b/gi, 'saad').replace(/\bcentre\b/gi, 'center');
+  const tokens = phoneticSaad.split(/\s+/).filter(Boolean);
+  const unique = new Set<string>([clean]);
+  if (spaced) unique.add(spaced);
+  if (phoneticSaad) unique.add(phoneticSaad);
+  if (tokens.length >= 3) {
+    unique.add(tokens.slice(0, 2).join(' '));
+  }
+  return Array.from(unique);
+}
+
+const GENERIC_PLACE_STOPWORDS = new Set([
+  'road',
+  'rd',
+  'street',
+  'st',
+  'house',
+  'block',
+  'sector',
+  'area',
+  'zone',
+  'dhaka',
+  'bangladesh',
+  'bd',
+  'city',
+  'center',
+  'centre',
+  'tower',
+  'plaza',
+  'park',
+  'mall',
+]);
+
+export function findLocalAddressSuggestions(
+  rawQuery: string,
+  areas: readonly AddressPresetInput[],
+  limit: number = 8
+): AddressSuggestionOption[] {
+  const q = rawQuery.trim().toLowerCase();
+  if (!q) return [];
+
+  const fuzzyQuery = normalizeFuzzyAddressText(rawQuery);
+  const compactQuery = fuzzyQuery.replace(/\s+/g, '');
+  const tokens = fuzzyQuery.split(/\s+/).filter(Boolean);
+  const scored: Array<{ score: number; item: AddressSuggestionOption }> = [];
+  const partialFallback: Array<{ score: number; item: AddressSuggestionOption }> = [];
+
+  for (const area of areas) {
+    const nameLower = area.name.toLowerCase();
+    const bnLower = (area.nameBn || '').toLowerCase();
+    const divLower = (area.division || '').toLowerCase();
+    const zoneLower = `${area.zoneCode || ''} ${area.zoneLabel || ''}`.toLowerCase();
+    const extraLower = `${area.addressHint || ''} ${area.keywords || ''}`.toLowerCase();
+
+    const rawHaystack = `${nameLower} ${bnLower} ${divLower} ${zoneLower} ${extraLower}`.trim();
+    const fuzzyName = normalizeFuzzyAddressText(area.name);
+    const fuzzyHaystack = normalizeFuzzyAddressText(rawHaystack);
+    const compactName = fuzzyName.replace(/\s+/g, '');
+    const compactHaystack = fuzzyHaystack.replace(/\s+/g, '');
+
+    const rawTokens = q.split(/\s+/).filter(Boolean);
+    const matchesRaw = rawTokens.length > 0 && rawTokens.every((tok) => rawHaystack.includes(tok));
+    const matchesFuzzy = tokens.length > 0 && tokens.every((tok) => fuzzyHaystack.includes(tok));
+    const matchesCompact = compactQuery.length >= 4 && compactHaystack.includes(compactQuery);
+
+    const subtitle = area.zoneCode
+      ? `${area.zoneCode}${area.division ? ` · ${area.division}` : ''}`
+      : area.zoneLabel || area.division || 'Bangladesh';
+
+    const displayName = area.addressHint
+      ? `${area.name}, ${area.addressHint}`
+      : `${area.name}${area.division ? `, ${area.division}` : ''}, Bangladesh`;
+
+    const buildItem = (): AddressSuggestionOption => ({
+      shortName: area.name,
+      shortNameBn: area.nameBn || area.name,
+      displayName,
+      subtitle,
+      lat: area.lat,
+      lng: area.lng,
+      source: 'area',
+    });
+
+    if (matchesRaw || matchesFuzzy || matchesCompact) {
+      let score = 20;
+      if (nameLower === q || bnLower === q || fuzzyName === fuzzyQuery || compactName === compactQuery) {
+        score = 120;
+      } else if (
+        nameLower.startsWith(q) ||
+        bnLower.startsWith(q) ||
+        fuzzyName.startsWith(fuzzyQuery) ||
+        compactName.startsWith(compactQuery)
+      ) {
+        score = 100;
+      } else if (
+        nameLower.includes(q) ||
+        bnLower.includes(q) ||
+        fuzzyName.includes(fuzzyQuery) ||
+        compactName.includes(compactQuery)
+      ) {
+        score = 84;
+      } else if (tokens.every((tok) => fuzzyName.includes(tok))) {
+        score = 72;
+      } else if (zoneLower.includes(q)) {
+        score = 45;
+      }
+      scored.push({ score, item: buildItem() });
+      continue;
+    }
+
+    // "Did you mean" multi-token partial matching when user types a multi-word venue/typo
+    if (tokens.length >= 2) {
+      const strongTokens = tokens.filter((t) => t.length >= 3 && !GENERIC_PLACE_STOPWORDS.has(t));
+      if (strongTokens.length > 0) {
+        const haystackWords = fuzzyHaystack.split(/\s+/).filter(Boolean);
+        const nameWords = fuzzyName.split(/\s+/).filter(Boolean);
+        const matchesWord = (words: string[], tok: string) =>
+          tok.length <= 3 ? words.some((w) => w === tok) : words.some((w) => w.startsWith(tok) || w.includes(tok));
+        let matchedCount = 0;
+        let matchedInName = 0;
+        for (const tok of strongTokens) {
+          if (matchesWord(haystackWords, tok)) {
+            matchedCount += 1;
+            if (matchesWord(nameWords, tok)) matchedInName += 1;
+          }
+        }
+        if (matchedCount > 0) {
+          const partialScore = 10 + matchedCount * 14 + matchedInName * 8;
+          partialFallback.push({ score: partialScore, item: buildItem() });
+        }
+      }
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score || a.item.shortName.localeCompare(b.item.shortName));
+  if (scored.length >= limit) {
+    return scored.slice(0, Math.max(1, limit)).map((s) => s.item);
+  }
+
+  partialFallback.sort((a, b) => b.score - a.score || a.item.shortName.localeCompare(b.item.shortName));
+  const combined = [...scored, ...partialFallback];
+  return combined.slice(0, Math.max(1, limit)).map((s) => s.item);
+}
+
+export function filterAndRankRemoteSuggestions(
+  rawQuery: string,
+  items: readonly AddressSuggestionOption[],
+  limit: number = 10
+): AddressSuggestionOption[] {
+  const fuzzyQuery = normalizeFuzzyAddressText(rawQuery);
+  const tokens = fuzzyQuery.split(/\s+/).filter((t) => t.length >= 2);
+  const strongTokens = tokens.filter((t) => t.length >= 3 && !GENERIC_PLACE_STOPWORDS.has(t));
+  const requiredAny = strongTokens.length > 0 ? strongTokens : tokens;
+  const matchesToken = (text: string, words: string[], tok: string) =>
+    tok.length <= 3 ? words.some((w) => w === tok) : text.includes(tok);
+
+  const scored: Array<{ score: number; item: AddressSuggestionOption }> = [];
+  for (const item of items) {
+    const fuzzyText = normalizeFuzzyAddressText(`${item.shortName} ${item.displayName} ${item.subtitle || ''}`);
+    const fuzzyName = normalizeFuzzyAddressText(item.shortName);
+    const textWords = fuzzyText.split(/\s+/).filter(Boolean);
+    const nameWords = fuzzyName.split(/\s+/).filter(Boolean);
+    let matchedCount = 0;
+    let matchedNameCount = 0;
+    for (const tok of tokens) {
+      if (matchesToken(fuzzyText, textWords, tok)) matchedCount += 1;
+      if (matchesToken(fuzzyName, nameWords, tok)) matchedNameCount += 1;
+    }
+    const hasStrongHit =
+      requiredAny.length === 0 || requiredAny.some((tok) => matchesToken(fuzzyText, textWords, tok));
+    if (!hasStrongHit) continue;
+    let score = matchedCount * 12 + matchedNameCount * 18;
+    if (fuzzyName.includes(fuzzyQuery)) score += 60;
+    else if (fuzzyText.includes(fuzzyQuery)) score += 35;
+    scored.push({ score, item });
+  }
+
+  if (scored.length === 0) {
+    return items.slice(0, Math.max(1, limit));
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, Math.max(1, limit)).map((s) => s.item);
+}
+
+export function mergeAddressSuggestions(
+  localItems: readonly AddressSuggestionOption[],
+  remoteItems: readonly AddressSuggestionOption[],
+  limit: number = 12
+): AddressSuggestionOption[] {
+  const out: AddressSuggestionOption[] = [];
+  const seenKeys = new Set<string>();
+
+  const pushUnique = (item: AddressSuggestionOption) => {
+    const key = `${normalizeFuzzyAddressText(item.shortName)}|${item.lat.toFixed(3)}|${item.lng.toFixed(3)}`;
+    if (seenKeys.has(key)) return;
+    seenKeys.add(key);
+    out.push(item);
+  };
+
+  for (const item of localItems) pushUnique(item);
+  for (const item of remoteItems) pushUnique(item);
+  return out.slice(0, Math.max(1, limit));
+}
+
+export function resolveMapPinAppearance(input: {
+  pinType?: 'user' | 'vendor';
+  userName?: string;
+  restaurantName?: string;
+  markerLabel?: string;
+  secondaryLabel?: string;
+}): {
+  primaryLabel: string;
+  primaryRole: 'user' | 'vendor';
+  primaryPinColor: string;
+  primaryBorderColor: string;
+  secondaryLabel: string | null;
+  secondaryPinColor: string;
+  secondaryBorderColor: string;
+} {
+  const role: 'user' | 'vendor' = input.pinType === 'vendor' ? 'vendor' : 'user';
+  const cleanUser = (input.userName || '').trim();
+  const cleanRestaurant = (input.restaurantName || '').trim();
+  const cleanMarker = (input.markerLabel || '').trim();
+  const cleanSecondary = (input.secondaryLabel || '').trim();
+
+  let primaryLabel = 'You';
+  if (role === 'vendor') {
+    primaryLabel = cleanRestaurant || cleanMarker || 'Restaurant';
+  } else if (cleanUser) {
+    primaryLabel = cleanUser;
+  } else if (cleanMarker && cleanMarker.toLowerCase() !== 'user location') {
+    primaryLabel = cleanMarker.toLowerCase().startsWith('you')
+      ? cleanMarker
+      : `You · ${cleanMarker}`;
+  } else {
+    primaryLabel = 'You';
+  }
+
+  return {
+    primaryLabel,
+    primaryRole: role,
+    primaryPinColor: role === 'vendor' ? '#111827' : '#DC2626',
+    primaryBorderColor: role === 'vendor' ? '#000000' : '#991B1B',
+    secondaryLabel: cleanSecondary || null,
+    secondaryPinColor: '#111827',
+    secondaryBorderColor: '#000000',
+  };
+}
 

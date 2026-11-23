@@ -346,6 +346,8 @@ export function RestaurantDetailView({
               lang={lang}
               center={{ lat: restaurant.lat, lng: restaurant.lng }}
               markerLabel={restaurant.name}
+              pinType="vendor"
+              restaurantName={restaurant.name}
               heightClass="h-[220px]"
             />
             <p className="text-xs text-neutral-500 mt-2.5">{restaurant.address}</p>

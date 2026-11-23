@@ -1,12 +1,13 @@
 import crypto from 'node:crypto';
 import nodemailer from 'nodemailer';
-import { eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { db } from '../db/index.ts';
-import { localCredentials, orderEmailLogs } from '../db/schema.ts';
+import { localCredentials, orderEmailLogs, users } from '../db/schema.ts';
 import {
   buildMerchantOrderAlertEmailPayload,
   buildOrderTrackingEmailPayload,
   collectMerchantOrderAlertRecipients,
+  getOrderEmailTemplatePreview,
   PRIMARY_SUPER_ADMIN_EMAIL,
 } from '../lib/marketplace-logic.ts';
 
@@ -109,6 +110,77 @@ function maskSecret(val: string): string {
   return `${clean.slice(0, 2)}••••••${clean.slice(-2)}`;
 }
 
+function normalizeSmtpPassword(providerOrHost: string, rawPass: string): string {
+  const trimmed = String(rawPass || '').trim();
+  if (!trimmed) return '';
+  if (providerOrHost.toLowerCase().includes('gmail')) {
+    return trimmed.replace(/\s+/g, '');
+  }
+  return trimmed;
+}
+
+function createSmtpTransporter(params: {
+  host: string;
+  port: number;
+  secure: boolean;
+  user: string;
+  pass: string;
+}) {
+  return nodemailer.createTransport({
+    host: params.host,
+    port: Number.isFinite(params.port) ? params.port : 465,
+    secure: params.secure,
+    auth: {
+      user: params.user,
+      pass: params.pass,
+    },
+    tls: {
+      minVersion: 'TLSv1.2',
+    },
+    connectionTimeout: 9000,
+    greetingTimeout: 9000,
+    socketTimeout: 12000,
+  });
+}
+
+function formatSmtpFriendlyError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err || 'SMTP error');
+  const lower = raw.toLowerCase();
+  if (lower.includes('535') || lower.includes('invalid login') || lower.includes('username and password not accepted')) {
+    return 'Gmail/SMTP rejected username or password. Enable 2-Step Verification and use a 16-character Google App Password.';
+  }
+  if (lower.includes('econnrefused') || lower.includes('etimedout') || lower.includes('timeout')) {
+    return `Could not reach SMTP server (${raw}). Try switching port 465 (SSL) <-> 587 (STARTTLS).`;
+  }
+  return raw;
+}
+
+export async function resolveCustomerEmailForOrder(
+  orderCustomerEmail?: string | null,
+  customerUid?: string | null
+): Promise<string | null> {
+  const direct = String(orderCustomerEmail || '').trim().toLowerCase();
+  if (direct && direct.includes('@') && !direct.endsWith('.local')) {
+    return direct;
+  }
+  const uid = String(customerUid || '').trim();
+  if (!uid || uid.startsWith('guest-')) return null;
+  try {
+    const rows = await db
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.uid, uid))
+      .limit(1);
+    const candidate = String(rows[0]?.email || '').trim().toLowerCase();
+    if (candidate && candidate.includes('@') && !candidate.endsWith('.local')) {
+      return candidate;
+    }
+  } catch {
+    // ignore lookup failures
+  }
+  return null;
+}
+
 async function readStoredConfig(): Promise<StoredEmailConfig | null> {
   try {
     const rows = await db
@@ -127,12 +199,15 @@ async function readStoredConfig(): Promise<StoredEmailConfig | null> {
 async function resolveEffectiveConfig(): Promise<ResolvedEmailConfig> {
   const stored = await readStoredConfig();
   if (stored) {
-    const smtpPass = decryptSecret(stored.smtpPassEnc);
-    const resendKey = decryptSecret(stored.resendApiKeyEnc);
     const smtpHost =
       stored.provider === 'gmail'
         ? 'smtp.gmail.com'
         : (stored.smtpHost || '').trim();
+    const smtpPass = normalizeSmtpPassword(
+      stored.provider === 'gmail' ? 'gmail' : smtpHost,
+      decryptSecret(stored.smtpPassEnc)
+    );
+    const resendKey = decryptSecret(stored.resendApiKeyEnc);
     const smtpPort = Number(stored.smtpPort) || (stored.provider === 'gmail' ? 465 : 587);
     const smtpSecure =
       stored.provider === 'gmail' ? smtpPort === 465 : Boolean(stored.smtpSecure ?? smtpPort === 465);
@@ -165,7 +240,7 @@ async function resolveEffectiveConfig(): Promise<ResolvedEmailConfig> {
 
   const envSmtpHost = (process.env.SMTP_HOST || '').trim();
   const envSmtpUser = (process.env.SMTP_USER || '').trim();
-  const envSmtpPass = (process.env.SMTP_PASS || '').trim();
+  const envSmtpPass = normalizeSmtpPassword(envSmtpHost, process.env.SMTP_PASS || '');
   const envSmtpPort = Number(process.env.SMTP_PORT || 587);
   const envSmtpSecure =
     process.env.SMTP_SECURE === 'true' || (!process.env.SMTP_SECURE && envSmtpPort === 465);
@@ -320,10 +395,13 @@ export async function saveAdminEmailSettings(input: {
     .trim()
     .toLowerCase();
 
-  const nextSmtpPassEnc =
+  const cleanedSmtpPass =
     input.smtpPass !== undefined && input.smtpPass.trim() !== ''
-      ? encryptSecret(input.smtpPass.trim())
-      : prev?.smtpPassEnc || '';
+      ? normalizeSmtpPassword(provider === 'gmail' ? 'gmail' : smtpHost, input.smtpPass)
+      : '';
+  const nextSmtpPassEnc = cleanedSmtpPass
+    ? encryptSecret(cleanedSmtpPass)
+    : prev?.smtpPassEnc || '';
   const nextResendKeyEnc =
     input.resendApiKey !== undefined && input.resendApiKey.trim() !== ''
       ? encryptSecret(input.resendApiKey.trim())
@@ -357,6 +435,69 @@ export async function saveAdminEmailSettings(input: {
   return getAdminEmailSettingsView();
 }
 
+export async function verifyEmailTransportConnection(): Promise<{
+  ok: boolean;
+  provider: 'smtp' | 'resend' | 'in_app_email_log';
+  portUsed?: number;
+  message: string;
+  error?: string;
+}> {
+  const cfg = await resolveEffectiveConfig();
+  if (cfg.providerMode === 'resend' && cfg.resendKey) {
+    return {
+      ok: true,
+      provider: 'resend',
+      message: 'Resend API key is configured. Use "Send Test Invoice" to verify recipient inbox delivery.',
+    };
+  }
+  if (!cfg.smtpHost || !cfg.smtpUser || !cfg.smtpPass) {
+    return {
+      ok: false,
+      provider: 'in_app_email_log',
+      message: 'SMTP credentials not saved yet.',
+      error: 'Enter Gmail/SMTP username and password in Admin -> Backend Control first.',
+    };
+  }
+
+  const attempts: Array<{ port: number; secure: boolean }> = [
+    { port: Number.isFinite(cfg.smtpPort) ? cfg.smtpPort : 465, secure: cfg.smtpSecure },
+  ];
+  const altPort = cfg.smtpPort === 465 ? 587 : 465;
+  attempts.push({ port: altPort, secure: altPort === 465 });
+
+  let lastError = '';
+  for (const attempt of attempts) {
+    try {
+      const transporter = createSmtpTransporter({
+        host: cfg.smtpHost,
+        port: attempt.port,
+        secure: attempt.secure,
+        user: cfg.smtpUser,
+        pass: cfg.smtpPass,
+      });
+      await transporter.verify();
+      return {
+        ok: true,
+        provider: 'smtp',
+        portUsed: attempt.port,
+        message: `SMTP connection verified (${cfg.smtpHost}:${attempt.port} ${attempt.secure ? 'SSL' : 'STARTTLS'} as ${cfg.smtpUser}).`,
+      };
+    } catch (err) {
+      lastError = formatSmtpFriendlyError(err);
+      if (lastError.toLowerCase().includes('rejected username or password')) {
+        break;
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    provider: 'smtp',
+    message: 'SMTP verification failed.',
+    error: lastError || 'Could not authenticate with SMTP server.',
+  };
+}
+
 export async function sendTransactionalEmail(params: {
   to: string;
   subject: string;
@@ -379,6 +520,7 @@ export async function sendTransactionalEmail(params: {
   }
 
   const cfg = await resolveEffectiveConfig();
+  let lastSmtpError = '';
 
   if (
     (cfg.providerMode === 'gmail' || cfg.providerMode === 'smtp') &&
@@ -386,35 +528,43 @@ export async function sendTransactionalEmail(params: {
     cfg.smtpUser &&
     cfg.smtpPass
   ) {
-    try {
-      const transporter = nodemailer.createTransport({
-        host: cfg.smtpHost,
-        port: Number.isFinite(cfg.smtpPort) ? cfg.smtpPort : 465,
-        secure: cfg.smtpSecure,
-        auth: {
+    const attempts: Array<{ port: number; secure: boolean }> = [
+      { port: Number.isFinite(cfg.smtpPort) ? cfg.smtpPort : 465, secure: cfg.smtpSecure },
+    ];
+    const altPort = cfg.smtpPort === 465 ? 587 : 465;
+    attempts.push({ port: altPort, secure: altPort === 465 });
+
+    for (const attempt of attempts) {
+      try {
+        const transporter = createSmtpTransporter({
+          host: cfg.smtpHost,
+          port: attempt.port,
+          secure: attempt.secure,
           user: cfg.smtpUser,
           pass: cfg.smtpPass,
-        },
-        connectionTimeout: 8000,
-        greetingTimeout: 8000,
-        socketTimeout: 10000,
-      });
-      await transporter.sendMail({
-        from: cfg.fromAddress || `Foodora BD <${cfg.smtpUser}>`,
-        to: emailLower,
-        subject: params.subject,
-        text: params.text,
-        html: params.html,
-      });
-      return { ok: true, provider: 'smtp', status: 'sent' };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err || 'SMTP send failed');
-      console.warn('SMTP email dispatch failed:', message);
+        });
+        await transporter.sendMail({
+          from: cfg.fromAddress || `Foodora BD <${cfg.smtpUser}>`,
+          to: emailLower,
+          subject: params.subject,
+          text: params.text,
+          html: params.html,
+        });
+        return { ok: true, provider: 'smtp', status: 'sent' };
+      } catch (err) {
+        lastSmtpError = formatSmtpFriendlyError(err);
+        if (lastSmtpError.toLowerCase().includes('rejected username or password')) {
+          break;
+        }
+      }
+    }
+    console.warn('SMTP email dispatch failed:', lastSmtpError);
+    if (!cfg.resendKey) {
       return {
         ok: false,
         provider: 'smtp',
-        status: `smtp_error: ${message.slice(0, 120)}`,
-        error: message,
+        status: `smtp_error: ${lastSmtpError.slice(0, 120)}`,
+        error: lastSmtpError,
       };
     }
   }
@@ -434,7 +584,7 @@ export async function sendTransactionalEmail(params: {
           html: params.html,
           text: params.text,
         }),
-        signal: AbortSignal.timeout(7000),
+        signal: AbortSignal.timeout(8000),
       });
       if (mailRes.ok) {
         return { ok: true, provider: 'resend', status: 'sent' };
@@ -444,7 +594,7 @@ export async function sendTransactionalEmail(params: {
         ok: false,
         provider: 'resend',
         status: `resend_error_http_${mailRes.status}`,
-        error: errText || `Resend returned HTTP ${mailRes.status}`,
+        error: errText || lastSmtpError || `Resend returned HTTP ${mailRes.status}`,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Resend request timed out';
@@ -452,7 +602,7 @@ export async function sendTransactionalEmail(params: {
         ok: false,
         provider: 'resend',
         status: `resend_error: ${message.slice(0, 120)}`,
-        error: message,
+        error: lastSmtpError ? `${lastSmtpError} | Resend: ${message}` : message,
       };
     }
   }
@@ -465,34 +615,13 @@ export async function sendTransactionalEmail(params: {
   };
 }
 
-export async function sendTestEmail(toEmail: string) {
+export async function sendTestEmail(toEmail: string, templateStatus: string = 'confirmed') {
   const cleanEmail = String(toEmail || '').trim().toLowerCase();
-  const payload = buildOrderTrackingEmailPayload({
-    origin: process.env.PUBLIC_APP_URL || 'https://foodora.bd',
-    orderId: 99999,
-    orderNumber: 'FD-BD-TEST1',
-    trackingToken: 'test-token',
-    customerName: 'Foodora Admin Test',
-    customerEmail: cleanEmail,
-    restaurantName: "Sultan's Dine — Gulshan",
-    deliveryArea: 'Gulshan 2, Dhaka',
-    deliveryAddress: 'Road 71, House 12, Gulshan 2, Dhaka, Bangladesh',
-    subtotal: 650,
-    discountAmount: 50,
-    couponCode: 'FOODORA50',
-    deliveryFee: 45,
-    serviceFee: 10,
-    taxAmount: 0,
-    totalAmount: 655,
-    paymentMethod: 'bkash',
-    paymentStatus: 'paid',
-    status: 'confirmed',
-    statusNote: 'SMTP / Gmail Invoice Delivery Test Successful',
-    etaMinutes: 25,
-    items: [
-      { name: 'Kacchi Biryani (Mutton)', quantity: 1, unitPrice: 650, lineTotal: 650 },
-    ],
-  });
+  const payload = getOrderEmailTemplatePreview(
+    templateStatus || 'confirmed',
+    process.env.PUBLIC_APP_URL || 'https://foodora.bd',
+    cleanEmail
+  );
 
   return sendTransactionalEmail({
     to: cleanEmail,
@@ -500,6 +629,62 @@ export async function sendTestEmail(toEmail: string) {
     html: payload.html,
     text: payload.text,
   });
+}
+
+export async function getRecentOrderEmailLogs(limit = 30) {
+  return db
+    .select({
+      id: orderEmailLogs.id,
+      orderId: orderEmailLogs.orderId,
+      orderNumber: orderEmailLogs.orderNumber,
+      recipientEmail: orderEmailLogs.recipientEmail,
+      subject: orderEmailLogs.subject,
+      trackingUrl: orderEmailLogs.trackingUrl,
+      statusEvent: orderEmailLogs.statusEvent,
+      deliveryProvider: orderEmailLogs.deliveryProvider,
+      providerStatus: orderEmailLogs.providerStatus,
+      htmlPreview: orderEmailLogs.htmlPreview,
+      sentAt: orderEmailLogs.sentAt,
+    })
+    .from(orderEmailLogs)
+    .orderBy(desc(orderEmailLogs.sentAt))
+    .limit(Math.max(1, Math.min(100, limit)));
+}
+
+export async function resendOrderEmailLog(logId: number) {
+  const rows = await db
+    .select()
+    .from(orderEmailLogs)
+    .where(eq(orderEmailLogs.id, logId))
+    .limit(1);
+  if (rows.length === 0) {
+    return null;
+  }
+  const row = rows[0];
+  const html = row.htmlPreview || `<p>${row.subject}</p><p><a href="${row.trackingUrl}">${row.trackingUrl}</a></p>`;
+  const text = `${row.subject}\nTrack order: ${row.trackingUrl}`;
+  const dispatchResult = await sendTransactionalEmail({
+    to: row.recipientEmail,
+    subject: row.subject,
+    html,
+    text,
+  });
+
+  const updated = await db
+    .update(orderEmailLogs)
+    .set({
+      deliveryProvider: dispatchResult.provider,
+      providerStatus: dispatchResult.status,
+      sentAt: new Date(),
+    })
+    .where(eq(orderEmailLogs.id, row.id))
+    .returning();
+
+  return {
+    ok: dispatchResult.ok,
+    dispatchResult,
+    log: updated[0] ?? row,
+  };
 }
 
 export async function sendAndLogOrderTrackingEmail(params: {
@@ -627,8 +812,6 @@ export async function sendMerchantOrderAlertEmail(params: {
   }>;
 }) {
   const status = await getEmailTransportStatus();
-  if (!status.configured) return [];
-
   const stored = await readStoredConfig();
   const configuredNotify =
     stored?.notifyEmail ||
@@ -639,7 +822,7 @@ export async function sendMerchantOrderAlertEmail(params: {
     restaurantEmail: params.restaurantEmail,
     ownerEmail: params.ownerEmail,
     adminNotifyEmail: configuredNotify,
-    fallbackAdminEmails: [PRIMARY_SUPER_ADMIN_EMAIL],
+    fallbackAdminEmails: [PRIMARY_SUPER_ADMIN_EMAIL, 'raqkibrony@gmail.com'],
   });
   if (recipients.length === 0) return [];
 
@@ -664,13 +847,42 @@ export async function sendMerchantOrderAlertEmail(params: {
   });
 
   return Promise.allSettled(
-    recipients.map((to) =>
-      sendTransactionalEmail({
-        to,
-        subject: payload.subject,
-        html: payload.html,
-        text: payload.text,
-      })
-    )
+    recipients.map(async (to) => {
+      let dispatchResult: {
+        ok: boolean;
+        provider: 'smtp' | 'resend' | 'in_app_email_log';
+        status: string;
+        error?: string;
+      } = {
+        ok: false,
+        provider: 'in_app_email_log',
+        status: 'not_configured',
+        error: 'SMTP not configured yet; email logged for audit.',
+      };
+      if (status.configured) {
+        dispatchResult = await sendTransactionalEmail({
+          to,
+          subject: payload.subject,
+          html: payload.html,
+          text: payload.text,
+        });
+      }
+      try {
+        await db.insert(orderEmailLogs).values({
+          orderId: params.orderId,
+          orderNumber: params.orderNumber,
+          recipientEmail: to,
+          subject: payload.subject,
+          trackingUrl: payload.trackingUrl,
+          statusEvent: `admin_alert_${params.eventKind}`,
+          deliveryProvider: dispatchResult.provider,
+          providerStatus: dispatchResult.status,
+          htmlPreview: payload.html,
+        });
+      } catch (logErr) {
+        // non-blocking
+      }
+      return dispatchResult;
+    })
   );
 }

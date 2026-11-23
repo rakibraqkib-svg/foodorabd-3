@@ -20,6 +20,8 @@ import {
   Trash2,
   Upload,
   Utensils,
+  Volume2,
+  VolumeX,
   Wallet,
   X,
 } from 'lucide-react';
@@ -38,7 +40,12 @@ import {
 } from 'recharts';
 import { apiFetch, getAuthToken } from '../lib/api';
 import { BANGLADESH_AREAS, getBangladeshAreaSelectPresets } from '../lib/i18n';
-import { emitLocalRealtimeSignal, playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
+import {
+  emitLocalRealtimeSignal,
+  playOrderAlertChime,
+  useOrderSoundSetting,
+  useRealtimeEvents,
+} from '../lib/realtime';
 import {
   buildVendorAnalytics,
   CUISINE_PRESET_OPTIONS,
@@ -203,6 +210,7 @@ export function VendorDashboard({
     ok: boolean;
     message: string;
   } | null>(null);
+  const [orderSoundEnabled, setOrderSoundEnabled] = useOrderSoundSetting();
 
   const canAccessVendorApi =
     user.role === 'restaurant_owner' || user.role === 'admin' || user.role === 'super_admin';
@@ -319,7 +327,7 @@ export function VendorDashboard({
   useRealtimeEvents({
     enabled: canAccessVendorApi,
     token: getAuthToken(),
-    pollFallbackMs: 6000,
+    pollFallbackMs: 4000,
     onSync: () => {
       loadWorkspace(selectedRestaurantId, true);
     },
@@ -729,21 +737,91 @@ export function VendorDashboard({
           <span>{lang === 'bn' ? 'মার্কেটপ্লেসে ফিরুন' : 'Back to Storefront'}</span>
         </button>
 
-        {restaurant && (
+        <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
-            onClick={() => setShowOnboarding((v) => !v)}
-            className="px-3.5 py-2 rounded-xl border border-neutral-200 bg-white text-xs font-semibold text-neutral-700 hover:border-[#E21B70]"
+            onClick={() => {
+              const next = !orderSoundEnabled;
+              setOrderSoundEnabled(next);
+              if (next) {
+                void playOrderAlertChime('new_order', { force: true });
+                setFeedback(
+                  lang === 'bn'
+                    ? 'অর্ডার সাউন্ড চালু হয়েছে (নতুন অর্ডার ও স্ট্যাটাস আপডেটে সাউন্ড বাজবে)।'
+                    : 'Order alert sound enabled (chimes automatically on incoming orders and updates).'
+                );
+              } else {
+                setFeedback(
+                  lang === 'bn' ? 'অর্ডার সাউন্ড মিউট করা হয়েছে।' : 'Order sound muted.'
+                );
+              }
+            }}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${
+              orderSoundEnabled
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                : 'bg-neutral-100 text-neutral-600 border-neutral-300 hover:bg-neutral-200'
+            }`}
+            title={lang === 'bn' ? 'অর্ডার সাউন্ড কন্ট্রোল' : 'Toggle order notification chime'}
           >
-            {showOnboarding
-              ? lang === 'bn'
-                ? 'ড্যাশবোর্ডে ফিরুন'
-                : 'Back to Vendor Dashboard'
-              : lang === 'bn'
-              ? '+ নতুন রেস্টুরেন্ট আবেদন'
-              : '+ Register New Restaurant'}
+            {orderSoundEnabled ? (
+              <Volume2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            ) : (
+              <VolumeX className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
+            )}
+            <span>
+              {orderSoundEnabled
+                ? lang === 'bn'
+                  ? 'সাউন্ড সক্রিয় 🔔'
+                  : 'Sound Active 🔔'
+                : lang === 'bn'
+                ? 'সাউন্ড মিউট 🔕'
+                : 'Sound Muted 🔕'}
+            </span>
           </button>
-        )}
+
+          <button
+            type="button"
+            onClick={() => {
+              void playOrderAlertChime('new_order', { force: true });
+              setFeedback(
+                lang === 'bn' ? 'অর্ডার চিম টেস্ট বাজানো হয়েছে!' : 'Order chime audio test played!'
+              );
+            }}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-700 text-xs font-semibold transition-colors"
+            title={lang === 'bn' ? 'সাউন্ড টেস্ট করুন' : 'Test order notification chime'}
+          >
+            <Bell className="w-3.5 h-3.5 text-[#E21B70] shrink-0" />
+            <span>{lang === 'bn' ? 'টেস্ট সাউন্ড' : 'Test Chime'}</span>
+          </button>
+
+          <div
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-pink-50 border border-pink-200 text-[#E21B70] text-xs font-semibold"
+            title={
+              lang === 'bn'
+                ? 'ম্যানুয়াল রিলোড ছাড়া প্রতি ৪ সেকেন্ডে স্বয়ংক্রিয়ভাবে নতুন অর্ডার আপডেট হবে।'
+                : 'Continuous auto-sync active without manual reload (every 4s).'
+            }
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+            <span>{lang === 'bn' ? 'অটো-আপডেট লাইভ' : 'Auto-Sync Live'}</span>
+          </div>
+
+          {restaurant && (
+            <button
+              type="button"
+              onClick={() => setShowOnboarding((v) => !v)}
+              className="px-3.5 py-1.5 rounded-lg border border-neutral-200 bg-white text-xs font-semibold text-neutral-700 hover:border-[#E21B70]"
+            >
+              {showOnboarding
+                ? lang === 'bn'
+                  ? 'ড্যাশবোর্ডে ফিরুন'
+                  : 'Back to Vendor Dashboard'
+                : lang === 'bn'
+                ? '+ নতুন রেস্টুরেন্ট আবেদন'
+                : '+ Register New Restaurant'}
+            </button>
+          )}
+        </div>
       </div>
 
       {feedback && (
@@ -1031,6 +1109,8 @@ export function VendorDashboard({
                   lang={lang}
                   center={coords}
                   markerLabel={restName || area}
+                  pinType="vendor"
+                  restaurantName={restName}
                   interactive
                   heightClass="h-[200px]"
                   onSelectLocation={(c) => {
@@ -2420,6 +2500,8 @@ export function VendorDashboard({
                     lang={lang}
                     center={editCoords}
                     markerLabel={restaurant.name}
+                    pinType="vendor"
+                    restaurantName={restaurant.name}
                     interactive
                     heightClass="h-[190px]"
                     onSelectLocation={(c) => {

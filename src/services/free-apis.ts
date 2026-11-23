@@ -1,10 +1,15 @@
 import {
   cleanMapAddressSegments,
+  expandAddressSearchQueries,
+  filterAndRankRemoteSuggestions,
+  findLocalAddressSuggestions,
   haversineDistanceKm,
+  isWithinBangladesh,
   mapOpenMeteoWeather,
   matchCanonicalAreaFromHints,
+  mergeAddressSuggestions,
 } from '../lib/marketplace-logic.ts';
-import { BANGLADESH_AREAS } from '../lib/i18n.ts';
+import { BANGLADESH_AREAS, BANGLADESH_SEARCH_PLACES } from '../lib/i18n.ts';
 
 interface CacheEntry<T> {
   value: T;
@@ -93,43 +98,227 @@ export async function fetchDhakaWeather(lat: number, lng: number): Promise<Dhaka
 export interface OsmPlaceSuggestion {
   displayName: string;
   shortName: string;
+  subtitle?: string;
   lat: number;
   lng: number;
+  source: 'area' | 'map' | 'recent';
 }
 
-export async function searchOsmPlaces(query: string): Promise<OsmPlaceSuggestion[]> {
-  const q = query.trim();
-  if (!q) return [];
-  const key = `osm-search:${q.toLowerCase()}`;
-  const cached = getCached<OsmPlaceSuggestion[]>(key);
-  if (cached) return cached;
-
+async function fetchPhotonBangladeshPlaces(
+  query: string,
+  biasLat: number,
+  biasLng: number
+): Promise<OsmPlaceSuggestion[]> {
   try {
-    const queryWithCountry = q.toLowerCase().includes('bangladesh') ? q : `${q}, Bangladesh`;
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
-      queryWithCountry
-    )}&format=json&countrycodes=bd&limit=6`;
+    const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(
+      query
+    )}&lat=${biasLat}&lon=${biasLng}&limit=10&lang=en&bbox=88.0,20.5,92.7,26.7`;
     const res = await fetch(url, {
       headers: { 'User-Agent': 'FoodoraBD-Marketplace/1.0' },
-      signal: AbortSignal.timeout(3500),
+      signal: AbortSignal.timeout(3200),
     });
-    if (!res.ok) throw new Error(`Nominatim HTTP ${res.status}`);
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      features?: Array<{
+        geometry?: { coordinates?: [number, number] };
+        properties?: {
+          name?: string;
+          housenumber?: string;
+          street?: string;
+          locality?: string;
+          district?: string;
+          city?: string;
+          county?: string;
+          state?: string;
+          country?: string;
+          countrycode?: string;
+        };
+      }>;
+    };
+    const out: OsmPlaceSuggestion[] = [];
+    for (const f of data.features || []) {
+      const coords = f.geometry?.coordinates;
+      if (!coords || coords.length < 2) continue;
+      const lng = Number(coords[0]);
+      const lat = Number(coords[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      const p = f.properties || {};
+      if (p.countrycode && p.countrycode.toUpperCase() !== 'BD') continue;
+      if (!isWithinBangladesh(lat, lng)) continue;
+
+      const rawTitle = (p.name || '').split(';')[0]?.trim() || p.street || p.district || p.city || 'Bangladesh';
+      const streetLine = [p.housenumber, p.street].filter(Boolean).join(' ').trim();
+      const areaLine = [p.locality, p.district, p.city || p.county].filter(Boolean);
+      const displayParts = cleanMapAddressSegments(
+        [rawTitle, streetLine, ...areaLine, 'Bangladesh'].filter(Boolean).join(', ')
+      );
+      const displayName =
+        displayParts.length > 0 ? `${displayParts.slice(0, 4).join(', ')}, Bangladesh` : `${rawTitle}, Bangladesh`;
+      const subtitle = areaLine.slice(0, 2).join(' · ') || p.state || 'Bangladesh Map';
+
+      out.push({
+        displayName,
+        shortName: rawTitle,
+        subtitle,
+        lat,
+        lng,
+        source: 'map',
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+async function fetchGooglePlacesTextSearch(
+  query: string,
+  biasLat: number,
+  biasLng: number
+): Promise<OsmPlaceSuggestion[]> {
+  const apiKey =
+    process.env.GOOGLE_MAPS_SERVER_API_KEY ||
+    process.env.GOOGLE_MAPS_API_KEY ||
+    process.env.VITE_GOOGLE_MAPS_API_KEY ||
+    '';
+  if (!apiKey) return [];
+  try {
+    const qWithBd = query.toLowerCase().includes('bangladesh') ? query : `${query}, Bangladesh`;
+    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(
+      qWithBd
+    )}&location=${biasLat},${biasLng}&radius=50000&region=bd&key=${encodeURIComponent(apiKey)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(3200) });
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      status?: string;
+      results?: Array<{
+        name?: string;
+        formatted_address?: string;
+        geometry?: { location?: { lat?: number; lng?: number } };
+      }>;
+    };
+    if (data.status !== 'OK' || !Array.isArray(data.results)) return [];
+    const out: OsmPlaceSuggestion[] = [];
+    for (const r of data.results.slice(0, 8)) {
+      const lat = Number(r.geometry?.location?.lat);
+      const lng = Number(r.geometry?.location?.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || !isWithinBangladesh(lat, lng)) continue;
+      const cleaned = cleanMapAddressSegments(r.formatted_address || '');
+      const shortName =
+        r.name?.trim() ||
+        cleaned[0] ||
+        matchCanonicalAreaFromHints([r.formatted_address || ''], lat, lng, BANGLADESH_AREAS);
+      const displayName =
+        cleaned.length > 0 ? `${cleaned.slice(0, 4).join(', ')}, Bangladesh` : `${shortName}, Bangladesh`;
+      out.push({
+        displayName,
+        shortName,
+        subtitle: cleaned.slice(1, 3).join(' · ') || 'Google Places',
+        lat,
+        lng,
+        source: 'map',
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+async function fetchNominatimPlaces(query: string): Promise<OsmPlaceSuggestion[]> {
+  try {
+    const queryWithCountry = query.toLowerCase().includes('bangladesh') ? query : `${query}, Bangladesh`;
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+      queryWithCountry
+    )}&format=json&addressdetails=1&countrycodes=bd&limit=6&accept-language=en,bn`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'FoodoraBD-Marketplace/1.0' },
+      signal: AbortSignal.timeout(3200),
+    });
+    if (!res.ok) return [];
     const rows = (await res.json()) as Array<{
       display_name: string;
       lat: string;
       lon: string;
+      name?: string;
+      address?: {
+        road?: string;
+        neighbourhood?: string;
+        suburb?: string;
+        city?: string;
+        town?: string;
+        county?: string;
+      };
     }>;
 
-    const mapped = rows.map((r) => ({
-      displayName: r.display_name,
-      shortName: r.display_name.split(',').slice(0, 2).join(', ').trim(),
-      lat: Number(r.lat),
-      lng: Number(r.lon),
-    }));
-    return setCached(key, mapped, 10 * 60 * 1000);
+    return rows
+      .filter((r) => Number.isFinite(Number(r.lat)) && Number.isFinite(Number(r.lon)))
+      .map((r) => {
+        const lat = Number(r.lat);
+        const lng = Number(r.lon);
+        const cleaned = cleanMapAddressSegments(r.display_name);
+        const rawName = (r.name || '').split(';')[0]?.trim();
+        const shortName =
+          rawName ||
+          cleaned[0] ||
+          r.display_name.split(',')[0]?.trim() ||
+          matchCanonicalAreaFromHints([r.display_name], lat, lng, BANGLADESH_AREAS);
+        const cleanDisplay =
+          cleaned.length > 0 ? `${cleaned.slice(0, 4).join(', ')}, Bangladesh` : r.display_name;
+        const subtitleParts = [
+          r.address?.suburb || r.address?.neighbourhood || '',
+          r.address?.city || r.address?.town || r.address?.county || '',
+        ].filter(Boolean);
+        return {
+          displayName: cleanDisplay,
+          shortName,
+          subtitle: subtitleParts.join(' · ') || 'Bangladesh Map',
+          lat,
+          lng,
+          source: 'map' as const,
+        };
+      });
   } catch {
     return [];
   }
+}
+
+export async function searchOsmPlaces(
+  query: string,
+  bias?: { lat?: number; lng?: number }
+): Promise<OsmPlaceSuggestion[]> {
+  const q = query.trim();
+  if (!q) return [];
+  const biasLat = Number.isFinite(bias?.lat) ? Number(bias?.lat) : 23.7949;
+  const biasLng = Number.isFinite(bias?.lng) ? Number(bias?.lng) : 90.4144;
+
+  const key = `osm-search-v4:${q.toLowerCase()}:${biasLat.toFixed(1)},${biasLng.toFixed(1)}`;
+  const cached = getCached<OsmPlaceSuggestion[]>(key);
+  if (cached) return cached;
+
+  const localMatches = findLocalAddressSuggestions(q, BANGLADESH_SEARCH_PLACES, 8);
+  const queryVariants = expandAddressSearchQueries(q);
+  const fullPhoneticQuery = queryVariants.find((v) => v.includes('saad') || v.includes(' ')) || q;
+  const prefixQuery = queryVariants.length >= 3 ? queryVariants[queryVariants.length - 1] : '';
+
+  const [googleHits, photonPrimary, photonExpanded, photonPrefix, nominatimHits] = await Promise.all([
+    fetchGooglePlacesTextSearch(fullPhoneticQuery, biasLat, biasLng),
+    fetchPhotonBangladeshPlaces(q, biasLat, biasLng),
+    fullPhoneticQuery !== q ? fetchPhotonBangladeshPlaces(fullPhoneticQuery, biasLat, biasLng) : Promise.resolve([]),
+    prefixQuery && prefixQuery !== fullPhoneticQuery && prefixQuery !== q
+      ? fetchPhotonBangladeshPlaces(prefixQuery, biasLat, biasLng)
+      : Promise.resolve([]),
+    fetchNominatimPlaces(fullPhoneticQuery),
+  ]);
+
+  const remoteCombined = mergeAddressSuggestions(
+    [...googleHits, ...photonExpanded],
+    [...photonPrimary, ...photonPrefix, ...nominatimHits],
+    16
+  );
+  const rankedRemote = filterAndRankRemoteSuggestions(fullPhoneticQuery, remoteCombined, 10);
+  const merged = mergeAddressSuggestions(localMatches, rankedRemote, 12);
+  return setCached(key, merged, 10 * 60 * 1000);
 }
 
 export async function reverseOsmGeocode(

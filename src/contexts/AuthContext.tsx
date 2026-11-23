@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { isEmbeddedIframe, supabase } from '../lib/supabase';
+import { isEmbeddedIframe, supabase, SUPABASE_PUBLIC_CONFIG } from '../lib/supabase';
 import { apiFetch, getAuthToken, setAuthToken } from '../lib/api';
 import { isSandboxAuthToken } from '../lib/marketplace-logic';
 import type { AppUser } from '../types/marketplace';
@@ -203,6 +203,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setError(null);
     setGoogleRedirectUrl(null);
     try {
+      // Pre-check if Google provider is enabled in Supabase project to prevent 400 Unsupported Provider page
+      try {
+        const settingsRes = await fetch(`${SUPABASE_PUBLIC_CONFIG.url}/auth/v1/settings`, {
+          headers: { apikey: SUPABASE_PUBLIC_CONFIG.anonKey },
+        });
+        if (settingsRes.ok) {
+          const settings = await settingsRes.json();
+          if (settings?.external?.google === false) {
+            setError(
+              'Google provider is not enabled yet in your Supabase project (Authentication -> Providers -> Google). Please use Email & Password below to create an account or sign in.'
+            );
+            return false;
+          }
+        }
+      } catch {
+        // Continue if settings fetch is blocked
+      }
+
       const redirectTo = typeof window !== 'undefined' ? window.location.origin : undefined;
       const embedded = isEmbeddedIframe();
 

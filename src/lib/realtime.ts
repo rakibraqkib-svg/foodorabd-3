@@ -278,7 +278,7 @@ export function useRealtimeEvents(options: {
     token = null,
     orderId = null,
     trackingToken = null,
-    pollFallbackMs = 8000,
+    pollFallbackMs = 4000,
     onEvent,
     onSync,
   } = options;
@@ -290,7 +290,6 @@ export function useRealtimeEvents(options: {
 
   useEffect(() => {
     if (!enabled || typeof window === 'undefined') return;
-    if (!token && !orderId) return;
 
     let disposed = false;
     let ws: WebSocket | null = null;
@@ -298,12 +297,6 @@ export function useRealtimeEvents(options: {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let wsConsecutiveFailures = 0;
     let liveConnected = false;
-
-    const params = new URLSearchParams();
-    if (token) params.set('token', token);
-    if (orderId) params.set('orderId', String(orderId));
-    if (trackingToken) params.set('trackingToken', trackingToken);
-    const qs = params.toString();
 
     const dispatchClientMessage = (parsed: ClientRealtimeMessage) => {
       if (parsed && parsed.type && parsed.type !== 'connected') {
@@ -320,79 +313,88 @@ export function useRealtimeEvents(options: {
       }
     };
 
-    const connectSseFallback = () => {
-      if (disposed || sse || typeof EventSource === 'undefined') return;
-      sse = new EventSource(`/api/realtime/stream?${qs}`);
-      sse.onopen = () => {
-        liveConnected = true;
-      };
-      sse.onmessage = (ev) => {
-        handleMessageText(ev.data);
-      };
-      sse.onerror = () => {
-        liveConnected = false;
-      };
-    };
+    // Only attempt live WebSocket/SSE stream if we have an auth token or watch order
+    if (token || orderId || trackingToken) {
+      const params = new URLSearchParams();
+      if (token) params.set('token', token);
+      if (orderId) params.set('orderId', String(orderId));
+      if (trackingToken) params.set('trackingToken', trackingToken);
+      const qs = params.toString();
 
-    const connectWs = () => {
-      if (disposed) return;
-      // Switch to SSE immediately after first WS close so updates never stall
-      if (wsConsecutiveFailures >= 1) {
-        connectSseFallback();
-        return;
-      }
-      const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${wsProto}//${window.location.host}/ws?${qs}`;
-      const openedAt = Date.now();
-      let opened = false;
-      try {
-        ws = new WebSocket(url);
-      } catch {
-        wsConsecutiveFailures += 1;
-        connectSseFallback();
-        return;
-      }
-
-      ws.onopen = () => {
-        if (disposed) {
-          try {
-            ws?.close();
-          } catch {
-            // ignore
-          }
-          return;
-        }
-        opened = true;
-        liveConnected = true;
-        wsConsecutiveFailures = 0;
-      };
-
-      ws.onmessage = (ev) => {
-        if (typeof ev.data === 'string') {
+      const connectSseFallback = () => {
+        if (disposed || sse || typeof EventSource === 'undefined') return;
+        sse = new EventSource(`/api/realtime/stream?${qs}`);
+        sse.onopen = () => {
+          liveConnected = true;
+        };
+        sse.onmessage = (ev) => {
           handleMessageText(ev.data);
-        }
+        };
+        sse.onerror = () => {
+          liveConnected = false;
+        };
       };
 
-      ws.onclose = () => {
-        liveConnected = false;
+      const connectWs = () => {
         if (disposed) return;
-        const lifetime = Date.now() - openedAt;
-        if (!opened || lifetime < 1500) {
-          wsConsecutiveFailures += 1;
-        }
+        // Switch to SSE immediately after first WS close so updates never stall
         if (wsConsecutiveFailures >= 1) {
           connectSseFallback();
           return;
         }
-        reconnectTimer = setTimeout(connectWs, 1200);
+        const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${wsProto}//${window.location.host}/ws?${qs}`;
+        const openedAt = Date.now();
+        let opened = false;
+        try {
+          ws = new WebSocket(url);
+        } catch {
+          wsConsecutiveFailures += 1;
+          connectSseFallback();
+          return;
+        }
+
+        ws.onopen = () => {
+          if (disposed) {
+            try {
+              ws?.close();
+            } catch {
+              // ignore
+            }
+            return;
+          }
+          opened = true;
+          liveConnected = true;
+          wsConsecutiveFailures = 0;
+        };
+
+        ws.onmessage = (ev) => {
+          if (typeof ev.data === 'string') {
+            handleMessageText(ev.data);
+          }
+        };
+
+        ws.onclose = () => {
+          liveConnected = false;
+          if (disposed) return;
+          const lifetime = Date.now() - openedAt;
+          if (!opened || lifetime < 1500) {
+            wsConsecutiveFailures += 1;
+          }
+          if (wsConsecutiveFailures >= 1) {
+            connectSseFallback();
+            return;
+          }
+          reconnectTimer = setTimeout(connectWs, 1200);
+        };
+
+        ws.onerror = () => {
+          // onclose will trigger SSE fallback
+        };
       };
 
-      ws.onerror = () => {
-        // onclose will trigger SSE fallback
-      };
-    };
-
-    connectWs();
+      connectWs();
+    }
 
     // Instant cross-tab local sync (e.g., Customer tab -> Admin/Vendor tab in same browser)
     let bc: BroadcastChannel | null = null;
@@ -424,18 +426,15 @@ export function useRealtimeEvents(options: {
     window.addEventListener('focus', handleVisibilityOrFocus);
     document.addEventListener('visibilitychange', handleVisibilityOrFocus);
 
-    // Fast polling when disconnected, plus a guaranteed safety-net periodic sync
-    // so multi-instance deployments stay up to date without manual reload.
-    const effectiveInterval = Math.max(4000, pollFallbackMs);
+    // Continuous fast polling safety net so all screens auto-update without manual browser reload
+    const effectiveInterval = Math.max(3000, pollFallbackMs);
     let ticks = 0;
     const syncInterval =
       pollFallbackMs > 0
         ? setInterval(() => {
             if (document.visibilityState !== 'visible') return;
             ticks += 1;
-            if (!liveConnected || ticks % 2 === 0) {
-              onSyncRef.current?.();
-            }
+            onSyncRef.current?.();
           }, effectiveInterval)
         : null;
 

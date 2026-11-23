@@ -95,11 +95,15 @@ import {
 import {
   getAdminEmailSettingsView,
   getEmailTransportStatus,
+  getRecentOrderEmailLogs,
+  resendOrderEmailLog,
+  resolveCustomerEmailForOrder,
   saveAdminEmailSettings,
   sendAndLogOrderTrackingEmail,
   sendMerchantOrderAlertEmail,
   sendTestEmail,
   sendTransactionalEmail,
+  verifyEmailTransportConnection,
 } from './src/services/order-email.ts';
 import {
   attachSseRealtimeClient,
@@ -1173,7 +1177,9 @@ app.get('/api/free/weather', async (req, res) => {
 app.get('/api/free/geocode', async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.json({ places: [] });
-  const places = await searchOsmPlaces(q);
+  const lat = req.query.lat !== undefined ? Number(req.query.lat) : undefined;
+  const lng = req.query.lng !== undefined ? Number(req.query.lng) : undefined;
+  const places = await searchOsmPlaces(q, { lat, lng });
   res.json({ places });
 });
 
@@ -2019,14 +2025,18 @@ app.post('/api/payments/verify', requireAuth, async (req: AuthRequest, res) => {
       .where(eq(restaurants.id, updated[0].restaurantId))
       .limit(1);
 
-    if (updated[0].customerEmail) {
+    const verifyRecipientEmail = await resolveCustomerEmailForOrder(
+      updated[0].customerEmail,
+      updated[0].customerUid
+    );
+    if (verifyRecipientEmail) {
       await sendAndLogOrderTrackingEmail({
         origin: getRequestOrigin(req),
         orderId: updated[0].id,
         orderNumber: updated[0].orderNumber,
         trackingToken: updated[0].trackingToken,
         customerName: updated[0].customerName,
-        customerEmail: updated[0].customerEmail,
+        customerEmail: verifyRecipientEmail,
         restaurantName: updated[0].restaurantName,
         deliveryArea: updated[0].deliveryArea,
         deliveryAddress: updated[0].deliveryAddress,
@@ -2127,6 +2137,82 @@ app.post('/api/payments/webhook/:code', async (req, res) => {
       status: targetOrder.status,
       note: `Webhook (${gateway.name}) marked payment as ${nextPaymentStatus}`,
       actorUid: `webhook:${code}`,
+    });
+
+    const restOwnerRows = await db
+      .select({ ownerUid: restaurants.ownerUid, email: restaurants.email })
+      .from(restaurants)
+      .where(eq(restaurants.id, updated[0].restaurantId))
+      .limit(1);
+
+    const webhookRecipient = await resolveCustomerEmailForOrder(
+      updated[0].customerEmail,
+      updated[0].customerUid
+    );
+    if (webhookRecipient && nextPaymentStatus === 'paid') {
+      await sendAndLogOrderTrackingEmail({
+        origin: getRequestOrigin(req),
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        trackingToken: updated[0].trackingToken,
+        customerName: updated[0].customerName,
+        customerEmail: webhookRecipient,
+        restaurantName: updated[0].restaurantName,
+        deliveryArea: updated[0].deliveryArea,
+        deliveryAddress: updated[0].deliveryAddress,
+        subtotal: updated[0].subtotal,
+        discountAmount: updated[0].discountAmount,
+        couponCode: updated[0].couponCode,
+        deliveryFee: updated[0].deliveryFee,
+        serviceFee: updated[0].serviceFee,
+        taxAmount: updated[0].taxAmount,
+        totalAmount: updated[0].totalAmount,
+        paymentMethod: updated[0].paymentMethod,
+        paymentStatus: updated[0].paymentStatus,
+        status: 'payment_verified',
+        statusEvent: 'payment_verified',
+        statusNote: `${gateway.name} confirmed payment`,
+        riderName: updated[0].riderName,
+        etaMinutes: updated[0].estimatedMinutes,
+        createdAt: updated[0].createdAt,
+        items: updated[0].itemsSnapshotJson,
+      });
+    }
+
+    await sendMerchantOrderAlertEmail({
+      origin: getRequestOrigin(req),
+      orderId: updated[0].id,
+      orderNumber: updated[0].orderNumber,
+      trackingToken: updated[0].trackingToken,
+      eventKind: 'status_update',
+      restaurantName: updated[0].restaurantName,
+      restaurantEmail: restOwnerRows[0]?.email || null,
+      customerName: updated[0].customerName,
+      customerPhone: updated[0].customerPhone,
+      deliveryArea: updated[0].deliveryArea,
+      deliveryAddress: updated[0].deliveryAddress,
+      totalAmount: updated[0].totalAmount,
+      paymentMethod: updated[0].paymentMethod,
+      paymentStatus: updated[0].paymentStatus,
+      status: updated[0].status,
+      statusNote: `Webhook (${gateway.name}): ${nextPaymentStatus}`,
+      riderName: updated[0].riderName,
+      items: updated[0].itemsSnapshotJson,
+    }).catch(() => []);
+
+    broadcastOrderEvent('order:updated', {
+      orderId: updated[0].id,
+      orderNumber: updated[0].orderNumber,
+      restaurantId: updated[0].restaurantId,
+      restaurantName: updated[0].restaurantName,
+      restaurantOwnerUid: restOwnerRows[0]?.ownerUid || null,
+      customerUid: updated[0].customerUid,
+      riderUid: updated[0].riderUid,
+      riderName: updated[0].riderName,
+      status: updated[0].status,
+      deliveryMode: updated[0].deliveryMode,
+      deliveryArea: updated[0].deliveryArea,
+      totalAmount: updated[0].totalAmount,
     });
 
     res.json({ ok: true, order: updated[0] });
@@ -2956,14 +3042,18 @@ app.patch(
         relatedOrderId: order.id,
       });
 
-      if (updated[0].customerEmail) {
+      const vendorStatusRecipient = await resolveCustomerEmailForOrder(
+        updated[0].customerEmail,
+        updated[0].customerUid
+      );
+      if (vendorStatusRecipient) {
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: updated[0].id,
           orderNumber: updated[0].orderNumber,
           trackingToken: updated[0].trackingToken,
           customerName: updated[0].customerName,
-          customerEmail: updated[0].customerEmail,
+          customerEmail: vendorStatusRecipient,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
@@ -3460,14 +3550,18 @@ app.post(
         .where(eq(restaurants.id, updated[0].restaurantId))
         .limit(1);
 
-      if (updated[0].customerEmail) {
+      const riderAcceptRecipient = await resolveCustomerEmailForOrder(
+        updated[0].customerEmail,
+        updated[0].customerUid
+      );
+      if (riderAcceptRecipient) {
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: updated[0].id,
           orderNumber: updated[0].orderNumber,
           trackingToken: updated[0].trackingToken,
           customerName: updated[0].customerName,
-          customerEmail: updated[0].customerEmail,
+          customerEmail: riderAcceptRecipient,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
@@ -3632,7 +3726,11 @@ app.patch(
         .where(eq(restaurants.id, updated[0].restaurantId))
         .limit(1);
 
-      if (updated[0].customerEmail) {
+      const riderStatusRecipient = await resolveCustomerEmailForOrder(
+        updated[0].customerEmail,
+        updated[0].customerUid
+      );
+      if (riderStatusRecipient) {
         const assignedRiderRows = updated[0].riderUid
           ? await db
               .select({ phone: riders.phone })
@@ -3646,7 +3744,7 @@ app.patch(
           orderNumber: updated[0].orderNumber,
           trackingToken: updated[0].trackingToken,
           customerName: updated[0].customerName,
-          customerEmail: updated[0].customerEmail,
+          customerEmail: riderStatusRecipient,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
@@ -4237,7 +4335,11 @@ app.patch(
         .where(eq(restaurants.id, updated[0].restaurantId))
         .limit(1);
 
-      if (updated[0].customerEmail) {
+      const adminStatusRecipient = await resolveCustomerEmailForOrder(
+        updated[0].customerEmail,
+        updated[0].customerUid
+      );
+      if (adminStatusRecipient) {
         const assignedRiderRows = updated[0].riderUid
           ? await db
               .select({ phone: riders.phone })
@@ -4251,7 +4353,7 @@ app.patch(
           orderNumber: updated[0].orderNumber,
           trackingToken: updated[0].trackingToken,
           customerName: updated[0].customerName,
-          customerEmail: updated[0].customerEmail,
+          customerEmail: adminStatusRecipient,
           restaurantName: updated[0].restaurantName,
           deliveryArea: updated[0].deliveryArea,
           deliveryAddress: updated[0].deliveryAddress,
@@ -4410,14 +4512,18 @@ app.patch(
         .where(eq(restaurants.id, result.restaurantId))
         .limit(1);
 
-      if (result.customerEmail) {
+      const refundRecipient = await resolveCustomerEmailForOrder(
+        result.customerEmail,
+        result.customerUid
+      );
+      if (refundRecipient) {
         await sendAndLogOrderTrackingEmail({
           origin: getRequestOrigin(req),
           orderId: result.id,
           orderNumber: result.orderNumber,
           trackingToken: result.trackingToken,
           customerName: result.customerName,
-          customerEmail: result.customerEmail,
+          customerEmail: refundRecipient,
           restaurantName: result.restaurantName,
           deliveryArea: result.deliveryArea,
           deliveryAddress: result.deliveryAddress,
@@ -5132,16 +5238,42 @@ app.put(
     }
     try {
       const saved = await saveAdminEmailSettings(parsed.data);
+      const verification = saved.configured
+        ? await verifyEmailTransportConnection()
+        : { ok: false, message: 'Credentials incomplete', error: undefined };
       await db.insert(auditLogs).values({
         actorUid: req.user!.uid,
         action: 'email_settings_updated',
         targetType: 'email_transport',
         targetId: saved.provider,
-        details: `Updated email delivery provider to ${saved.provider} (configured: ${saved.configured})`,
+        details: `Updated email delivery provider to ${saved.provider} (configured: ${saved.configured}, verified: ${verification.ok})`,
       });
-      res.json({ ok: true, settings: saved });
+      res.json({
+        ok: true,
+        settings: saved,
+        verified: verification.ok,
+        verifyMessage: verification.message,
+        verifyError: verification.error,
+      });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to save email settings' });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/email-settings/verify',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (_req, res) => {
+    try {
+      const result = await verifyEmailTransportConnection();
+      if (!result.ok) {
+        return res.status(400).json(result);
+      }
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ ok: false, error: error.message || 'SMTP verification failed' });
     }
   }
 );
@@ -5153,13 +5285,14 @@ app.post(
   async (req: AuthRequest, res) => {
     const schema = z.object({
       to: z.string().trim().email(),
+      templateStatus: z.string().trim().max(40).optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Please enter a valid recipient email address.' });
     }
     try {
-      const result = await sendTestEmail(parsed.data.to);
+      const result = await sendTestEmail(parsed.data.to, parsed.data.templateStatus);
       if (!result.ok) {
         return res.status(400).json({
           ok: false,
@@ -5171,10 +5304,55 @@ app.post(
       res.json({
         ok: true,
         provider: result.provider,
-        message: `Test invoice email sent to ${parsed.data.to} via ${result.provider.toUpperCase()}.`,
+        message: `Test "${(parsed.data.templateStatus || 'confirmed').replace(/_/g, ' ')}" template email sent to ${parsed.data.to} via ${result.provider.toUpperCase()}.`,
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to send test email' });
+    }
+  }
+);
+
+app.get(
+  '/api/admin/email-logs',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req, res) => {
+    try {
+      const limit = Number(req.query.limit || 25);
+      const logs = await getRecentOrderEmailLogs(limit);
+      res.json({ logs });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to load order email logs' });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/email-logs/:id/resend',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req, res) => {
+    const logId = Number(req.params.id);
+    if (!Number.isInteger(logId) || logId <= 0) {
+      return res.status(400).json({ error: 'Invalid email log ID' });
+    }
+    try {
+      const result = await resendOrderEmailLog(logId);
+      if (!result) return res.status(404).json({ error: 'Email log record not found' });
+      if (!result.ok) {
+        return res.status(400).json({
+          ok: false,
+          error: result.dispatchResult.error || 'Email resend failed',
+          log: result.log,
+        });
+      }
+      res.json({
+        ok: true,
+        message: `Email re-sent to ${result.log.recipientEmail} via ${result.dispatchResult.provider.toUpperCase()}.`,
+        log: result.log,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to resend email' });
     }
   }
 );

@@ -533,6 +533,8 @@ export function RiderDashboard({
               lang={lang}
               center={applyCoords}
               markerLabel={resolvedApplyZone || 'Rider Start Pin'}
+              pinType="user"
+              userName={fullName || user?.fullName}
               interactive
               heightClass="h-[200px]"
               onSelectLocation={(loc) => {
@@ -800,6 +802,8 @@ export function RiderDashboard({
                     ? `${activeOrder.deliveryArea} (Dropoff)`
                     : `${rider.fullName} (Position)`
                 }
+                pinType="user"
+                userName={activeOrder ? activeOrder.customerName : rider.fullName}
                 secondaryPoint={
                   activeOrder &&
                   typeof activeOrder.restaurantLat === 'number' &&

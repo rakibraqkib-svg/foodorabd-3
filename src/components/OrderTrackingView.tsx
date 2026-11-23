@@ -143,7 +143,7 @@ export function OrderTrackingView({
     token: getAuthToken(),
     orderId,
     trackingToken: initialToken || order?.trackingToken || null,
-    pollFallbackMs: 4000,
+    pollFallbackMs: 3000,
     onSync: loadOrder,
     onEvent: (ev) => {
       if (
@@ -531,6 +531,8 @@ export function OrderTrackingView({
             lang={lang}
             center={{ lat: order.deliveryLat, lng: order.deliveryLng }}
             markerLabel={order.customerName ? `${order.customerName} (${order.deliveryArea})` : order.deliveryArea}
+            pinType="user"
+            userName={order.customerName}
             secondaryPoint={
               restaurant
                 ? { lat: restaurant.lat, lng: restaurant.lng, label: restaurant.name }

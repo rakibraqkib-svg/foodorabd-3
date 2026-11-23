@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
-  ArrowLeft,
   Bell,
   Bike,
   Check,
@@ -33,6 +32,7 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
+import { AddressSearchInput, saveRecentAddress } from './components/AddressSearchInput';
 import { AdminDashboard } from './components/AdminDashboard';
 import { AiHelpWidget } from './components/AiHelpWidget';
 import { CartCheckoutDrawer } from './components/CartCheckoutDrawer';
@@ -184,8 +184,8 @@ function MarketplaceApp() {
     return BANGLADESH_AREAS[0];
   });
   const [locationModalOpen, setLocationModalOpen] = useState(false);
+  const [locationModalTab, setLocationModalTab] = useState<'map' | 'zones'>('map');
   const [locationZoneFilter, setLocationZoneFilter] = useState<string>('all');
-  const [customAreaInput, setCustomAreaInput] = useState('');
   const [emailTrackModalOpen, setEmailTrackModalOpen] = useState(false);
   const [trackEmailInput, setTrackEmailInput] = useState('');
   const [trackOrderNumInput, setTrackOrderNumInput] = useState('');
@@ -278,11 +278,6 @@ function MarketplaceApp() {
     isRaining: boolean;
     rainBufferMin: number;
   } | null>(null);
-  const [osmQuery, setOsmQuery] = useState('');
-  const [osmPlaces, setOsmPlaces] = useState<
-    Array<{ displayName: string; shortName: string; lat: number; lng: number }>
-  >([]);
-  const [osmSearching, setOsmSearching] = useState(false);
   const [locatingGps, setLocatingGps] = useState(false);
   const [pendingAdminRedirect, setPendingAdminRedirect] = useState(false);
   const [pendingVendorRedirect, setPendingVendorRedirect] = useState(false);
@@ -754,7 +749,7 @@ function MarketplaceApp() {
     token: getAuthToken(),
     orderId: lastTrackedOrder?.orderId ?? null,
     trackingToken: lastTrackedOrder?.trackingToken ?? null,
-    pollFallbackMs: 8000,
+    pollFallbackMs: 4000,
     onSync: () => {
       void loadUserSignals();
       void refreshPublicBanner();
@@ -862,20 +857,6 @@ function MarketplaceApp() {
     };
   }, [selectedArea.lat, selectedArea.lng]);
 
-  const handleOsmSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!osmQuery.trim()) return;
-    setOsmSearching(true);
-    try {
-      const res = await apiFetch<{
-        places: Array<{ displayName: string; shortName: string; lat: number; lng: number }>;
-      }>(`/api/free/geocode?q=${encodeURIComponent(osmQuery.trim())}`);
-      setOsmPlaces(res.places);
-    } finally {
-      setOsmSearching(false);
-    }
-  };
-
   const handleUseCurrentGps = () => {
     if (!navigator.geolocation) {
       showToast(lang === 'bn' ? 'জিপিএস সমর্থিত নয়' : 'Geolocation unavailable');
@@ -890,12 +871,20 @@ function MarketplaceApp() {
           const res = await apiFetch<{ areaName: string; displayName: string }>(
             `/api/free/reverse-geocode?lat=${lat}&lng=${lng}&lang=${lang}`
           );
-          setSelectedArea({
+          const nextArea = {
             name: res.areaName || 'Bangladesh',
             nameBn: res.areaName || 'বাংলাদেশ',
             lat,
             lng,
             displayName: res.displayName,
+          };
+          setSelectedArea(nextArea);
+          saveRecentAddress({
+            shortName: nextArea.name,
+            shortNameBn: nextArea.nameBn,
+            displayName: res.displayName || nextArea.name,
+            lat,
+            lng,
           });
           showToast(
             lang === 'bn' ? `অবস্থান সেট হয়েছে: ${res.areaName}` : `Location set: ${res.areaName}`
@@ -1310,12 +1299,21 @@ function MarketplaceApp() {
 
             <button
               type="button"
-              onClick={() => setLocationModalOpen(true)}
-              className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-neutral-100 text-xs font-semibold text-[#2E3138] max-w-[270px] truncate transition-colors"
+              onClick={() => {
+                setLocationModalTab('map');
+                setLocationModalOpen(true);
+              }}
+              aria-label={lang === 'bn' ? 'ডেলিভারি লোকেশন পরিবর্তন করুন' : 'Change delivery location'}
+              className="hidden md:inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#F7F7F8] hover:bg-[#FFF0F6] border border-neutral-200/90 hover:border-[#E21B70]/40 text-xs text-[#2E3138] max-w-[300px] transition-colors"
             >
               <MapPin className="w-4 h-4 text-[#E21B70] shrink-0" />
-              <span className="truncate">
-                {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}, BD
+              <span className="flex items-center gap-1 min-w-0">
+                <span className="text-[11px] font-medium text-neutral-500 shrink-0">
+                  {lang === 'bn' ? 'লোকেশন:' : 'Deliver to:'}
+                </span>
+                <span className="font-bold truncate">
+                  {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}, BD
+                </span>
               </span>
               <ChevronDown className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
             </button>
@@ -2165,13 +2163,19 @@ function MarketplaceApp() {
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setLocationModalOpen(true)}
-                    className="flex-1 flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-neutral-200 text-xs font-semibold truncate"
+                    onClick={() => {
+                      setLocationModalTab('map');
+                      setLocationModalOpen(true);
+                    }}
+                    className="flex-1 flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-white border border-neutral-200 hover:border-[#E21B70]/40 text-xs"
                   >
-                    <MapPin className="w-4 h-4 text-[#E21B70] shrink-0" />
-                    <span className="truncate">
-                      {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}, BD
+                    <span className="flex items-center gap-2 min-w-0">
+                      <MapPin className="w-4 h-4 text-[#E21B70] shrink-0" />
+                      <span className="truncate font-semibold text-[#2E3138]">
+                        {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}, BD
+                      </span>
                     </span>
+                    <ChevronDown className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
                   </button>
                   <button
                     type="button"
@@ -2964,293 +2968,212 @@ function MarketplaceApp() {
         <div
           data-testid="location-modal-backdrop"
           onClick={() => setLocationModalOpen(false)}
-          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-3 sm:p-4"
+          className="fixed inset-0 z-50 bg-black/50 backdrop-blur-[1px] flex items-center justify-center p-3 sm:p-4"
         >
           <div
             data-testid="location-modal-panel"
             onClick={(e) => e.stopPropagation()}
-            className="bg-white rounded-2xl max-w-2xl w-full max-h-[92vh] overflow-y-auto p-4 sm:p-6 space-y-4 shadow-2xl"
+            className="bg-white rounded-2xl max-w-2xl w-full max-h-[92vh] overflow-y-auto p-4 sm:p-6 space-y-4 shadow-2xl border border-neutral-100"
           >
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <button
-                  type="button"
-                  onClick={() => setLocationModalOpen(false)}
-                  aria-label={lang === 'bn' ? 'ফিরে যান' : 'Back from address map'}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-[#2E3138] shrink-0"
-                >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>{lang === 'bn' ? 'ফিরুন' : 'Back'}</span>
-                </button>
-                <h3 className="font-bold text-sm sm:text-base text-[#2E3138] truncate">
-                  {t(lang, 'selectAddress')}
-                </h3>
+            {/* Clean Modal Header */}
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="w-8 h-8 rounded-xl bg-[#FFF0F6] text-[#E21B70] flex items-center justify-center shrink-0">
+                  <MapPin className="w-4 h-4" />
+                </span>
+                <div className="min-w-0">
+                  <h3 className="font-bold text-sm sm:text-base text-[#2E3138] truncate">
+                    {t(lang, 'selectAddress')}
+                  </h3>
+                  <p className="text-[11px] text-neutral-500 truncate">
+                    {lang === 'bn'
+                      ? 'ঠিকানা সার্চ করুন অথবা ম্যাপে পিন বসিয়ে এলাকা নির্ধারণ করুন'
+                      : 'Search your street or drop a pin anywhere in Bangladesh'}
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
                 aria-label="Close address map"
                 onClick={() => setLocationModalOpen(false)}
-                className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 shrink-0"
+                className="p-2 rounded-xl text-neutral-500 hover:text-[#2E3138] hover:bg-neutral-100 shrink-0 transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleOsmSearch} className="flex flex-wrap sm:flex-nowrap gap-2">
-              <div className="relative flex-1 min-w-[200px]">
-                <Search className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={osmQuery}
-                  onChange={(e) => setOsmQuery(e.target.value)}
-                  placeholder={
-                    lang === 'bn'
-                      ? 'বাংলাদেশের যেকোনো শহর, জেলা বা এলাকার নাম খুঁজুন...'
-                      : 'Search any street, city, or district in Bangladesh (e.g. Sylhet, Chattogram)...'
-                  }
-                  className="w-full pl-9 pr-3 py-2 rounded-xl border border-neutral-200 text-xs focus:outline-none focus:border-[#E21B70]"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={osmSearching}
-                className="px-3.5 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold whitespace-nowrap shrink-0"
-              >
-                {osmSearching ? '...' : lang === 'bn' ? 'খুঁজুন' : 'Find Address'}
-              </button>
-              <button
-                type="button"
-                onClick={handleUseCurrentGps}
-                disabled={locatingGps}
-                className="px-3 py-2 rounded-xl border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-[#2E3138] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-              >
-                <LocateFixed className="w-3.5 h-3.5 text-[#E21B70]" />
-                <span>{locatingGps ? '...' : lang === 'bn' ? 'GPS অবস্থান' : 'Use GPS'}</span>
-              </button>
-            </form>
-
-            {/* Quick Custom Area Input (Any Thana / District in BD) */}
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={customAreaInput}
-                onChange={(e) => setCustomAreaInput(e.target.value)}
-                placeholder={
-                  lang === 'bn'
-                    ? 'অথবা সরাসরি আপনার এলাকা/থানার নাম লিখুন...'
-                    : 'Or enter custom area/thana anywhere in Bangladesh...'
-                }
-                className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-neutral-200 text-xs focus:outline-none focus:border-[#E21B70]"
-              />
-              <button
-                type="button"
-                disabled={!customAreaInput.trim()}
-                onClick={() => {
-                  const name = customAreaInput.trim();
-                  if (!name) return;
-                  setSelectedArea({
-                    name,
-                    nameBn: name,
-                    lat: selectedArea.lat,
-                    lng: selectedArea.lng,
-                  });
-                  setCustomAreaInput('');
-                }}
-                className="px-3 py-2 rounded-xl bg-[#2E3138] text-white text-xs font-semibold disabled:opacity-40 shrink-0"
-              >
-                {lang === 'bn' ? 'সেট করুন' : 'Set Area'}
-              </button>
-            </div>
-
-            {osmPlaces.length > 0 && (
-              <div className="rounded-xl border border-neutral-200 divide-y divide-neutral-100 max-h-36 overflow-y-auto bg-[#FAFAFB]">
-                {osmPlaces.map((p, i) => (
-                  <button
-                    key={`${p.lat}-${p.lng}-${i}`}
-                    type="button"
-                    onClick={() => {
-                      setSelectedArea({
-                        name: p.shortName,
-                        nameBn: p.shortName,
-                        lat: p.lat,
-                        lng: p.lng,
-                        displayName: p.displayName,
-                      });
-                      setOsmPlaces([]);
-                    }}
-                    className="w-full px-3 py-2 text-left hover:bg-[#FFF0F6] text-xs transition-colors flex items-center gap-2"
-                  >
-                    <MapPin className="w-3.5 h-3.5 text-[#E21B70] shrink-0" />
-                    <span className="truncate font-medium text-[#2E3138]">{p.displayName}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {/* Dhaka Restaurant Delivery Zone Structure (ZONE 01 – ZONE 12 + BD Cities) */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-[11px] font-bold uppercase tracking-wider text-neutral-500">
-                  {lang === 'bn'
-                    ? 'ঢাকা রেস্টুরেন্ট ডেলিভারি জোন (ZONE 01 – 12)'
-                    : 'Dhaka Restaurant Delivery Zone Structure (ZONE 01 – 12)'}
-                </p>
-                {locationZoneFilter !== 'all' && (
-                  <button
-                    type="button"
-                    onClick={() => setLocationZoneFilter('all')}
-                    className="text-[11px] font-semibold text-[#E21B70] hover:underline"
-                  >
-                    {lang === 'bn' ? 'সব দেখুন' : 'Show All'}
-                  </button>
-                )}
-              </div>
-              <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto pr-1">
-                <button
-                  type="button"
-                  onClick={() => setLocationZoneFilter('all')}
-                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors ${
-                    locationZoneFilter === 'all'
-                      ? 'bg-[#2E3138] text-white border-[#2E3138]'
-                      : 'bg-white text-neutral-700 border-neutral-200 hover:border-neutral-300'
-                  }`}
-                >
-                  {lang === 'bn' ? 'সব জোন' : 'All Zones'}
-                </button>
-                {DHAKA_DELIVERY_ZONES.map((z) => (
-                  <button
-                    key={z.code}
-                    type="button"
-                    onClick={() => setLocationZoneFilter(z.code)}
-                    title={z.summary}
-                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors ${
-                      locationZoneFilter === z.code
-                        ? 'bg-[#E21B70] text-white border-[#E21B70]'
-                        : 'bg-[#FFF9FB] text-neutral-700 border-neutral-200 hover:border-[#E21B70]/50'
-                    }`}
-                  >
-                    {z.code} — {lang === 'bn' ? z.nameBn : z.name}
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => setLocationZoneFilter('NATIONWIDE')}
-                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors ${
-                    locationZoneFilter === 'NATIONWIDE'
-                      ? 'bg-[#E21B70] text-white border-[#E21B70]'
-                      : 'bg-white text-neutral-700 border-neutral-200 hover:border-neutral-300'
-                  }`}
-                >
-                  {lang === 'bn' ? 'অন্যান্য জেলা' : 'BD Cities'}
-                </button>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-44 overflow-y-auto pr-1">
-              {BANGLADESH_AREAS.filter((a) => {
-                if (locationZoneFilter === 'all') return true;
-                if (locationZoneFilter === 'NATIONWIDE') return !a.zoneCode;
-                return a.zoneCode === locationZoneFilter;
-              }).map((a) => {
-                const isExactPreset =
-                  Math.abs(a.lat - selectedArea.lat) < 0.005 &&
-                  Math.abs(a.lng - selectedArea.lng) < 0.005;
-                return (
-                  <button
-                    key={a.name}
-                    type="button"
-                    onClick={() =>
-                      setSelectedArea({
-                        ...a,
-                        displayName: `${a.name}, ${a.division}, Bangladesh`,
-                      })
-                    }
-                    className={`px-3 py-2 rounded-xl border text-xs font-semibold text-left ${
-                      isExactPreset
-                        ? 'border-[#E21B70] bg-[#FFF0F6] text-[#E21B70]'
-                        : 'border-neutral-200 text-neutral-700 hover:border-neutral-300'
-                    }`}
-                  >
-                    <span className="block truncate">{lang === 'bn' ? a.nameBn : a.name}</span>
-                    <span className="block text-[10px] text-neutral-400 font-normal truncate">
-                      {a.zoneCode ? `${a.zoneCode} · ${a.division}` : a.division}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            <DhakaMapPicker
-              mapsApiKey={mapsApiKey}
+            {/* Unified Autocomplete Search Bar */}
+            <AddressSearchInput
               lang={lang}
-              center={{ lat: selectedArea.lat, lng: selectedArea.lng }}
-              markerLabel={selectedArea.name}
-              interactive
-              heightClass="h-[250px]"
-              onSelectLocation={(c) => {
-                const exactPreset = BANGLADESH_AREAS.find(
-                  (a) => Math.abs(a.lat - c.lat) < 0.004 && Math.abs(a.lng - c.lng) < 0.004
-                );
-                const nextName =
-                  exactPreset?.name ||
-                  (c.areaName && c.areaName.trim()) ||
-                  `Pinned (${c.lat.toFixed(4)}, ${c.lng.toFixed(4)})`;
-                const nextNameBn =
-                  exactPreset?.nameBn ||
-                  (c.areaName && c.areaName.trim()) ||
-                  `পিন করা স্থান (${c.lat.toFixed(4)}, ${c.lng.toFixed(4)})`;
+              autoFocus
+              showGpsButton
+              locatingGps={locatingGps}
+              onUseGps={handleUseCurrentGps}
+              currentCoords={{ lat: selectedArea.lat, lng: selectedArea.lng }}
+              onSelectAddress={(picked) => {
                 setSelectedArea({
-                  name: nextName,
-                  nameBn: nextNameBn,
-                  lat: c.lat,
-                  lng: c.lng,
-                  displayName: c.displayName,
+                  name: picked.shortName,
+                  nameBn: picked.shortNameBn || picked.shortName,
+                  lat: picked.lat,
+                  lng: picked.lng,
+                  displayName: picked.displayName,
                 });
+                setLocationModalTab('map');
+                showToast(
+                  lang === 'bn'
+                    ? `ডেলিভারি ঠিকানা নির্বাচন হয়েছে: ${picked.shortNameBn || picked.shortName}`
+                    : `Delivery address set: ${picked.shortName}`
+                );
               }}
             />
 
-            <div
-              data-testid="selected-map-location-summary"
-              className="rounded-xl border border-[#E21B70]/25 bg-[#FFF9FB] px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs"
-            >
-              <div className="min-w-0 flex items-center gap-2">
-                <MapPin className="w-4 h-4 text-[#E21B70] shrink-0" />
+            {/* Clean 2-Tab Switcher: Map & Pin vs Browse Zones & Cities */}
+            <div className="flex items-center justify-between gap-2 border-b border-neutral-100 pb-2">
+              <div className="inline-flex items-center rounded-xl bg-neutral-100 p-1 gap-1">
+                <button
+                  type="button"
+                  onClick={() => setLocationModalTab('map')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    locationModalTab === 'map'
+                      ? 'bg-white text-[#E21B70] shadow-xs'
+                      : 'text-neutral-600 hover:text-[#2E3138]'
+                  }`}
+                >
+                  {lang === 'bn' ? 'ম্যাপ ও পিন' : 'Map & Pin'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLocationModalTab('zones')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    locationModalTab === 'zones'
+                      ? 'bg-white text-[#E21B70] shadow-xs'
+                      : 'text-neutral-600 hover:text-[#2E3138]'
+                  }`}
+                >
+                  {lang === 'bn' ? 'জোন ও শহর তালিকা' : 'Zones & Cities'}
+                </button>
+              </div>
+
+              {locationModalTab === 'zones' && (
+                <select
+                  aria-label={lang === 'bn' ? 'জোন ফিল্টার' : 'Filter by delivery zone'}
+                  value={locationZoneFilter}
+                  onChange={(e) => setLocationZoneFilter(e.target.value)}
+                  className="px-2.5 py-1.5 rounded-lg border border-neutral-200 bg-white text-xs font-semibold text-[#2E3138] focus:outline-none focus:border-[#E21B70] max-w-[200px]"
+                >
+                  <option value="all">{lang === 'bn' ? 'সব জোন ও শহর' : 'All Zones & Cities'}</option>
+                  {DHAKA_DELIVERY_ZONES.map((z) => (
+                    <option key={z.code} value={z.code}>
+                      {z.code} — {lang === 'bn' ? z.nameBn : z.name}
+                    </option>
+                  ))}
+                  <option value="NATIONWIDE">{lang === 'bn' ? 'অন্যান্য জেলা (BD Cities)' : 'Other BD Districts'}</option>
+                </select>
+              )}
+            </div>
+
+            {locationModalTab === 'map' ? (
+              <DhakaMapPicker
+                mapsApiKey={mapsApiKey}
+                lang={lang}
+                center={{ lat: selectedArea.lat, lng: selectedArea.lng }}
+                markerLabel={selectedArea.name}
+                pinType="user"
+                userName={user?.fullName}
+                interactive
+                heightClass="h-[290px]"
+                onSelectLocation={(c) => {
+                  const exactPreset = BANGLADESH_AREAS.find(
+                    (a) => Math.abs(a.lat - c.lat) < 0.004 && Math.abs(a.lng - c.lng) < 0.004
+                  );
+                  const nextName =
+                    exactPreset?.name ||
+                    (c.areaName && c.areaName.trim()) ||
+                    `Pinned (${c.lat.toFixed(4)}, ${c.lng.toFixed(4)})`;
+                  const nextNameBn =
+                    exactPreset?.nameBn ||
+                    (c.areaName && c.areaName.trim()) ||
+                    `পিন করা স্থান (${c.lat.toFixed(4)}, ${c.lng.toFixed(4)})`;
+                  setSelectedArea({
+                    name: nextName,
+                    nameBn: nextNameBn,
+                    lat: c.lat,
+                    lng: c.lng,
+                    displayName: c.displayName,
+                  });
+                }}
+              />
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-[290px] overflow-y-auto pr-1">
+                {BANGLADESH_AREAS.filter((a) => {
+                  if (locationZoneFilter === 'all') return true;
+                  if (locationZoneFilter === 'NATIONWIDE') return !a.zoneCode;
+                  return a.zoneCode === locationZoneFilter;
+                }).map((a) => {
+                  const isExactPreset =
+                    Math.abs(a.lat - selectedArea.lat) < 0.005 &&
+                    Math.abs(a.lng - selectedArea.lng) < 0.005;
+                  return (
+                    <button
+                      key={a.name}
+                      type="button"
+                      onClick={() => {
+                        setSelectedArea({
+                          ...a,
+                          displayName: `${a.name}, ${a.division}, Bangladesh`,
+                        });
+                        setLocationModalTab('map');
+                      }}
+                      className={`px-3 py-2.5 rounded-xl border text-xs font-semibold text-left transition-colors ${
+                        isExactPreset
+                          ? 'border-[#E21B70] bg-[#FFF0F6] text-[#E21B70]'
+                          : 'border-neutral-200 text-neutral-700 hover:border-[#E21B70]/40 hover:bg-[#FFF9FB]'
+                      }`}
+                    >
+                      <span className="block truncate">{lang === 'bn' ? a.nameBn : a.name}</span>
+                      <span className="block text-[10px] text-neutral-400 font-normal truncate">
+                        {a.zoneCode ? `${a.zoneCode} · ${a.division}` : a.division}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Selected Location Summary + Confirm Action */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t border-neutral-100">
+              <div
+                data-testid="selected-map-location-summary"
+                className="min-w-0 flex items-center gap-2.5 text-xs"
+              >
+                <span className="w-8 h-8 rounded-xl bg-[#FFF0F6] border border-[#E21B70]/20 text-[#E21B70] flex items-center justify-center shrink-0">
+                  <MapPin className="w-4 h-4" />
+                </span>
                 <div className="min-w-0">
                   <p className="font-bold text-[#2E3138] truncate">
-                    {lang === 'bn' ? 'নির্বাচিত লোকেশন:' : 'Selected Location:'}{' '}
-                    <span className="text-[#E21B70]">
-                      {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}
-                    </span>
+                    {lang === 'bn' ? selectedArea.nameBn : selectedArea.name}
                   </p>
-                  {selectedArea.displayName && (
-                    <p className="text-[11px] text-neutral-700 truncate">
-                      {selectedArea.displayName}
-                    </p>
-                  )}
-                  <p className="text-[11px] text-neutral-500 font-mono-nums">
-                    GPS: {selectedArea.lat.toFixed(5)}, {selectedArea.lng.toFixed(5)}
+                  <p className="text-[11px] text-neutral-500 truncate">
+                    {selectedArea.displayName || `${selectedArea.lat.toFixed(4)}, ${selectedArea.lng.toFixed(4)}`}
                   </p>
                 </div>
               </div>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-white border border-[#E21B70]/25 text-[#E21B70] shrink-0">
-                {lang === 'bn' ? 'সেট হয়েছে' : 'Pinned'}
-              </span>
-            </div>
 
-            <div className="flex items-center justify-between gap-2 pt-1">
               <button
                 type="button"
-                onClick={() => setLocationModalOpen(false)}
-                className="px-4 py-2.5 rounded-xl border border-neutral-200 hover:border-neutral-300 text-xs font-semibold text-neutral-700"
+                onClick={() => {
+                  saveRecentAddress({
+                    shortName: selectedArea.name,
+                    shortNameBn: selectedArea.nameBn,
+                    displayName: selectedArea.displayName || `${selectedArea.name}, Bangladesh`,
+                    lat: selectedArea.lat,
+                    lng: selectedArea.lng,
+                  });
+                  setLocationModalOpen(false);
+                }}
+                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs sm:text-sm font-semibold whitespace-nowrap shrink-0 transition-colors shadow-xs"
               >
-                {lang === 'bn' ? '← ফিরে যান' : '← Back'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setLocationModalOpen(false)}
-                className="px-5 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold"
-              >
-                {lang === 'bn' ? 'এলাকা নিশ্চিত করুন' : 'Confirm Delivery Zone'}
+                {lang === 'bn' ? 'লোকেশন নিশ্চিত করুন' : 'Confirm Delivery Zone'}
               </button>
             </div>
           </div>
@@ -3588,6 +3511,11 @@ function MarketplaceApp() {
                   : 'Sign up / Sign in with Google'}
               </span>
             </button>
+            <p className="text-[11px] text-center text-neutral-500">
+              {lang === 'bn'
+                ? 'সরাসরি অ্যাকাউন্ট তৈরি করতে নিচের "নতুন অ্যাকাউন্ট" ট্যাবটি ব্যবহার করুন'
+                : 'To create an account instantly, click "Create Account" below'}
+            </p>
 
             {googleRedirectUrl && (
               <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-2">

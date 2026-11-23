@@ -17,6 +17,7 @@ import {
   toPublicPaymentGatewayView,
 } from '../lib/marketplace-logic';
 import { BANGLADESH_AREAS, getBangladeshAreaSelectPresets } from '../lib/i18n';
+import { AddressSearchInput, saveRecentAddress } from './AddressSearchInput';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
 import type { Lang, PublicPaymentGateway, Restaurant } from '../types/marketplace';
@@ -624,12 +625,44 @@ export function CartCheckoutDrawer({
 
               <div>
                 <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                  {lang === 'bn' ? 'দ্রুত ঠিকানা খুঁজুন (রোড, বাসা বা এলাকা)' : 'Find & Auto-Pin Address'}
+                </label>
+                <AddressSearchInput
+                  compact
+                  lang={lang}
+                  showGpsButton={false}
+                  currentCoords={coords}
+                  onSelectAddress={(picked) => {
+                    setCoords({ lat: picked.lat, lng: picked.lng });
+                    setArea(picked.shortName);
+                    const formatted =
+                      formatResolvedMapAddress({
+                        displayName: picked.displayName,
+                        areaName: picked.shortName,
+                        lat: picked.lat,
+                        lng: picked.lng,
+                      }) || picked.displayName;
+                    if (formatted) {
+                      setAddressLine(formatted);
+                    }
+                    saveRecentAddress(picked);
+                  }}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-neutral-700 mb-1">
                   {lang === 'bn' ? 'বিস্তারিত ঠিকানা' : 'Street Address'}
                 </label>
                 <input
                   required
                   value={addressLine}
                   onChange={(e) => setAddressLine(e.target.value)}
+                  placeholder={
+                    lang === 'bn'
+                      ? 'বাসা/ফ্ল্যাট নং, রোড, ব্লক (যেমন: বাসা ১৪, রোড ১১, বনানী)'
+                      : 'House / Flat no, Road, Block (e.g. House 14, Road 11, Banani)'
+                  }
                   className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
                 />
               </div>
@@ -643,6 +676,8 @@ export function CartCheckoutDrawer({
                   lang={lang}
                   center={coords}
                   markerLabel={area || 'Delivery Pin'}
+                  pinType="user"
+                  userName={name || customerName}
                   secondaryPoint={
                     restaurant ? { lat: restaurant.lat, lng: restaurant.lng, label: restaurant.name } : undefined
                   }

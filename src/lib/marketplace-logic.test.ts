@@ -54,9 +54,17 @@ import {
   cleanMapAddressSegments,
   matchCanonicalAreaFromHints,
   extractCleanGoogleGeocodeAddress,
+  findLocalAddressSuggestions,
+  filterAndRankRemoteSuggestions,
+  mergeAddressSuggestions,
+  normalizeFuzzyAddressText,
+  resolveMapPinAppearance,
+  ORDER_EMAIL_TEMPLATE_PRESETS,
+  getOrderEmailTemplatePreview,
+  expandAddressSearchQueries,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
-import { BANGLADESH_AREAS, DHAKA_DELIVERY_ZONES } from './i18n';
+import { BANGLADESH_AREAS, BANGLADESH_SEARCH_PLACES, DHAKA_DELIVERY_ZONES } from './i18n';
 
 test('cart unit price and subtotal include discount price, variation delta, and add-ons', () => {
   const item = {
@@ -613,7 +621,7 @@ test('buildOrderTrackingEmailPayload formats itemized invoice, tracking URL, esc
     items: [{ name: 'Beef Shatkora', quantity: 2, unitPrice: 360, lineTotal: 720 }],
   });
 
-  assert.equal(payload.subject, 'Foodora BD Invoice INV-FD-2026-9900 (FD-2026-9900) — ON THE WAY');
+  assert.equal(payload.subject, 'Foodora BD · Rider Is On The Way (FD-2026-9900 / INV-FD-2026-9900)');
   assert.equal(payload.trackingUrl, 'https://foodorabd1.vercel.app/?order=99&token=sec_tok_99');
   assert.ok(payload.html.includes('INV-FD-2026-9900'));
   assert.ok(payload.html.includes('Nadia &lt;Rahman&gt;'));
@@ -1003,7 +1011,165 @@ test('detectOrderBatchChanges identifies newly arrived orders and status/payment
   );
 });
 
+test('findLocalAddressSuggestions and mergeAddressSuggestions rank prefix matches, support Bangla/zone tokens, and deduplicate coordinates', () => {
+  const banMatches = findLocalAddressSuggestions('ban', BANGLADESH_AREAS, 5);
+  assert.ok(banMatches.length >= 2);
+  // Exact prefix match ("Banani" / "Banani DOHS" / "Banasree") ranks first
+  assert.ok(banMatches[0].shortName.toLowerCase().startsWith('ban'));
 
+  // Multi-token & Bangla query matching
+  const bnMatches = findLocalAddressSuggestions('বনানী', BANGLADESH_AREAS, 4);
+  assert.ok(bnMatches.some((m) => m.shortName === 'Banani'));
 
+  const zoneMatches = findLocalAddressSuggestions('ZONE 01', BANGLADESH_AREAS, 5);
+  assert.ok(zoneMatches.length >= 1);
+  assert.ok(zoneMatches.every((m) => (m.subtitle || '').includes('ZONE 01')));
+
+  const merged = mergeAddressSuggestions(
+    [
+      {
+        shortName: 'Banani',
+        displayName: 'Banani, Dhaka, Bangladesh',
+        lat: 23.7937,
+        lng: 90.4066,
+        source: 'area',
+      },
+    ],
+    [
+      {
+        shortName: 'Banani',
+        displayName: 'Banani, Dhaka North, Bangladesh',
+        lat: 23.79371,
+        lng: 90.40662,
+        source: 'map',
+      },
+      {
+        shortName: 'Road 11, Banani',
+        displayName: 'Road 11, Banani, Dhaka, Bangladesh',
+        lat: 23.7944,
+        lng: 90.4048,
+        source: 'map',
+      },
+    ],
+    5
+  );
+
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].source, 'area');
+  assert.equal(merged[1].shortName, 'Road 11, Banani');
+});
+
+test('fuzzy address normalization and BANGLADESH_SEARCH_PLACES find misspelled landmarks like sad musa citycenter', () => {
+  assert.equal(normalizeFuzzyAddressText('Sad Musa CityCenter'), 'sad musa city center');
+  const expanded = expandAddressSearchQueries('sad musa citycenter');
+  assert.ok(expanded.includes('sad musa city center'));
+  assert.ok(expanded.includes('saad musa city center'));
+  assert.ok(expanded.includes('saad musa'));
+
+  const sadMusaHits = findLocalAddressSuggestions('sad musa citycenter', BANGLADESH_SEARCH_PLACES, 8);
+  assert.ok(sadMusaHits.length >= 3);
+  assert.equal(sadMusaHits[0].shortName, 'Saad Musa City Center');
+  assert.ok(sadMusaHits[0].displayName.includes('Pragati Sarani'));
+  assert.ok(sadMusaHits.every((h) => !h.shortName.includes('Barishal')));
+
+  // Partial query "sad musa" should surface multiple Bangladesh options (Dhaka + Chattogram)
+  const partialHits = findLocalAddressSuggestions('sad musa', BANGLADESH_SEARCH_PLACES, 8);
+  assert.ok(partialHits.length >= 3);
+
+  // Remote ranking filters out unrelated loose trigram hits like "Achairja Mura"
+  const filteredRemote = filterAndRankRemoteSuggestions(
+    'saad musa city center',
+    [
+      {
+        shortName: 'Achairja Mura',
+        displayName: 'Achairja Mura, Cumilla, Bangladesh',
+        lat: 23.3845,
+        lng: 91.2749,
+        source: 'map',
+      },
+      {
+        shortName: 'Saad Musa Fabrics LTD',
+        displayName: 'Saad Musa Fabrics LTD, Chittagong, Bangladesh',
+        lat: 22.4057,
+        lng: 91.8256,
+        source: 'map',
+      },
+      {
+        shortName: 'Musa Pharmcy',
+        displayName: 'Musa Pharmcy, Faridpur, Bangladesh',
+        lat: 23.6045,
+        lng: 89.8363,
+        source: 'map',
+      },
+    ],
+    10
+  );
+  assert.equal(filteredRemote.length, 2);
+  assert.equal(filteredRemote[0].shortName, 'Saad Musa Fabrics LTD');
+});
+
+test('resolveMapPinAppearance renders red user pin with You/userName and black vendor pin with restaurantName', () => {
+  const defaultUser = resolveMapPinAppearance({});
+  assert.equal(defaultUser.primaryRole, 'user');
+  assert.equal(defaultUser.primaryPinColor, '#DC2626');
+  assert.equal(defaultUser.primaryBorderColor, '#991B1B');
+  assert.equal(defaultUser.primaryLabel, 'You');
+
+  const namedUser = resolveMapPinAppearance({
+    pinType: 'user',
+    userName: 'Tanjim Rahman',
+    markerLabel: 'Banani',
+    secondaryLabel: "Sultan's Dine",
+  });
+  assert.equal(namedUser.primaryLabel, 'Tanjim Rahman');
+  assert.equal(namedUser.primaryPinColor, '#DC2626');
+  assert.equal(namedUser.secondaryLabel, "Sultan's Dine");
+  assert.equal(namedUser.secondaryPinColor, '#111827');
+
+  const areaUser = resolveMapPinAppearance({
+    pinType: 'user',
+    markerLabel: 'Gulshan 2',
+  });
+  assert.equal(areaUser.primaryLabel, 'You · Gulshan 2');
+
+  const vendorPin = resolveMapPinAppearance({
+    pinType: 'vendor',
+    restaurantName: 'Kacchi Bhai',
+    markerLabel: 'Banani',
+  });
+  assert.equal(vendorPin.primaryRole, 'vendor');
+  assert.equal(vendorPin.primaryLabel, 'Kacchi Bhai');
+  assert.equal(vendorPin.primaryPinColor, '#111827');
+  assert.equal(vendorPin.primaryBorderColor, '#000000');
+});
+
+test('ORDER_EMAIL_TEMPLATE_PRESETS and getOrderEmailTemplatePreview generate bilingual templates for all stages', () => {
+  assert.equal(ORDER_EMAIL_TEMPLATE_PRESETS.length, 6);
+  for (const preset of ORDER_EMAIL_TEMPLATE_PRESETS) {
+    const preview = getOrderEmailTemplatePreview(preset.status, 'https://foodora.bd', 'buyer@gmail.com');
+    assert.ok(preview.subject.includes('FD-BD-84210'));
+    assert.ok(preview.html.includes('INV-FD-BD-84210'));
+    assert.ok(preview.html.includes(preset.badgeColor));
+    assert.ok(preview.trackingUrl.includes('order=99999'));
+    assert.ok(preview.text.includes('Foodora BD'));
+  }
+
+  const paidEmail = buildOrderTrackingEmailPayload({
+    origin: 'https://foodora.bd',
+    orderId: 501,
+    orderNumber: 'FD-BD-501',
+    trackingToken: 'tok-501',
+    customerName: 'Nusrat',
+    customerEmail: 'nusrat@gmail.com',
+    restaurantName: 'Chillox',
+    deliveryArea: 'Dhanmondi',
+    totalAmount: 450,
+    paymentMethod: 'bkash',
+    paymentStatus: 'paid',
+    status: 'payment_verified',
+  });
+  assert.ok(paidEmail.subject.includes('Payment Confirmed'));
+  assert.ok(paidEmail.html.includes('পেমেন্ট সম্পন্ন'));
+});
 
 
