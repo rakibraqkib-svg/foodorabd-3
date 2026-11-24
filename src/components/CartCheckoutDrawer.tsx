@@ -40,6 +40,7 @@ interface CartCheckoutDrawerProps {
   onClose: () => void;
   cartItems: CartItemInput[];
   restaurant: Restaurant | null;
+  allRestaurants?: Restaurant[];
   lang: Lang;
   mapsApiKey: string;
   paymentGateways?: PublicPaymentGateway[];
@@ -112,6 +113,7 @@ export function CartCheckoutDrawer({
   onClose,
   cartItems,
   restaurant,
+  allRestaurants,
   lang,
   mapsApiKey,
   paymentGateways,
@@ -123,6 +125,21 @@ export function CartCheckoutDrawer({
   onClearCart,
   onOrderCreated,
 }: CartCheckoutDrawerProps) {
+  const itemsByRestaurant = React.useMemo(() => {
+    const map = new Map<number, CartItemInput[]>();
+    for (const item of cartItems) {
+      const restId = Number(item.restaurantId) || restaurant?.id || 1;
+      const list = map.get(restId) || [];
+      list.push(item);
+      map.set(restId, list);
+    }
+    return map;
+  }, [cartItems, restaurant]);
+
+  const primaryRestaurant =
+    restaurant ||
+    allRestaurants?.find((r) => r.id === cartItems[0]?.restaurantId) ||
+    null;
   const activeGateways = React.useMemo(() => {
     const source =
       paymentGateways && paymentGateways.length > 0
@@ -264,13 +281,13 @@ export function CartCheckoutDrawer({
     discountAmount: appliedCoupon?.discountAmount ?? 0,
     deliveryFee: effectiveDeliveryFee,
     serviceFee: 10,
-    commissionType: restaurant?.commissionType || 'percentage',
-    commissionRate: Number(restaurant?.commissionRate ?? 15),
-    fixedCommission: restaurant?.fixedCommission ?? 0,
+    commissionType: primaryRestaurant?.commissionType || 'percentage',
+    commissionRate: Number(primaryRestaurant?.commissionRate ?? 15),
+    fixedCommission: primaryRestaurant?.fixedCommission ?? 0,
   });
 
   const handleApplyCoupon = async () => {
-    if (!restaurant || !couponInput.trim()) return;
+    if (!primaryRestaurant || !couponInput.trim()) return;
     setCouponError(null);
     try {
       const res = await apiFetch<{
@@ -285,7 +302,7 @@ export function CartCheckoutDrawer({
           code: couponInput.trim(),
           subtotal,
           deliveryFee: quoteFee,
-          restaurantId: restaurant.id,
+          restaurantId: primaryRestaurant.id,
         }),
       });
       if (!res.valid) {
@@ -305,50 +322,80 @@ export function CartCheckoutDrawer({
 
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!restaurant || cartItems.length === 0) return;
+    if (cartItems.length === 0) return;
     setSubmitting(true);
     setSubmitError(null);
 
     try {
-      const res = await apiFetch<{
-        order: {
-          id: number;
-          trackingToken?: string;
-          orderNumber?: string;
-          restaurantName?: string;
-          estimatedMinutes?: number;
-        };
-      }>('/api/orders', {
-        method: 'POST',
-        body: JSON.stringify({
-          restaurantId: restaurant.id,
-          customerName: name,
-          customerPhone: phone,
-          customerEmail: email.trim(),
-          deliveryAddress: addressLine,
-          deliveryArea: area.trim() || 'Bangladesh',
-          deliveryLat: coords.lat,
-          deliveryLng: coords.lng,
-          deliveryInstructions: instructions,
-          deliveryMode,
-          paymentMethod,
-          couponCode: appliedCoupon?.code || '',
-          items: cartItems.map((i) => ({
-            foodItemId: i.foodItemId,
-            quantity: i.quantity,
-            variationName: i.variationName,
-            addons: i.addons.map((a) => a.name),
-            specialInstructions: i.specialInstructions,
-          })),
-        }),
-      });
+      const restIds = Array.from(itemsByRestaurant.keys());
+      const createdOrders: Array<{
+        id: number;
+        trackingToken?: string;
+        orderNumber?: string;
+        restaurantName?: string;
+        estimatedMinutes?: number;
+      }> = [];
+
+      for (const restId of restIds) {
+        const items = itemsByRestaurant.get(restId) || [];
+        const currentRest =
+          allRestaurants?.find((r) => r.id === restId) ||
+          (primaryRestaurant?.id === restId ? primaryRestaurant : null);
+
+        const res = await apiFetch<{
+          order: {
+            id: number;
+            trackingToken?: string;
+            orderNumber?: string;
+            restaurantName?: string;
+            estimatedMinutes?: number;
+          };
+        }>('/api/orders', {
+          method: 'POST',
+          body: JSON.stringify({
+            restaurantId: restId,
+            customerName: name,
+            customerPhone: phone,
+            customerEmail: email.trim(),
+            deliveryAddress: addressLine,
+            deliveryArea: area.trim() || 'Bangladesh',
+            deliveryLat: coords.lat,
+            deliveryLng: coords.lng,
+            deliveryInstructions: instructions,
+            deliveryMode: currentRest?.deliveryMode || deliveryMode,
+            paymentMethod,
+            couponCode: appliedCoupon?.code || '',
+            items: items.map((i) => ({
+              foodItemId: i.foodItemId,
+              quantity: i.quantity,
+              variationName: i.variationName,
+              addons: i.addons.map((a) => a.name),
+              specialInstructions: i.specialInstructions,
+            })),
+          }),
+        });
+        createdOrders.push(res.order);
+      }
+
       onClearCart();
       setStep('cart');
-      onOrderCreated(res.order.id, res.order.trackingToken, {
-        orderNumber: res.order.orderNumber,
-        restaurantName: res.order.restaurantName || restaurant.name,
-        estimatedMinutes: res.order.estimatedMinutes ?? quoteEta,
-      });
+      if (createdOrders.length > 0) {
+        const primaryOrder = createdOrders[0];
+        const combinedOrderNumbers = createdOrders
+          .map((o) => o.orderNumber)
+          .filter(Boolean)
+          .join(', ');
+        const combinedRestNames = createdOrders
+          .map((o) => o.restaurantName)
+          .filter(Boolean)
+          .join(' + ');
+
+        onOrderCreated(primaryOrder.id, primaryOrder.trackingToken, {
+          orderNumber: combinedOrderNumbers || primaryOrder.orderNumber,
+          restaurantName: combinedRestNames || primaryOrder.restaurantName || primaryRestaurant?.name,
+          estimatedMinutes: primaryOrder.estimatedMinutes ?? quoteEta,
+        });
+      }
     } catch (err: unknown) {
       setSubmitError(err instanceof Error ? err.message : 'Order submission failed');
     } finally {
@@ -403,13 +450,26 @@ export function CartCheckoutDrawer({
         ) : step === 'cart' ? (
           <>
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {restaurant && (
+              {(primaryRestaurant || itemsByRestaurant.size > 0) && (
                 <div className="pb-3 border-b border-neutral-100">
                   <p className="text-xs text-neutral-500">
                     {lang === 'bn' ? 'রেস্টুরেন্ট' : 'Ordering from'}
                   </p>
                   <p className="font-bold text-[#2E3138]">
-                    {lang === 'bn' ? restaurant.nameBn : restaurant.name}
+                    {itemsByRestaurant.size > 1 ? (
+                      Array.from(itemsByRestaurant.keys())
+                        .map((id) => {
+                          const r =
+                            allRestaurants?.find((x) => x.id === id) ||
+                            (primaryRestaurant?.id === id ? primaryRestaurant : null);
+                          return r ? (lang === 'bn' ? r.nameBn : r.name) : `Restaurant #${id}`;
+                        })
+                        .join(' + ')
+                    ) : primaryRestaurant ? (
+                      lang === 'bn' ? primaryRestaurant.nameBn : primaryRestaurant.name
+                    ) : (
+                      'Restaurant'
+                    )}
                   </p>
                 </div>
               )}
@@ -417,6 +477,9 @@ export function CartCheckoutDrawer({
               <div className="space-y-3">
                 {cartItems.map((item, idx) => {
                   const unit = calculateCartItemUnitPrice(item);
+                  const itemRest =
+                    allRestaurants?.find((r) => r.id === item.restaurantId) ||
+                    (primaryRestaurant?.id === item.restaurantId ? primaryRestaurant : null);
                   return (
                     <div
                       key={`${item.foodItemId}-${idx}`}
@@ -424,11 +487,16 @@ export function CartCheckoutDrawer({
                     >
                       <CartItemThumbnail
                         src={item.imageUrl}
-                        fallbackSrc={restaurant?.coverUrl}
+                        fallbackSrc={itemRest?.coverUrl || primaryRestaurant?.coverUrl}
                         alt={lang === 'bn' ? item.nameBn : item.name}
                         sizeClass="w-14 h-14"
                       />
                       <div className="min-w-0 flex-1">
+                        {itemsByRestaurant.size > 1 && itemRest && (
+                          <span className="text-[10px] font-semibold text-[#E21B70] bg-[#FFF0F6] px-1.5 py-0.5 rounded border border-pink-100 inline-block mb-1">
+                            🏠 {lang === 'bn' ? itemRest.nameBn : itemRest.name}
+                          </span>
+                        )}
                         <p className="font-semibold text-sm text-[#2E3138] truncate">
                           {lang === 'bn' ? item.nameBn : item.name}
                         </p>
@@ -542,7 +610,7 @@ export function CartCheckoutDrawer({
                 </div>
               </div>
 
-              {restaurant && (restaurant.status !== 'approved' || !restaurant.isOpen) && (
+              {primaryRestaurant && (primaryRestaurant.status !== 'approved' || !primaryRestaurant.isOpen) && (
                 <div
                   role="alert"
                   className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2"
@@ -550,30 +618,31 @@ export function CartCheckoutDrawer({
                   <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                   <span>
                     {buildRestaurantUnavailableMessage(
-                      restaurant.name,
-                      restaurant.status,
-                      restaurant.isOpen,
+                      primaryRestaurant.name,
+                      primaryRestaurant.status,
+                      primaryRestaurant.isOpen,
                       lang
                     )}
                   </span>
                 </div>
               )}
 
-              {restaurant && subtotal < restaurant.minOrder && (
+              {primaryRestaurant && itemsByRestaurant.size === 1 && subtotal < primaryRestaurant.minOrder && (
                 <p className="text-xs text-amber-700 font-medium">
                   {lang === 'bn'
-                    ? `ন্যূনতম অর্ডার ${formatBdt(restaurant.minOrder, lang)}`
-                    : `Minimum order is ${formatBdt(restaurant.minOrder, lang)}`}
+                    ? `ন্যূনতম অর্ডার ${formatBdt(primaryRestaurant.minOrder, lang)}`
+                    : `Minimum order is ${formatBdt(primaryRestaurant.minOrder, lang)}`}
                 </p>
               )}
 
               <button
                 type="button"
                 disabled={Boolean(
-                  restaurant &&
-                    (subtotal < restaurant.minOrder ||
-                      restaurant.status !== 'approved' ||
-                      !restaurant.isOpen)
+                  itemsByRestaurant.size === 1 &&
+                    primaryRestaurant &&
+                    (subtotal < primaryRestaurant.minOrder ||
+                      primaryRestaurant.status !== 'approved' ||
+                      !primaryRestaurant.isOpen)
                 )}
                 onClick={() => setStep('checkout')}
                 className="w-full py-3 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white font-semibold text-sm disabled:opacity-50 transition-colors mt-2"
@@ -604,9 +673,22 @@ export function CartCheckoutDrawer({
                       ? `অর্ডার আইটেম (${cartItems.reduce((s, i) => s + i.quantity, 0)})`
                       : `Your Order Items (${cartItems.reduce((s, i) => s + i.quantity, 0)})`}
                   </span>
-                  {restaurant && (
-                    <span className="text-[11px] font-semibold text-neutral-500 truncate max-w-[180px]">
-                      {lang === 'bn' ? restaurant.nameBn : restaurant.name}
+                  {(primaryRestaurant || itemsByRestaurant.size > 0) && (
+                    <span className="text-[11px] font-semibold text-neutral-500 truncate max-w-[200px]">
+                      {itemsByRestaurant.size > 1 ? (
+                        Array.from(itemsByRestaurant.keys())
+                          .map((id) => {
+                            const r =
+                              allRestaurants?.find((x) => x.id === id) ||
+                              (primaryRestaurant?.id === id ? primaryRestaurant : null);
+                            return r ? (lang === 'bn' ? r.nameBn : r.name) : `Rest #${id}`;
+                          })
+                          .join(' + ')
+                      ) : primaryRestaurant ? (
+                        lang === 'bn' ? primaryRestaurant.nameBn : primaryRestaurant.name
+                      ) : (
+                        ''
+                      )}
                     </span>
                   )}
                 </div>
@@ -614,6 +696,9 @@ export function CartCheckoutDrawer({
                   {cartItems.map((item, idx) => {
                     const unit = calculateCartItemUnitPrice(item);
                     const itemTitle = lang === 'bn' ? item.nameBn : item.name;
+                    const itemRest =
+                      allRestaurants?.find((r) => r.id === item.restaurantId) ||
+                      (primaryRestaurant?.id === item.restaurantId ? primaryRestaurant : null);
                     return (
                       <div
                         key={`checkout-item-${item.foodItemId}-${idx}`}
@@ -621,11 +706,16 @@ export function CartCheckoutDrawer({
                       >
                         <CartItemThumbnail
                           src={item.imageUrl}
-                          fallbackSrc={restaurant?.coverUrl}
+                          fallbackSrc={itemRest?.coverUrl || primaryRestaurant?.coverUrl}
                           alt={itemTitle}
                           sizeClass="w-11 h-11"
                         />
                         <div className="min-w-0 flex-1">
+                          {itemsByRestaurant.size > 1 && itemRest && (
+                            <span className="text-[9px] font-semibold text-[#E21B70] bg-[#FFF0F6] px-1 py-0.5 rounded inline-block mb-0.5">
+                              {lang === 'bn' ? itemRest.nameBn : itemRest.name}
+                            </span>
+                          )}
                           <p className="text-xs font-semibold text-[#2E3138] truncate">
                             <span className="text-[#E21B70] font-bold mr-1">{item.quantity}x</span>
                             {itemTitle}
@@ -808,7 +898,7 @@ export function CartCheckoutDrawer({
                   pinType="user"
                   userName={name || customerName}
                   secondaryPoint={
-                    restaurant ? { lat: restaurant.lat, lng: restaurant.lng, label: restaurant.name } : undefined
+                    primaryRestaurant ? { lat: primaryRestaurant.lat, lng: primaryRestaurant.lng, label: primaryRestaurant.name } : undefined
                   }
                   interactive
                   heightClass="h-[180px]"
@@ -949,7 +1039,7 @@ export function CartCheckoutDrawer({
                 disabled={
                   submitting ||
                   Boolean(
-                    restaurant && (restaurant.status !== 'approved' || !restaurant.isOpen)
+                    primaryRestaurant && (primaryRestaurant.status !== 'approved' || !primaryRestaurant.isOpen)
                   )
                 }
                 className="w-full py-3 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white font-semibold text-sm disabled:opacity-50 transition-colors"

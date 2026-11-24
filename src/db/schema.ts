@@ -167,6 +167,8 @@ export const orders = pgTable('orders', {
   customerUid: text('customer_uid').notNull(),
   customerName: text('customer_name').notNull(),
   customerPhone: text('customer_phone').notNull(),
+  customerEmail: text('customer_email').default(''),
+  trackingToken: text('tracking_token').default(''),
   restaurantId: integer('restaurant_id')
     .references(() => restaurants.id)
     .notNull(),

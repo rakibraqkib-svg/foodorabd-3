@@ -1021,6 +1021,17 @@ function MarketplaceApp() {
     );
   };
 
+  const handleKeepExistingAndAdd = () => {
+    if (!pendingSwitchItem) return;
+    setCartItems((prev) => [...prev, pendingSwitchItem.item]);
+    setPendingSwitchItem(null);
+    showToast(
+      lang === 'bn'
+        ? `${pendingSwitchItem.item.nameBn} আগের খাবারের সাথে কার্টে যুক্ত হয়েছে`
+        : `${pendingSwitchItem.item.name} added to cart with existing items`
+    );
+  };
+
   const handleUpdateQty = (idx: number, delta: number) => {
     setCartItems((prev) =>
       prev
@@ -2890,6 +2901,7 @@ function MarketplaceApp() {
         onClose={() => setCartOpen(false)}
         cartItems={cartItems}
         restaurant={cartRestaurant}
+        allRestaurants={restaurants}
         lang={lang}
         mapsApiKey={mapsApiKey}
         selectedArea={selectedArea}
@@ -2933,33 +2945,40 @@ function MarketplaceApp() {
             className="bg-white rounded-2xl max-w-sm w-full p-6 space-y-4 shadow-xl"
           >
             <h3 className="font-bold text-base text-[#2E3138]">
-              {lang === 'bn' ? 'নতুন কার্ট শুরু করবেন?' : 'Replace items in cart?'}
+              {lang === 'bn' ? 'ভিন্ন রেস্টুরেন্টের খাবার যোগ করবেন?' : 'Add item from another restaurant?'}
             </h3>
             <p className="text-xs text-neutral-600">
               {lang === 'bn'
-                ? `আপনার কার্টে ইতিমধ্যে ${cartRestaurant?.name}-এর খাবার রয়েছে। নতুন রেস্টুরেন্টের খাবার যোগ করলে পূর্বের কার্ট খালি হবে।`
-                : `Your cart contains items from ${cartRestaurant?.name}. Starting a new order will clear your previous cart.`}
+                ? `আপনার কার্টে ইতিমধ্যে ${cartRestaurant?.name || 'পূর্বের রেস্টুরেন্ট'}-এর খাবার রয়েছে। আপনি কি এটি আগের অর্ডারের সাথে যোগ করতে চান নাকি নতুন কার্ট শুরু করবেন?`
+                : `Your cart contains items from ${cartRestaurant?.name || 'another restaurant'}. Do you want to add this with your existing order or start a new cart?`}
             </p>
             <div className="space-y-2 pt-1">
-              <p className="text-[11px] text-neutral-500 bg-neutral-50 p-2 rounded-lg border border-neutral-100">
+              <p className="text-[11px] text-neutral-500 bg-neutral-50 p-2.5 rounded-lg border border-neutral-100 whitespace-pre-line">
                 {lang === 'bn'
-                  ? '• Keep Existing: পূর্বের কার্ট বহাল রাখে এবং নতুন আইটেম যোগ বাতিল করে।\n• Start New Cart: পূর্বের কার্ট খালি করে নতুন রেস্টুরেন্টের আইটেমটি যোগ করে।'
-                  : '• Keep Existing: Keeps current cart & cancels adding this item.\n• Start New Cart: Clears old cart & adds this new item.'}
+                  ? '• Keep Existing: পূর্বের খাবার বহাল রেখে নতুন খাবারটিও কার্টে যোগ হবে (আগের অর্ডারের সাথে যুক্ত হবে)।\n• Start New Cart: পূর্বের কার্ট খালি করে শুধুমাত্র নতুন রেস্টুরেন্টের খাবার যোগ হবে।'
+                  : '• Keep Existing: Keeps existing items & adds this item too (combined orders).\n• Start New Cart: Clears existing cart & adds only this new item.'}
               </p>
-              <div className="flex justify-end gap-2 pt-1">
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => setPendingSwitchItem(null)}
-                  className="px-3.5 py-2 rounded-xl border border-neutral-200 text-xs font-semibold text-neutral-700 hover:bg-neutral-50"
+                  className="px-3 py-2 rounded-xl border border-neutral-200 text-xs font-semibold text-neutral-600 hover:bg-neutral-50"
                 >
-                  {lang === 'bn' ? 'বাতিল (Keep Existing)' : 'Keep Existing'}
+                  {lang === 'bn' ? 'বাতিল' : 'Cancel'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleKeepExistingAndAdd}
+                  className="px-3.5 py-2 rounded-xl border border-[#E21B70] bg-[#FFF0F6] text-xs font-semibold text-[#E21B70] hover:bg-[#FFE4EF]"
+                >
+                  {lang === 'bn' ? 'Keep Existing (আগেরটির সাথে যোগ করুন)' : 'Keep Existing & Add'}
                 </button>
                 <button
                   type="button"
                   onClick={confirmSwitchRestaurantCart}
                   className="px-3.5 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold"
                 >
-                  {lang === 'bn' ? 'নতুন কার্ট শুরু করুন (Start New)' : 'Start New Cart'}
+                  {lang === 'bn' ? 'নতুন কার্ট (Start New)' : 'Start New Cart'}
                 </button>
               </div>
             </div>
