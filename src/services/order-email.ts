@@ -1,14 +1,19 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import nodemailer from 'nodemailer';
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, inArray } from 'drizzle-orm';
 import { db } from '../db/index.ts';
-import { localCredentials, orderEmailLogs, users } from '../db/schema.ts';
+import { foodItems, localCredentials, orderEmailLogs, users } from '../db/schema.ts';
 import {
   buildMerchantOrderAlertEmailPayload,
   buildOrderTrackingEmailPayload,
   collectMerchantOrderAlertRecipients,
+  DEFAULT_ORDER_EMAIL_IMAGE_PATH,
+  extractEmailInlineCidPlan,
   getOrderEmailTemplatePreview,
   PRIMARY_SUPER_ADMIN_EMAIL,
+  type ExtractedEmailCidImage,
 } from '../lib/marketplace-logic.ts';
 
 const EMAIL_CONFIG_KEY = '__email_transport_config__';
@@ -378,15 +383,17 @@ export async function saveAdminEmailSettings(input: {
       ? smtpPort === 465
       : smtpPort === 465;
   const smtpUser = (input.smtpUser ?? prev?.smtpUser ?? '').trim();
-  const fromAddress = (
+  const rawFromAddress = (
     input.fromAddress ??
     prev?.fromAddress ??
-    (provider === 'resend'
-      ? 'Foodora BD <onboarding@resend.dev>'
-      : smtpUser
-      ? `Foodora BD <${smtpUser}>`
-      : 'Foodora BD <orders@foodora.bd>')
+    ''
   ).trim();
+  const fromAddress =
+    provider === 'resend'
+      ? !rawFromAddress || rawFromAddress.toLowerCase().includes('@foodora.bd')
+        ? 'Foodora BD <onboarding@resend.dev>'
+        : rawFromAddress
+      : rawFromAddress || (smtpUser ? `Foodora BD <${smtpUser}>` : 'Foodora BD <orders@foodora.bd>');
   const notifyEmail = (
     input.notifyEmail !== undefined
       ? input.notifyEmail
@@ -444,11 +451,52 @@ export async function verifyEmailTransportConnection(): Promise<{
 }> {
   const cfg = await resolveEffectiveConfig();
   if (cfg.providerMode === 'resend' && cfg.resendKey) {
-    return {
-      ok: true,
-      provider: 'resend',
-      message: 'Resend API key is configured. Use "Send Test Invoice" to verify recipient inbox delivery.',
-    };
+    try {
+      const checkRes = await fetch('https://api.resend.com/domains', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${cfg.resendKey}`,
+        },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (checkRes.ok) {
+        const data = (await checkRes.json().catch(() => ({}))) as {
+          data?: Array<{ name?: string; status?: string }>;
+        };
+        const verifiedDomains = (data.data || [])
+          .filter((d) => d.status === 'verified' && d.name)
+          .map((d) => d.name as string);
+        return {
+          ok: true,
+          provider: 'resend',
+          message:
+            verifiedDomains.length > 0
+              ? `Resend API key verified (${verifiedDomains.join(', ')}).`
+              : 'Resend API key verified (using Foodora BD <onboarding@resend.dev> sender).',
+        };
+      }
+      const errBody = await checkRes.text().catch(() => '');
+      if (errBody.toLowerCase().includes('restricted to only send emails')) {
+        return {
+          ok: true,
+          provider: 'resend',
+          message: 'Resend send-only API key saved. Click "Send Test Email" to verify inbox delivery.',
+        };
+      }
+      return {
+        ok: false,
+        provider: 'resend',
+        message: 'Resend API key verification failed.',
+        error: errBody || `Resend returned HTTP ${checkRes.status}`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        provider: 'resend',
+        message: 'Could not reach Resend API.',
+        error: err instanceof Error ? err.message : 'Network error verifying Resend key',
+      };
+    }
   }
   if (!cfg.smtpHost || !cfg.smtpUser || !cfg.smtpPass) {
     return {
@@ -498,6 +546,242 @@ export async function verifyEmailTransportConnection(): Promise<{
   };
 }
 
+const UPLOADS_DIR = process.env.VERCEL
+  ? path.join('/tmp', 'foodora-uploads')
+  : path.resolve(process.cwd(), 'public', 'uploads');
+
+export interface PreparedEmailAttachment {
+  filename: string;
+  content: Buffer;
+  contentType: string;
+  cid: string;
+}
+
+function inferMimeAndExtension(filePath: string): { contentType: string; ext: string } | null {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return { contentType: 'image/jpeg', ext: '.jpg' };
+  if (ext === '.png') return { contentType: 'image/png', ext: '.png' };
+  if (ext === '.webp') return { contentType: 'image/webp', ext: '.webp' };
+  if (ext === '.gif') return { contentType: 'image/gif', ext: '.gif' };
+  return null;
+}
+
+function safeResolveWithinRoots(relPath: string, roots: string[]): string | null {
+  const cleanRel = relPath.replace(/^\/+/, '');
+  if (!cleanRel || cleanRel.includes('\0')) return null;
+  for (const root of roots) {
+    const absRoot = path.resolve(root);
+    const candidate = path.resolve(absRoot, cleanRel);
+    if (
+      candidate.startsWith(absRoot + path.sep) &&
+      fs.existsSync(candidate) &&
+      fs.statSync(candidate).isFile()
+    ) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function resolveFallbackFoodImageBuffer(): {
+  filename: string;
+  content: Buffer;
+  contentType: string;
+} | null {
+  const relFallback = DEFAULT_ORDER_EMAIL_IMAGE_PATH.replace(/^\/src\/assets\//, '');
+  const resolved = safeResolveWithinRoots(relFallback, [
+    path.resolve(process.cwd(), 'src', 'assets'),
+    path.resolve(process.cwd(), 'dist', 'src', 'assets'),
+    path.resolve(process.cwd(), 'public', 'assets'),
+  ]);
+  if (!resolved) return null;
+  try {
+    return {
+      filename: path.basename(resolved),
+      content: fs.readFileSync(resolved),
+      contentType: 'image/jpeg',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildOriginFallbackImageUrl(srcUrl?: string): string | null {
+  if (!srcUrl || !/^https?:\/\//i.test(srcUrl)) return null;
+  try {
+    const parsed = new URL(srcUrl);
+    return `${parsed.origin}${DEFAULT_ORDER_EMAIL_IMAGE_PATH}`;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRemoteImageAsBuffer(
+  imageUrl: string,
+  cid: string
+): Promise<PreparedEmailAttachment | null> {
+  if (!/^https?:\/\//i.test(imageUrl)) return null;
+  try {
+    const res = await fetch(imageUrl, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    const rawType = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const extMap: Record<string, string> = {
+      'image/jpeg': '.jpg',
+      'image/jpg': '.jpg',
+      'image/png': '.png',
+      'image/webp': '.webp',
+      'image/gif': '.gif',
+    };
+    const normalizedType = rawType === 'image/jpg' ? 'image/jpeg' : rawType;
+    if (!normalizedType.startsWith('image/')) return null;
+    const arrBuf = await res.arrayBuffer();
+    if (!arrBuf || arrBuf.byteLength === 0 || arrBuf.byteLength > 5 * 1024 * 1024) {
+      return null;
+    }
+    const ext = extMap[normalizedType] || '.jpg';
+    return {
+      filename: `${cid}${ext}`,
+      content: Buffer.from(arrBuf),
+      contentType: normalizedType,
+      cid,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function resolveDiskOrDataCidAttachment(
+  entry: ExtractedEmailCidImage,
+  allowFallback: boolean
+): PreparedEmailAttachment | null {
+  if (entry.kind === 'data' && entry.dataBase64 && entry.dataMimeType) {
+    const extMap: Record<string, string> = {
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/webp': '.webp',
+      'image/gif': '.gif',
+    };
+    const ext = extMap[entry.dataMimeType] || '.jpg';
+    return {
+      filename: `${entry.cid}${ext}`,
+      content: Buffer.from(entry.dataBase64, 'base64'),
+      contentType: entry.dataMimeType,
+      cid: entry.cid,
+    };
+  }
+
+  const localPath = entry.localPath || '';
+  let resolvedDiskPath: string | null = null;
+  if (localPath.startsWith('/uploads/')) {
+    resolvedDiskPath = safeResolveWithinRoots(localPath.replace(/^\/uploads\//, ''), [UPLOADS_DIR]);
+  } else if (localPath.startsWith('/src/assets/')) {
+    resolvedDiskPath = safeResolveWithinRoots(localPath.replace(/^\/src\/assets\//, ''), [
+      path.resolve(process.cwd(), 'src', 'assets'),
+      path.resolve(process.cwd(), 'dist', 'src', 'assets'),
+      path.resolve(process.cwd(), 'public', 'assets'),
+    ]);
+  } else if (localPath.startsWith('/assets/')) {
+    resolvedDiskPath = safeResolveWithinRoots(localPath.replace(/^\/assets\//, ''), [
+      path.resolve(process.cwd(), 'public', 'assets'),
+      path.resolve(process.cwd(), 'src', 'assets'),
+    ]);
+  }
+
+  if (resolvedDiskPath) {
+    const meta = inferMimeAndExtension(resolvedDiskPath);
+    if (meta) {
+      try {
+        return {
+          filename: path.basename(resolvedDiskPath),
+          content: fs.readFileSync(resolvedDiskPath),
+          contentType: meta.contentType,
+          cid: entry.cid,
+        };
+      } catch {
+        // fall through
+      }
+    }
+  }
+
+  if (!allowFallback) return null;
+
+  const fallback = resolveFallbackFoodImageBuffer();
+  if (!fallback) return null;
+  return {
+    filename: fallback.filename,
+    content: fallback.content,
+    contentType: fallback.contentType,
+    cid: entry.cid,
+  };
+}
+
+export function prepareEmailWithInlineCidAttachments(html: string): {
+  html: string;
+  attachments: PreparedEmailAttachment[];
+} {
+  const plan = extractEmailInlineCidPlan(html);
+  if (plan.images.length === 0) {
+    return { html, attachments: [] };
+  }
+  const attachments: PreparedEmailAttachment[] = [];
+  let finalHtml = plan.html;
+
+  for (const entry of plan.images) {
+    const resolved = resolveDiskOrDataCidAttachment(entry, true);
+    if (resolved) {
+      attachments.push(resolved);
+    } else if (entry.originalSrcs[0]) {
+      finalHtml = finalHtml.replaceAll(`cid:${entry.cid}`, entry.originalSrcs[0]);
+    }
+  }
+
+  return { html: finalHtml, attachments };
+}
+
+export async function prepareEmailWithInlineCidAttachmentsAsync(html: string): Promise<{
+  html: string;
+  attachments: PreparedEmailAttachment[];
+}> {
+  const plan = extractEmailInlineCidPlan(html);
+  if (plan.images.length === 0) {
+    return { html, attachments: [] };
+  }
+  const attachments: PreparedEmailAttachment[] = [];
+  let finalHtml = plan.html;
+
+  for (const entry of plan.images) {
+    let resolved = resolveDiskOrDataCidAttachment(entry, false);
+    if (!resolved && entry.originalSrcs[0]) {
+      resolved = await fetchRemoteImageAsBuffer(entry.originalSrcs[0], entry.cid);
+    }
+    if (!resolved) {
+      const diskFallback = resolveFallbackFoodImageBuffer();
+      if (diskFallback) {
+        resolved = {
+          filename: diskFallback.filename,
+          content: diskFallback.content,
+          contentType: diskFallback.contentType,
+          cid: entry.cid,
+        };
+      }
+    }
+    if (!resolved && entry.originalSrcs[0]) {
+      const remoteFallbackUrl = buildOriginFallbackImageUrl(entry.originalSrcs[0]);
+      if (remoteFallbackUrl && remoteFallbackUrl !== entry.originalSrcs[0]) {
+        resolved = await fetchRemoteImageAsBuffer(remoteFallbackUrl, entry.cid);
+      }
+    }
+
+    if (resolved) {
+      attachments.push(resolved);
+    } else if (entry.originalSrcs[0]) {
+      finalHtml = finalHtml.replaceAll(`cid:${entry.cid}`, entry.originalSrcs[0]);
+    }
+  }
+
+  return { html: finalHtml, attachments };
+}
+
 export async function sendTransactionalEmail(params: {
   to: string;
   subject: string;
@@ -520,6 +804,7 @@ export async function sendTransactionalEmail(params: {
   }
 
   const cfg = await resolveEffectiveConfig();
+  const prepared = await prepareEmailWithInlineCidAttachmentsAsync(params.html);
   let lastSmtpError = '';
 
   if (
@@ -548,7 +833,17 @@ export async function sendTransactionalEmail(params: {
           to: emailLower,
           subject: params.subject,
           text: params.text,
-          html: params.html,
+          html: prepared.html,
+          ...(prepared.attachments.length > 0
+            ? {
+                attachments: prepared.attachments.map((att) => ({
+                  filename: att.filename,
+                  content: att.content,
+                  contentType: att.contentType,
+                  cid: att.cid,
+                })),
+              }
+            : {}),
         });
         return { ok: true, provider: 'smtp', status: 'sent' };
       } catch (err) {
@@ -570,22 +865,48 @@ export async function sendTransactionalEmail(params: {
   }
 
   if (cfg.resendKey) {
-    try {
-      const mailRes = await fetch('https://api.resend.com/emails', {
+    const primaryFrom = cfg.fromAddress || 'Foodora BD <onboarding@resend.dev>';
+    const resendAttachments =
+      prepared.attachments.length > 0
+        ? prepared.attachments.map((att) => ({
+            filename: att.filename,
+            content: att.content.toString('base64'),
+            content_id: att.cid,
+          }))
+        : undefined;
+    const sendViaResend = async (fromAddr: string) =>
+      fetch('https://api.resend.com/emails', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${cfg.resendKey}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: cfg.fromAddress || 'Foodora BD <onboarding@resend.dev>',
+          from: fromAddr,
           to: [emailLower],
           subject: params.subject,
-          html: params.html,
+          html: prepared.html,
           text: params.text,
+          ...(resendAttachments ? { attachments: resendAttachments } : {}),
         }),
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(12000),
       });
+
+    try {
+      let mailRes = await sendViaResend(primaryFrom);
+      if (!mailRes.ok && mailRes.status === 403 && !primaryFrom.includes('resend.dev')) {
+        const firstErr = await mailRes.text().catch(() => '');
+        if (firstErr.toLowerCase().includes('domain is not verified')) {
+          mailRes = await sendViaResend('Foodora BD <onboarding@resend.dev>');
+        } else {
+          return {
+            ok: false,
+            provider: 'resend',
+            status: 'resend_error_http_403',
+            error: firstErr || lastSmtpError || 'Resend returned HTTP 403',
+          };
+        }
+      }
       if (mailRes.ok) {
         return { ok: true, provider: 'resend', status: 'sent' };
       }
@@ -615,11 +936,15 @@ export async function sendTransactionalEmail(params: {
   };
 }
 
-export async function sendTestEmail(toEmail: string, templateStatus: string = 'confirmed') {
+export async function sendTestEmail(
+  toEmail: string,
+  templateStatus: string = 'confirmed',
+  origin?: string
+) {
   const cleanEmail = String(toEmail || '').trim().toLowerCase();
   const payload = getOrderEmailTemplatePreview(
     templateStatus || 'confirmed',
-    process.env.PUBLIC_APP_URL || 'https://foodora.bd',
+    origin || process.env.PUBLIC_APP_URL || 'https://foodora.bd',
     cleanEmail
   );
 
@@ -687,6 +1012,48 @@ export async function resendOrderEmailLog(logId: number) {
   };
 }
 
+async function enrichOrderEmailItemsWithImages<
+  T extends { foodItemId?: number; imageUrl?: string | null },
+>(items?: T[]): Promise<T[] | undefined> {
+  if (!Array.isArray(items) || items.length === 0) return items;
+  let next = [...items];
+
+  const missingIds = Array.from(
+    new Set(
+      next
+        .filter((it) => !it.imageUrl && typeof it.foodItemId === 'number')
+        .map((it) => it.foodItemId as number)
+    )
+  );
+  if (missingIds.length > 0) {
+    try {
+      const dbFoods = await db
+        .select({ id: foodItems.id, imageUrl: foodItems.imageUrl })
+        .from(foodItems)
+        .where(inArray(foodItems.id, missingIds));
+      const imgMap = new Map(dbFoods.map((f) => [f.id, f.imageUrl]));
+      next = next.map((it) =>
+        !it.imageUrl && typeof it.foodItemId === 'number'
+          ? { ...it, imageUrl: imgMap.get(it.foodItemId) || it.imageUrl }
+          : it
+      );
+    } catch {
+      // non-blocking
+    }
+  }
+
+  return next.map((it) => {
+    const raw = String(it.imageUrl || '').trim();
+    const isMissingUpload =
+      raw.startsWith('/uploads/') &&
+      !safeResolveWithinRoots(raw.replace(/^\/uploads\//, ''), [UPLOADS_DIR]);
+    if (!raw || isMissingUpload) {
+      return { ...it, imageUrl: DEFAULT_ORDER_EMAIL_IMAGE_PATH };
+    }
+    return it;
+  });
+}
+
 export async function sendAndLogOrderTrackingEmail(params: {
   origin: string;
   orderId: number;
@@ -714,8 +1081,10 @@ export async function sendAndLogOrderTrackingEmail(params: {
   etaMinutes?: number | null;
   createdAt?: string | Date | null;
   items?: Array<{
+    foodItemId?: number;
     name: string;
     nameBn?: string;
+    imageUrl?: string | null;
     quantity: number;
     unitPrice?: number;
     variation?: string;
@@ -727,6 +1096,8 @@ export async function sendAndLogOrderTrackingEmail(params: {
   if (!emailLower || !emailLower.includes('@')) {
     return null;
   }
+
+  const enrichedItems = await enrichOrderEmailItemsWithImages(params.items);
 
   const payload = buildOrderTrackingEmailPayload({
     origin: params.origin,
@@ -753,7 +1124,7 @@ export async function sendAndLogOrderTrackingEmail(params: {
     riderPhone: params.riderPhone,
     etaMinutes: params.etaMinutes,
     createdAt: params.createdAt,
-    items: params.items,
+    items: enrichedItems,
   });
 
   const dispatchResult = await sendTransactionalEmail({
@@ -805,7 +1176,9 @@ export async function sendMerchantOrderAlertEmail(params: {
   statusNote?: string;
   riderName?: string | null;
   items?: Array<{
+    foodItemId?: number;
     name: string;
+    imageUrl?: string | null;
     quantity: number;
     variation?: string;
     lineTotal: number;
@@ -826,6 +1199,8 @@ export async function sendMerchantOrderAlertEmail(params: {
   });
   if (recipients.length === 0) return [];
 
+  const enrichedItems = await enrichOrderEmailItemsWithImages(params.items);
+
   const payload = buildMerchantOrderAlertEmailPayload({
     origin: params.origin,
     orderId: params.orderId,
@@ -843,7 +1218,7 @@ export async function sendMerchantOrderAlertEmail(params: {
     status: params.status,
     statusNote: params.statusNote,
     riderName: params.riderName,
-    items: params.items,
+    items: enrichedItems,
   });
 
   return Promise.allSettled(

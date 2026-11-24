@@ -2351,6 +2351,15 @@ export function AdminDashboard({
                 </div>
               )}
 
+              {emailProviderMode === 'resend' && (
+                <div className="rounded-xl bg-blue-50/70 border border-blue-200 p-2.5 text-[11px] text-blue-900 leading-relaxed">
+                  <strong>{lang === 'bn' ? 'Resend API গাইড:' : 'Resend API Guide:'}</strong>{' '}
+                  {lang === 'bn'
+                    ? 'কাস্টম ডোমেইন ভেরিফাই না থাকলে From Address হিসেবে Foodora BD <onboarding@resend.dev> রাখুন (ফ্রি প্ল্যানে শুধু আপনার Resend অ্যাকাউন্ট ইমেইলে টেস্ট যাবে, সব কাস্টমারের কাছে পাঠাতে একটি ডোমেইন ভেরিফাই করুন)।'
+                    : 'Use Foodora BD <onboarding@resend.dev> if no custom domain is verified yet (note: Resend sandbox only sends to your own Resend account email until you verify a domain).'}
+                </div>
+              )}
+
               <form onSubmit={handleSaveEmailSettings} className="space-y-3 text-xs">
                 <div className="grid grid-cols-3 gap-2">
                   {(
@@ -2369,6 +2378,13 @@ export function AdminDashboard({
                           setEmailSmtpHost('smtp.gmail.com');
                           setEmailSmtpPort('465');
                           setEmailSmtpSecure(true);
+                          if (emailFromAddress.includes('onboarding@resend.dev')) {
+                            setEmailFromAddress('');
+                          }
+                        } else if (opt.id === 'resend') {
+                          if (!emailFromAddress || emailFromAddress.toLowerCase().includes('@foodora.bd')) {
+                            setEmailFromAddress('Foodora BD <onboarding@resend.dev>');
+                          }
                         }
                       }}
                       className={`py-2 px-2.5 rounded-lg border font-bold transition-colors ${
@@ -2500,6 +2516,10 @@ export function AdminDashboard({
                   >
                     {savingEmailSettings
                       ? 'Saving & Verifying...'
+                      : emailProviderMode === 'resend'
+                      ? lang === 'bn'
+                        ? 'সেভ ও Resend যাচাই করুন'
+                        : 'Save & Verify Resend'
                       : lang === 'bn'
                       ? 'সেভ ও SMTP যাচাই করুন'
                       : 'Save & Verify SMTP'}
@@ -2524,6 +2544,33 @@ export function AdminDashboard({
                   }`}
                 >
                   {emailVerifyStatus.message}
+                </div>
+              )}
+
+              {!emailSettings?.configured && (
+                <div className="rounded-lg px-3 py-2 text-[11px] font-medium border bg-amber-50 border-amber-200 text-amber-900">
+                  {lang === 'bn'
+                    ? 'লাইভ Gmail ডেলিভারির জন্য আপনার Gmail এবং ১৬-অক্ষরের Google App Password দিয়ে Save & Verify SMTP চাপুন। এখন টেস্ট পাঠালে নিচের Delivery Logs-এ সেভ হবে।'
+                    : 'SMTP/Resend credentials are not saved yet. Save Gmail + 16-char Google App Password above for real inbox delivery; otherwise test emails are recorded in Delivery Logs below.'}
+                </div>
+              )}
+
+              {testEmailRecipient.toLowerCase().includes('@gmial.com') && (
+                <div className="rounded-lg px-3 py-2 text-[11px] font-medium border bg-amber-50 border-amber-200 text-amber-900 flex items-center justify-between gap-2">
+                  <span>
+                    {lang === 'bn'
+                      ? 'ডোমেইন টাইপো ধরা পড়েছে: @gmial.com সম্ভবত @gmail.com হবে।'
+                      : 'Possible email typo detected: @gmial.com should usually be @gmail.com.'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setTestEmailRecipient((prev) => prev.replace(/@gmial\.com/gi, '@gmail.com'))
+                    }
+                    className="px-2 py-1 rounded bg-amber-900 text-white font-semibold shrink-0 hover:bg-black"
+                  >
+                    Fix to @gmail.com
+                  </button>
                 </div>
               )}
 
@@ -3015,6 +3062,28 @@ export function AdminDashboard({
               <h3 className="font-bold text-sm text-[#2E3138]">
                 {lang === 'bn' ? 'ব্র্যান্ডিং ও সেকশন অন/অফ' : 'Brand Identity & Section Toggles'}
               </h3>
+
+              <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-neutral-50 border border-neutral-200">
+                <div className="flex items-center gap-3">
+                  <img
+                    src="/foodora-icon.svg"
+                    alt="Foodora BD Icon"
+                    className="w-11 h-11 rounded-xl shadow-xs border border-neutral-200 bg-white"
+                  />
+                  <div className="text-xs">
+                    <p className="font-bold text-[#2E3138]">Foodora BD Brand Icon</p>
+                    <p className="text-neutral-500">Official SVG icon (`/foodora-icon.svg`)</p>
+                  </div>
+                </div>
+                <a
+                  href="/foodora-icon.svg"
+                  download="foodora-bd-icon.svg"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold shrink-0"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download SVG</span>
+                </a>
+              </div>
 
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <div>

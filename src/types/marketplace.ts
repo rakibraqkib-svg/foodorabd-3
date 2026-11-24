@@ -121,6 +121,7 @@ export interface OrderSnapshotItem {
   foodItemId: number;
   name: string;
   nameBn: string;
+  imageUrl?: string;
   quantity: number;
   unitPrice: number;
   variation?: string;

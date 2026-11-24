@@ -69,3 +69,47 @@ export const createPool = () => {
 const pool = createPool();
 
 export const db = drizzle(pool, { schema });
+
+export function isTransientDbError(err: unknown): boolean {
+  const collectMsg = (val: unknown, depth = 0): string => {
+    if (!val || depth > 3) return '';
+    if (typeof val === 'string') return val;
+    if (val instanceof Error) {
+      const code = (val as Error & { code?: string }).code || '';
+      return `${val.message} ${code} ${collectMsg((val as Error & { cause?: unknown }).cause, depth + 1)}`;
+    }
+    if (typeof val === 'object') {
+      const obj = val as Record<string, unknown>;
+      return `${String(obj.message || '')} ${String(obj.code || '')} ${collectMsg(obj.cause, depth + 1)}`;
+    }
+    return String(val);
+  };
+  const msg = collectMsg(err).toUpperCase();
+  return (
+    msg.includes('ENOENT') ||
+    msg.includes('ECONNREFUSED') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('ETIMEDOUT') ||
+    msg.includes('EPIPE') ||
+    msg.includes('57P01') ||
+    msg.includes('CONNECTION TERMINATED UNEXPECTEDLY') ||
+    msg.includes('THE DATABASE SYSTEM IS STARTING UP')
+  );
+}
+
+export async function withDbRetry<T>(fn: () => Promise<T>, maxAttempts = 4): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientDbError(err) || attempt >= maxAttempts) {
+        throw err;
+      }
+      const delayMs = attempt * 350;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastErr;
+}

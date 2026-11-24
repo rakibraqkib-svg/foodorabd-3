@@ -1,5 +1,5 @@
 import { count } from 'drizzle-orm';
-import { db } from './index.ts';
+import { db, isTransientDbError, withDbRetry } from './index.ts';
 import { ensureSchemaTables } from './ensure-schema.ts';
 import {
   commissionLedger,
@@ -40,13 +40,16 @@ export async function ensureDatabaseSeeded(): Promise<void> {
 
 async function runSeedIfEmpty(): Promise<void> {
   try {
-    const existing = await db.select({ total: count() }).from(restaurants);
+    const existing = await withDbRetry(() => db.select({ total: count() }).from(restaurants));
     if (Number(existing[0]?.total ?? 0) > 0) {
       return;
     }
-  } catch {
+  } catch (err) {
+    if (isTransientDbError(err)) {
+      throw err;
+    }
     // Table may not exist yet on a brand-new database; bootstrap schema next.
-    await ensureSchemaTables();
+    await withDbRetry(() => ensureSchemaTables());
   }
 
   const existing = await db.select({ total: count() }).from(restaurants);

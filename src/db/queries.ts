@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, like, or } from 'drizzle-orm';
-import { db } from './index.ts';
+import { db, withDbRetry } from './index.ts';
 import {
   auditLogs,
   commissionLedger,
@@ -276,20 +276,22 @@ export async function getOrderById(orderId: number) {
 
 export async function getPlatformSettingsRow() {
   try {
-    const rows = await db.select().from(platformSettings).limit(1);
+    const rows = await withDbRetry(() => db.select().from(platformSettings).limit(1));
     return rows[0] ?? null;
   } catch (error) {
     console.error('Failed to fetch platform settings:', error);
-    throw new Error('Failed to load platform settings', { cause: error });
+    return null;
   }
 }
 
 export async function ensureDefaultPaymentGateways() {
   try {
-    const existing = await db
-      .select()
-      .from(paymentGateways)
-      .orderBy(asc(paymentGateways.sortOrder), asc(paymentGateways.id));
+    const existing = await withDbRetry(() =>
+      db
+        .select()
+        .from(paymentGateways)
+        .orderBy(asc(paymentGateways.sortOrder), asc(paymentGateways.id))
+    );
 
     if (existing.length === 0) {
       const settings = await getPlatformSettingsRow();

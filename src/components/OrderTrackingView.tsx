@@ -706,17 +706,36 @@ export function OrderTrackingView({
             </div>
             <div className="space-y-2.5 text-sm">
               {order.itemsSnapshotJson.map((item, idx) => (
-                <div key={idx} className="flex justify-between gap-2">
-                  <span className="text-neutral-700">
-                    {item.quantity}x {lang === 'bn' ? item.nameBn : item.name}
-                    {item.variation ? ` (${item.variation})` : ''}
-                    {item.unitPrice > 0 ? (
-                      <span className="text-[11px] text-neutral-400 ml-1">
-                        @ {formatBdt(item.unitPrice, lang)}
-                      </span>
-                    ) : null}
-                  </span>
-                  <span className="font-semibold tabular-nums">{formatBdt(item.lineTotal, lang)}</span>
+                <div key={idx} className="flex items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <img
+                      src={
+                        item.imageUrl ||
+                        '/src/assets/images/food_kacchi_biriyani_1794831373742.jpg'
+                      }
+                      alt={lang === 'bn' ? item.nameBn : item.name}
+                      referrerPolicy="no-referrer"
+                      onError={(e) => {
+                        const img = e.currentTarget;
+                        if (!img.dataset.fallbackApplied) {
+                          img.dataset.fallbackApplied = '1';
+                          img.src =
+                            '/src/assets/images/food_kacchi_biriyani_1794831373742.jpg';
+                        }
+                      }}
+                      className="w-10 h-10 rounded-lg object-cover border border-neutral-200 shrink-0"
+                    />
+                    <span className="text-neutral-700 truncate">
+                      {item.quantity}x {lang === 'bn' ? item.nameBn : item.name}
+                      {item.variation ? ` (${item.variation})` : ''}
+                      {item.unitPrice > 0 ? (
+                        <span className="text-[11px] text-neutral-400 ml-1">
+                          @ {formatBdt(item.unitPrice, lang)}
+                        </span>
+                      ) : null}
+                    </span>
+                  </div>
+                  <span className="font-semibold tabular-nums shrink-0">{formatBdt(item.lineTotal, lang)}</span>
                 </div>
               ))}
               <div className="pt-3 border-t border-neutral-100 space-y-1 text-xs text-neutral-600 tabular-nums">

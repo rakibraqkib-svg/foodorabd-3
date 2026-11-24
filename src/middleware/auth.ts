@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { NextFunction, Request, Response } from 'express';
 import { eq, sql } from 'drizzle-orm';
 import { verifySupabaseAccessToken } from '../lib/supabase-admin.ts';
-import { db } from '../db/index.ts';
+import { db, withDbRetry } from '../db/index.ts';
 import { users } from '../db/schema.ts';
 import { isProtectedSuperAdminEmail } from '../lib/marketplace-logic.ts';
 
@@ -75,6 +75,7 @@ export async function getOrCreateUser(
   const emailLower = email.trim().toLowerCase();
   const isPrimaryAdmin = isProtectedSuperAdminEmail(emailLower);
   try {
+    return await withDbRetry(async () => {
     const existing = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
     if (existing.length > 0) {
       if (isPrimaryAdmin && existing[0].role !== 'super_admin') {
@@ -130,6 +131,7 @@ export async function getOrCreateUser(
       })
       .returning();
     return inserted[0];
+    });
   } catch (error) {
     console.error('Database user upsert failed:', error);
     throw new Error('Failed to synchronize user account.', { cause: error });

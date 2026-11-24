@@ -8,8 +8,8 @@ var __export = (target, all) => {
 import "dotenv/config";
 import express from "express";
 import http from "node:http";
-import path from "node:path";
-import fs from "node:fs";
+import path2 from "node:path";
+import fs2 from "node:fs";
 import crypto4 from "node:crypto";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
@@ -409,6 +409,39 @@ var createPool = () => {
 };
 var pool = createPool();
 var db = drizzle(pool, { schema: schema_exports });
+function isTransientDbError(err) {
+  const collectMsg = (val, depth = 0) => {
+    if (!val || depth > 3) return "";
+    if (typeof val === "string") return val;
+    if (val instanceof Error) {
+      const code = val.code || "";
+      return `${val.message} ${code} ${collectMsg(val.cause, depth + 1)}`;
+    }
+    if (typeof val === "object") {
+      const obj = val;
+      return `${String(obj.message || "")} ${String(obj.code || "")} ${collectMsg(obj.cause, depth + 1)}`;
+    }
+    return String(val);
+  };
+  const msg = collectMsg(err).toUpperCase();
+  return msg.includes("ENOENT") || msg.includes("ECONNREFUSED") || msg.includes("ECONNRESET") || msg.includes("ETIMEDOUT") || msg.includes("EPIPE") || msg.includes("57P01") || msg.includes("CONNECTION TERMINATED UNEXPECTEDLY") || msg.includes("THE DATABASE SYSTEM IS STARTING UP");
+}
+async function withDbRetry(fn, maxAttempts = 4) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientDbError(err) || attempt >= maxAttempts) {
+        throw err;
+      }
+      const delayMs = attempt * 350;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastErr;
+}
 
 // src/db/ensure-schema.ts
 import { sql } from "drizzle-orm";
@@ -872,12 +905,15 @@ async function ensureDatabaseSeeded() {
 }
 async function runSeedIfEmpty() {
   try {
-    const existing2 = await db.select({ total: count() }).from(restaurants);
+    const existing2 = await withDbRetry(() => db.select({ total: count() }).from(restaurants));
     if (Number(existing2[0]?.total ?? 0) > 0) {
       return;
     }
-  } catch {
-    await ensureSchemaTables();
+  } catch (err) {
+    if (isTransientDbError(err)) {
+      throw err;
+    }
+    await withDbRetry(() => ensureSchemaTables());
   }
   const existing = await db.select({ total: count() }).from(restaurants);
   if (Number(existing[0]?.total ?? 0) > 0) {
@@ -2503,6 +2539,94 @@ function matchCanonicalAreaFromHints(hints, lat, lng, presets) {
   }
   return cleanedHints[0] || nearest.area?.name || `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
 }
+var DEFAULT_ORDER_EMAIL_IMAGE_PATH = "/src/assets/images/food_kacchi_biriyani_1794831373742.jpg";
+function resolveOrderEmailImageUrl(imageUrl, origin = "https://foodora.bd") {
+  const raw = String(imageUrl || "").trim();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (raw.startsWith("data:image/")) return raw;
+  const cleanOrigin = String(origin || "https://foodora.bd").replace(/\/+$/, "");
+  return `${cleanOrigin}${raw.startsWith("/") ? "" : "/"}${raw}`;
+}
+function classifyEmailImageSrcForCid(rawSrc) {
+  const clean = String(rawSrc || "").replace(/&amp;/g, "&").trim();
+  if (!clean || clean.startsWith("cid:")) return null;
+  const dataMatch = clean.match(
+    /^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i
+  );
+  if (dataMatch) {
+    const mime = dataMatch[1].toLowerCase() === "image/jpg" ? "image/jpeg" : dataMatch[1].toLowerCase();
+    const b64 = dataMatch[2].replace(/\s+/g, "");
+    if (!b64) return null;
+    return {
+      kind: "data",
+      key: `data:${mime}:${b64.slice(0, 48)}:${b64.length}`,
+      dataMimeType: mime,
+      dataBase64: b64
+    };
+  }
+  let pathname = "";
+  if (clean.startsWith("/")) {
+    pathname = clean.split("?")[0].split("#")[0];
+  } else if (/^https?:\/\//i.test(clean)) {
+    try {
+      pathname = new URL(clean).pathname;
+    } catch {
+      return null;
+    }
+  } else {
+    return null;
+  }
+  try {
+    pathname = decodeURIComponent(pathname);
+  } catch {
+  }
+  if (!/^\/(?:src\/assets\/|assets\/|uploads\/|foodora-icon\.)/i.test(pathname)) {
+    return null;
+  }
+  return {
+    kind: "local",
+    key: `local:${pathname}`,
+    localPath: pathname
+  };
+}
+function extractEmailInlineCidPlan(html) {
+  if (!html) return { html, images: [] };
+  const byKey = /* @__PURE__ */ new Map();
+  let seq = 0;
+  const rewrittenHtml = html.replace(
+    /(<img\b[^>]*?\bsrc\s*=\s*)(["'])([^"']+)\2/gi,
+    (fullMatch, prefix, quote, attrVal) => {
+      const classified = classifyEmailImageSrcForCid(attrVal);
+      if (!classified) return fullMatch;
+      let entry = byKey.get(classified.key);
+      if (!entry) {
+        seq += 1;
+        const cid = `foodora-img-${seq}`;
+        entry = classified.kind === "local" ? {
+          cid,
+          kind: "local",
+          localPath: classified.localPath,
+          originalSrcs: [attrVal]
+        } : {
+          cid,
+          kind: "data",
+          dataMimeType: classified.dataMimeType,
+          dataBase64: classified.dataBase64,
+          originalSrcs: [attrVal]
+        };
+        byKey.set(classified.key, entry);
+      } else if (!entry.originalSrcs.includes(attrVal)) {
+        entry.originalSrcs.push(attrVal);
+      }
+      return `${prefix}${quote}cid:${entry.cid}${quote}`;
+    }
+  );
+  return {
+    html: rewrittenHtml,
+    images: Array.from(byKey.values())
+  };
+}
 function buildOrderTrackingEmailPayload(input) {
   const trackingUrl = buildOrderTrackingUrl(input.origin, input.orderId, input.trackingToken);
   const niceStatus = input.status.replace(/_/g, " ").toUpperCase();
@@ -2615,7 +2739,7 @@ function buildOrderTrackingEmailPayload(input) {
            <table style="width:100%;border-collapse:collapse;font-size:12px;color:#374151;">
              <thead>
                <tr style="border-bottom:1px solid #F3F4F6;text-align:left;color:#6B7280;">
-                 <th style="padding:4px 0;">Item</th>
+                 <th style="padding:4px 0;">Product</th>
                  <th style="padding:4px 0;text-align:center;">Qty</th>
                  <th style="padding:4px 0;text-align:right;">Total</th>
                </tr>
@@ -2623,11 +2747,26 @@ function buildOrderTrackingEmailPayload(input) {
              <tbody>
                ${itemsList.slice(0, 20).map((it) => {
     const varPart = it.variation ? ` (${escapeXml(it.variation)})` : "";
-    const unitPart = typeof it.unitPrice === "number" && it.unitPrice > 0 ? ` <span style="color:#6B7280;font-size:11px;">@ \u09F3${it.unitPrice}</span>` : "";
+    const unitPart = typeof it.unitPrice === "number" && it.unitPrice > 0 ? `<div style="color:#6B7280;font-size:11px;margin-top:2px;">@ \u09F3${it.unitPrice}</div>` : "";
+    const resolvedImg = resolveOrderEmailImageUrl(
+      it.imageUrl || DEFAULT_ORDER_EMAIL_IMAGE_PATH,
+      input.origin
+    );
+    const thumbHtml = resolvedImg ? `<img src="${escapeXml(resolvedImg)}" alt="${escapeXml(it.name)}" width="44" height="44" style="width:44px;height:44px;object-fit:cover;border-radius:8px;display:block;border:1px solid #FBCFE8;background:#ffffff;" />` : `<div style="width:44px;height:44px;border-radius:8px;border:1px solid #FBCFE8;background:#ffffff;text-align:center;line-height:44px;font-size:18px;">\u{1F37D}\uFE0F</div>`;
     return `<tr style="border-bottom:1px solid #F9FAFB;">
-                     <td style="padding:5px 0;">${escapeXml(it.name)}${varPart}${unitPart}</td>
-                     <td style="padding:5px 0;text-align:center;">${it.quantity}</td>
-                     <td style="padding:5px 0;text-align:right;font-weight:bold;">\u09F3${it.lineTotal}</td>
+                     <td style="padding:7px 6px 7px 0;vertical-align:middle;">
+                       <table role="presentation" style="border-collapse:collapse;">
+                         <tr>
+                           <td style="width:52px;padding-right:10px;vertical-align:middle;">${thumbHtml}</td>
+                           <td style="vertical-align:middle;">
+                             <div style="font-weight:bold;color:#2E3138;line-height:1.3;">${escapeXml(it.name)}${varPart}</div>
+                             ${unitPart}
+                           </td>
+                         </tr>
+                       </table>
+                     </td>
+                     <td style="padding:7px 0;text-align:center;vertical-align:middle;">${it.quantity}x</td>
+                     <td style="padding:7px 0;text-align:right;font-weight:bold;vertical-align:middle;">\u09F3${it.lineTotal}</td>
                    </tr>`;
   }).join("")}
              </tbody>
@@ -2735,8 +2874,20 @@ function getOrderEmailTemplatePreview(status, origin = "https://foodora.bd", rec
     riderPhone: status === "rider_assigned" || status === "on_the_way" || status === "delivered" ? "01711-000222" : null,
     etaMinutes: status === "on_the_way" ? 12 : 25,
     items: [
-      { name: "Mutton Kacchi (Half)", quantity: 1, unitPrice: 450, lineTotal: 450 },
-      { name: "Jali Kabab & Borhani", quantity: 1, unitPrice: 200, lineTotal: 200 }
+      {
+        name: "Mutton Kacchi (Half)",
+        imageUrl: "/src/assets/images/food_kacchi_biriyani_1794831373742.jpg",
+        quantity: 1,
+        unitPrice: 450,
+        lineTotal: 450
+      },
+      {
+        name: "Jali Kabab & Borhani",
+        imageUrl: "/src/assets/images/food_tandoori_kabab_1794831377175.jpg",
+        quantity: 1,
+        unitPrice: 200,
+        lineTotal: 200
+      }
     ]
   });
 }
@@ -2822,11 +2973,20 @@ function buildMerchantOrderAlertEmailPayload(input) {
   const headlineBn = isNew ? `\u09A8\u09A4\u09C1\u09A8 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u098F\u09B8\u09C7\u099B\u09C7: ${input.orderNumber}` : `\u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09B8\u09CD\u099F\u09CD\u09AF\u09BE\u099F\u09BE\u09B8 \u0986\u09AA\u09A1\u09C7\u099F: ${niceStatus}`;
   const subject = isNew ? `\u{1F514} Foodora BD New Order Alert ${input.orderNumber} (\u09F3${input.totalAmount}) \u2014 ${input.restaurantName}` : `\u{1F4E6} Foodora BD Order Update ${input.orderNumber} \u2014 ${niceStatus}`;
   const itemsList = Array.isArray(input.items) ? input.items : [];
-  const itemsHtml = itemsList.length > 0 ? `<ul style="margin:8px 0 0;padding-left:18px;font-size:12px;color:#374151;">
-          ${itemsList.slice(0, 20).map(
-    (it) => `<li style="margin:3px 0;"><strong>${it.quantity}x</strong> ${escapeXml(it.name)}${it.variation ? ` (${escapeXml(it.variation)})` : ""} \u2014 <strong>\u09F3${it.lineTotal}</strong></li>`
-  ).join("")}
-        </ul>` : "";
+  const itemsHtml = itemsList.length > 0 ? `<table style="width:100%;border-collapse:collapse;margin:10px 0 0;font-size:12px;color:#374151;">
+          ${itemsList.slice(0, 20).map((it) => {
+    const resolvedImg = resolveOrderEmailImageUrl(
+      it.imageUrl || DEFAULT_ORDER_EMAIL_IMAGE_PATH,
+      input.origin
+    );
+    const thumbHtml = resolvedImg ? `<img src="${escapeXml(resolvedImg)}" alt="${escapeXml(it.name)}" width="40" height="40" style="width:40px;height:40px;object-fit:cover;border-radius:8px;display:block;border:1px solid #FBCFE8;background:#ffffff;" />` : "";
+    return `<tr style="border-top:1px solid #FBCFE8;">
+                <td style="width:48px;padding:6px 8px 6px 0;vertical-align:middle;">${thumbHtml}</td>
+                <td style="padding:6px 6px 6px 0;vertical-align:middle;"><strong>${it.quantity}x</strong> ${escapeXml(it.name)}${it.variation ? ` (${escapeXml(it.variation)})` : ""}</td>
+                <td style="padding:6px 0;text-align:right;font-weight:bold;vertical-align:middle;">\u09F3${it.lineTotal}</td>
+              </tr>`;
+  }).join("")}
+        </table>` : "";
   const html = `<!doctype html>
 <html>
   <body style="font-family:Arial,sans-serif;background:#f7f7f7;padding:24px;color:#2E3138;">
@@ -3215,16 +3375,18 @@ async function getOrderById(orderId) {
 }
 async function getPlatformSettingsRow() {
   try {
-    const rows = await db.select().from(platformSettings).limit(1);
+    const rows = await withDbRetry(() => db.select().from(platformSettings).limit(1));
     return rows[0] ?? null;
   } catch (error) {
     console.error("Failed to fetch platform settings:", error);
-    throw new Error("Failed to load platform settings", { cause: error });
+    return null;
   }
 }
 async function ensureDefaultPaymentGateways() {
   try {
-    const existing = await db.select().from(paymentGateways).orderBy(asc(paymentGateways.sortOrder), asc(paymentGateways.id));
+    const existing = await withDbRetry(
+      () => db.select().from(paymentGateways).orderBy(asc(paymentGateways.sortOrder), asc(paymentGateways.id))
+    );
     if (existing.length === 0) {
       const settings = await getPlatformSettingsRow();
       const seedRows = DEFAULT_PAYMENT_GATEWAYS.map((gw) => {
@@ -3502,39 +3664,41 @@ async function getOrCreateUser(uid, email, fullName, defaultRole = "customer") {
   const emailLower = email.trim().toLowerCase();
   const isPrimaryAdmin = isProtectedSuperAdminEmail(emailLower);
   try {
-    const existing = await db.select().from(users).where(eq2(users.uid, uid)).limit(1);
-    if (existing.length > 0) {
-      if (isPrimaryAdmin && existing[0].role !== "super_admin") {
-        const promoted = await db.update(users).set({ role: "super_admin", updatedAt: /* @__PURE__ */ new Date() }).where(eq2(users.id, existing[0].id)).returning();
-        return promoted[0];
+    return await withDbRetry(async () => {
+      const existing = await db.select().from(users).where(eq2(users.uid, uid)).limit(1);
+      if (existing.length > 0) {
+        if (isPrimaryAdmin && existing[0].role !== "super_admin") {
+          const promoted = await db.update(users).set({ role: "super_admin", updatedAt: /* @__PURE__ */ new Date() }).where(eq2(users.id, existing[0].id)).returning();
+          return promoted[0];
+        }
+        return existing[0];
       }
-      return existing[0];
-    }
-    const existingByEmail = await db.select().from(users).where(sql2`lower(${users.email}) = ${emailLower}`).limit(1);
-    if (existingByEmail.length > 0) {
-      const current = existingByEmail[0];
-      const nextRole = isPrimaryAdmin ? "super_admin" : current.role;
-      const nextName = fullName && fullName.trim() && current.fullName.startsWith("Foodora") ? fullName.trim() : current.fullName;
-      if (nextRole !== current.role || nextName !== current.fullName) {
-        const updated = await db.update(users).set({ role: nextRole, fullName: nextName, updatedAt: /* @__PURE__ */ new Date() }).where(eq2(users.id, current.id)).returning();
-        return updated[0];
+      const existingByEmail = await db.select().from(users).where(sql2`lower(${users.email}) = ${emailLower}`).limit(1);
+      if (existingByEmail.length > 0) {
+        const current = existingByEmail[0];
+        const nextRole = isPrimaryAdmin ? "super_admin" : current.role;
+        const nextName = fullName && fullName.trim() && current.fullName.startsWith("Foodora") ? fullName.trim() : current.fullName;
+        if (nextRole !== current.role || nextName !== current.fullName) {
+          const updated = await db.update(users).set({ role: nextRole, fullName: nextName, updatedAt: /* @__PURE__ */ new Date() }).where(eq2(users.id, current.id)).returning();
+          return updated[0];
+        }
+        return current;
       }
-      return current;
-    }
-    const assignedRole = isPrimaryAdmin ? "super_admin" : defaultRole;
-    const inserted = await db.insert(users).values({
-      uid,
-      email: emailLower,
-      fullName: fullName || emailLower.split("@")[0] || "Foodora User",
-      role: assignedRole
-    }).onConflictDoUpdate({
-      target: users.uid,
-      set: {
+      const assignedRole = isPrimaryAdmin ? "super_admin" : defaultRole;
+      const inserted = await db.insert(users).values({
+        uid,
         email: emailLower,
-        updatedAt: /* @__PURE__ */ new Date()
-      }
-    }).returning();
-    return inserted[0];
+        fullName: fullName || emailLower.split("@")[0] || "Foodora User",
+        role: assignedRole
+      }).onConflictDoUpdate({
+        target: users.uid,
+        set: {
+          email: emailLower,
+          updatedAt: /* @__PURE__ */ new Date()
+        }
+      }).returning();
+      return inserted[0];
+    });
   } catch (error) {
     console.error("Database user upsert failed:", error);
     throw new Error("Failed to synchronize user account.", { cause: error });
@@ -4367,8 +4531,10 @@ async function searchMealDbDishes(query) {
 
 // src/services/order-email.ts
 import crypto2 from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import nodemailer from "nodemailer";
-import { desc as desc2, eq as eq3 } from "drizzle-orm";
+import { desc as desc2, eq as eq3, inArray } from "drizzle-orm";
 var EMAIL_CONFIG_KEY = "__email_transport_config__";
 var EMAIL_CONFIG_UID = "sys-email-transport-config";
 function deriveEncryptionKey() {
@@ -4608,7 +4774,8 @@ async function saveAdminEmailSettings(input) {
   );
   const smtpSecure = typeof input.smtpSecure === "boolean" ? input.smtpSecure : provider === "gmail" ? smtpPort === 465 : smtpPort === 465;
   const smtpUser = (input.smtpUser ?? prev?.smtpUser ?? "").trim();
-  const fromAddress = (input.fromAddress ?? prev?.fromAddress ?? (provider === "resend" ? "Foodora BD <onboarding@resend.dev>" : smtpUser ? `Foodora BD <${smtpUser}>` : "Foodora BD <orders@foodora.bd>")).trim();
+  const rawFromAddress = (input.fromAddress ?? prev?.fromAddress ?? "").trim();
+  const fromAddress = provider === "resend" ? !rawFromAddress || rawFromAddress.toLowerCase().includes("@foodora.bd") ? "Foodora BD <onboarding@resend.dev>" : rawFromAddress : rawFromAddress || (smtpUser ? `Foodora BD <${smtpUser}>` : "Foodora BD <orders@foodora.bd>");
   const notifyEmail = (input.notifyEmail !== void 0 ? input.notifyEmail : prev?.notifyEmail ?? PRIMARY_SUPER_ADMIN_EMAIL).trim().toLowerCase();
   const cleanedSmtpPass = input.smtpPass !== void 0 && input.smtpPass.trim() !== "" ? normalizeSmtpPassword(provider === "gmail" ? "gmail" : smtpHost, input.smtpPass) : "";
   const nextSmtpPassEnc = cleanedSmtpPass ? encryptSecret(cleanedSmtpPass) : prev?.smtpPassEnc || "";
@@ -4638,11 +4805,45 @@ async function saveAdminEmailSettings(input) {
 async function verifyEmailTransportConnection() {
   const cfg = await resolveEffectiveConfig();
   if (cfg.providerMode === "resend" && cfg.resendKey) {
-    return {
-      ok: true,
-      provider: "resend",
-      message: 'Resend API key is configured. Use "Send Test Invoice" to verify recipient inbox delivery.'
-    };
+    try {
+      const checkRes = await fetch("https://api.resend.com/domains", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${cfg.resendKey}`
+        },
+        signal: AbortSignal.timeout(8e3)
+      });
+      if (checkRes.ok) {
+        const data = await checkRes.json().catch(() => ({}));
+        const verifiedDomains = (data.data || []).filter((d) => d.status === "verified" && d.name).map((d) => d.name);
+        return {
+          ok: true,
+          provider: "resend",
+          message: verifiedDomains.length > 0 ? `Resend API key verified (${verifiedDomains.join(", ")}).` : "Resend API key verified (using Foodora BD <onboarding@resend.dev> sender)."
+        };
+      }
+      const errBody = await checkRes.text().catch(() => "");
+      if (errBody.toLowerCase().includes("restricted to only send emails")) {
+        return {
+          ok: true,
+          provider: "resend",
+          message: 'Resend send-only API key saved. Click "Send Test Email" to verify inbox delivery.'
+        };
+      }
+      return {
+        ok: false,
+        provider: "resend",
+        message: "Resend API key verification failed.",
+        error: errBody || `Resend returned HTTP ${checkRes.status}`
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        provider: "resend",
+        message: "Could not reach Resend API.",
+        error: err instanceof Error ? err.message : "Network error verifying Resend key"
+      };
+    }
   }
   if (!cfg.smtpHost || !cfg.smtpUser || !cfg.smtpPass) {
     return {
@@ -4688,6 +4889,177 @@ async function verifyEmailTransportConnection() {
     error: lastError || "Could not authenticate with SMTP server."
   };
 }
+var UPLOADS_DIR = process.env.VERCEL ? path.join("/tmp", "foodora-uploads") : path.resolve(process.cwd(), "public", "uploads");
+function inferMimeAndExtension(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return { contentType: "image/jpeg", ext: ".jpg" };
+  if (ext === ".png") return { contentType: "image/png", ext: ".png" };
+  if (ext === ".webp") return { contentType: "image/webp", ext: ".webp" };
+  if (ext === ".gif") return { contentType: "image/gif", ext: ".gif" };
+  return null;
+}
+function safeResolveWithinRoots(relPath, roots) {
+  const cleanRel = relPath.replace(/^\/+/, "");
+  if (!cleanRel || cleanRel.includes("\0")) return null;
+  for (const root of roots) {
+    const absRoot = path.resolve(root);
+    const candidate = path.resolve(absRoot, cleanRel);
+    if (candidate.startsWith(absRoot + path.sep) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+  return null;
+}
+function resolveFallbackFoodImageBuffer() {
+  const relFallback = DEFAULT_ORDER_EMAIL_IMAGE_PATH.replace(/^\/src\/assets\//, "");
+  const resolved = safeResolveWithinRoots(relFallback, [
+    path.resolve(process.cwd(), "src", "assets"),
+    path.resolve(process.cwd(), "dist", "src", "assets"),
+    path.resolve(process.cwd(), "public", "assets")
+  ]);
+  if (!resolved) return null;
+  try {
+    return {
+      filename: path.basename(resolved),
+      content: fs.readFileSync(resolved),
+      contentType: "image/jpeg"
+    };
+  } catch {
+    return null;
+  }
+}
+function buildOriginFallbackImageUrl(srcUrl) {
+  if (!srcUrl || !/^https?:\/\//i.test(srcUrl)) return null;
+  try {
+    const parsed = new URL(srcUrl);
+    return `${parsed.origin}${DEFAULT_ORDER_EMAIL_IMAGE_PATH}`;
+  } catch {
+    return null;
+  }
+}
+async function fetchRemoteImageAsBuffer(imageUrl, cid) {
+  if (!/^https?:\/\//i.test(imageUrl)) return null;
+  try {
+    const res = await fetch(imageUrl, { signal: AbortSignal.timeout(5e3) });
+    if (!res.ok) return null;
+    const rawType = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const extMap = {
+      "image/jpeg": ".jpg",
+      "image/jpg": ".jpg",
+      "image/png": ".png",
+      "image/webp": ".webp",
+      "image/gif": ".gif"
+    };
+    const normalizedType = rawType === "image/jpg" ? "image/jpeg" : rawType;
+    if (!normalizedType.startsWith("image/")) return null;
+    const arrBuf = await res.arrayBuffer();
+    if (!arrBuf || arrBuf.byteLength === 0 || arrBuf.byteLength > 5 * 1024 * 1024) {
+      return null;
+    }
+    const ext = extMap[normalizedType] || ".jpg";
+    return {
+      filename: `${cid}${ext}`,
+      content: Buffer.from(arrBuf),
+      contentType: normalizedType,
+      cid
+    };
+  } catch {
+    return null;
+  }
+}
+function resolveDiskOrDataCidAttachment(entry, allowFallback) {
+  if (entry.kind === "data" && entry.dataBase64 && entry.dataMimeType) {
+    const extMap = {
+      "image/jpeg": ".jpg",
+      "image/png": ".png",
+      "image/webp": ".webp",
+      "image/gif": ".gif"
+    };
+    const ext = extMap[entry.dataMimeType] || ".jpg";
+    return {
+      filename: `${entry.cid}${ext}`,
+      content: Buffer.from(entry.dataBase64, "base64"),
+      contentType: entry.dataMimeType,
+      cid: entry.cid
+    };
+  }
+  const localPath = entry.localPath || "";
+  let resolvedDiskPath = null;
+  if (localPath.startsWith("/uploads/")) {
+    resolvedDiskPath = safeResolveWithinRoots(localPath.replace(/^\/uploads\//, ""), [UPLOADS_DIR]);
+  } else if (localPath.startsWith("/src/assets/")) {
+    resolvedDiskPath = safeResolveWithinRoots(localPath.replace(/^\/src\/assets\//, ""), [
+      path.resolve(process.cwd(), "src", "assets"),
+      path.resolve(process.cwd(), "dist", "src", "assets"),
+      path.resolve(process.cwd(), "public", "assets")
+    ]);
+  } else if (localPath.startsWith("/assets/")) {
+    resolvedDiskPath = safeResolveWithinRoots(localPath.replace(/^\/assets\//, ""), [
+      path.resolve(process.cwd(), "public", "assets"),
+      path.resolve(process.cwd(), "src", "assets")
+    ]);
+  }
+  if (resolvedDiskPath) {
+    const meta = inferMimeAndExtension(resolvedDiskPath);
+    if (meta) {
+      try {
+        return {
+          filename: path.basename(resolvedDiskPath),
+          content: fs.readFileSync(resolvedDiskPath),
+          contentType: meta.contentType,
+          cid: entry.cid
+        };
+      } catch {
+      }
+    }
+  }
+  if (!allowFallback) return null;
+  const fallback = resolveFallbackFoodImageBuffer();
+  if (!fallback) return null;
+  return {
+    filename: fallback.filename,
+    content: fallback.content,
+    contentType: fallback.contentType,
+    cid: entry.cid
+  };
+}
+async function prepareEmailWithInlineCidAttachmentsAsync(html) {
+  const plan = extractEmailInlineCidPlan(html);
+  if (plan.images.length === 0) {
+    return { html, attachments: [] };
+  }
+  const attachments = [];
+  let finalHtml = plan.html;
+  for (const entry of plan.images) {
+    let resolved = resolveDiskOrDataCidAttachment(entry, false);
+    if (!resolved && entry.originalSrcs[0]) {
+      resolved = await fetchRemoteImageAsBuffer(entry.originalSrcs[0], entry.cid);
+    }
+    if (!resolved) {
+      const diskFallback = resolveFallbackFoodImageBuffer();
+      if (diskFallback) {
+        resolved = {
+          filename: diskFallback.filename,
+          content: diskFallback.content,
+          contentType: diskFallback.contentType,
+          cid: entry.cid
+        };
+      }
+    }
+    if (!resolved && entry.originalSrcs[0]) {
+      const remoteFallbackUrl = buildOriginFallbackImageUrl(entry.originalSrcs[0]);
+      if (remoteFallbackUrl && remoteFallbackUrl !== entry.originalSrcs[0]) {
+        resolved = await fetchRemoteImageAsBuffer(remoteFallbackUrl, entry.cid);
+      }
+    }
+    if (resolved) {
+      attachments.push(resolved);
+    } else if (entry.originalSrcs[0]) {
+      finalHtml = finalHtml.replaceAll(`cid:${entry.cid}`, entry.originalSrcs[0]);
+    }
+  }
+  return { html: finalHtml, attachments };
+}
 async function sendTransactionalEmail(params) {
   const emailLower = String(params.to || "").trim().toLowerCase();
   if (!emailLower || !emailLower.includes("@")) {
@@ -4699,6 +5071,7 @@ async function sendTransactionalEmail(params) {
     };
   }
   const cfg = await resolveEffectiveConfig();
+  const prepared = await prepareEmailWithInlineCidAttachmentsAsync(params.html);
   let lastSmtpError = "";
   if ((cfg.providerMode === "gmail" || cfg.providerMode === "smtp") && cfg.smtpHost && cfg.smtpUser && cfg.smtpPass) {
     const attempts = [
@@ -4720,7 +5093,15 @@ async function sendTransactionalEmail(params) {
           to: emailLower,
           subject: params.subject,
           text: params.text,
-          html: params.html
+          html: prepared.html,
+          ...prepared.attachments.length > 0 ? {
+            attachments: prepared.attachments.map((att) => ({
+              filename: att.filename,
+              content: att.content,
+              contentType: att.contentType,
+              cid: att.cid
+            }))
+          } : {}
         });
         return { ok: true, provider: "smtp", status: "sent" };
       } catch (err) {
@@ -4741,22 +5122,43 @@ async function sendTransactionalEmail(params) {
     }
   }
   if (cfg.resendKey) {
+    const primaryFrom = cfg.fromAddress || "Foodora BD <onboarding@resend.dev>";
+    const resendAttachments = prepared.attachments.length > 0 ? prepared.attachments.map((att) => ({
+      filename: att.filename,
+      content: att.content.toString("base64"),
+      content_id: att.cid
+    })) : void 0;
+    const sendViaResend = async (fromAddr) => fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cfg.resendKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: fromAddr,
+        to: [emailLower],
+        subject: params.subject,
+        html: prepared.html,
+        text: params.text,
+        ...resendAttachments ? { attachments: resendAttachments } : {}
+      }),
+      signal: AbortSignal.timeout(12e3)
+    });
     try {
-      const mailRes = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${cfg.resendKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          from: cfg.fromAddress || "Foodora BD <onboarding@resend.dev>",
-          to: [emailLower],
-          subject: params.subject,
-          html: params.html,
-          text: params.text
-        }),
-        signal: AbortSignal.timeout(8e3)
-      });
+      let mailRes = await sendViaResend(primaryFrom);
+      if (!mailRes.ok && mailRes.status === 403 && !primaryFrom.includes("resend.dev")) {
+        const firstErr = await mailRes.text().catch(() => "");
+        if (firstErr.toLowerCase().includes("domain is not verified")) {
+          mailRes = await sendViaResend("Foodora BD <onboarding@resend.dev>");
+        } else {
+          return {
+            ok: false,
+            provider: "resend",
+            status: "resend_error_http_403",
+            error: firstErr || lastSmtpError || "Resend returned HTTP 403"
+          };
+        }
+      }
       if (mailRes.ok) {
         return { ok: true, provider: "resend", status: "sent" };
       }
@@ -4784,11 +5186,11 @@ async function sendTransactionalEmail(params) {
     error: "Gmail SMTP or Resend API Key is not configured yet in Admin -> Backend Control."
   };
 }
-async function sendTestEmail(toEmail, templateStatus = "confirmed") {
+async function sendTestEmail(toEmail, templateStatus = "confirmed", origin) {
   const cleanEmail = String(toEmail || "").trim().toLowerCase();
   const payload = getOrderEmailTemplatePreview(
     templateStatus || "confirmed",
-    process.env.PUBLIC_APP_URL || "https://foodora.bd",
+    origin || process.env.PUBLIC_APP_URL || "https://foodora.bd",
     cleanEmail
   );
   return sendTransactionalEmail({
@@ -4839,11 +5241,39 @@ Track order: ${row.trackingUrl}`;
     log: updated[0] ?? row
   };
 }
+async function enrichOrderEmailItemsWithImages(items) {
+  if (!Array.isArray(items) || items.length === 0) return items;
+  let next = [...items];
+  const missingIds = Array.from(
+    new Set(
+      next.filter((it) => !it.imageUrl && typeof it.foodItemId === "number").map((it) => it.foodItemId)
+    )
+  );
+  if (missingIds.length > 0) {
+    try {
+      const dbFoods = await db.select({ id: foodItems.id, imageUrl: foodItems.imageUrl }).from(foodItems).where(inArray(foodItems.id, missingIds));
+      const imgMap = new Map(dbFoods.map((f) => [f.id, f.imageUrl]));
+      next = next.map(
+        (it) => !it.imageUrl && typeof it.foodItemId === "number" ? { ...it, imageUrl: imgMap.get(it.foodItemId) || it.imageUrl } : it
+      );
+    } catch {
+    }
+  }
+  return next.map((it) => {
+    const raw = String(it.imageUrl || "").trim();
+    const isMissingUpload = raw.startsWith("/uploads/") && !safeResolveWithinRoots(raw.replace(/^\/uploads\//, ""), [UPLOADS_DIR]);
+    if (!raw || isMissingUpload) {
+      return { ...it, imageUrl: DEFAULT_ORDER_EMAIL_IMAGE_PATH };
+    }
+    return it;
+  });
+}
 async function sendAndLogOrderTrackingEmail(params) {
   const emailLower = String(params.customerEmail || "").trim().toLowerCase();
   if (!emailLower || !emailLower.includes("@")) {
     return null;
   }
+  const enrichedItems = await enrichOrderEmailItemsWithImages(params.items);
   const payload = buildOrderTrackingEmailPayload({
     origin: params.origin,
     orderId: params.orderId,
@@ -4869,7 +5299,7 @@ async function sendAndLogOrderTrackingEmail(params) {
     riderPhone: params.riderPhone,
     etaMinutes: params.etaMinutes,
     createdAt: params.createdAt,
-    items: params.items
+    items: enrichedItems
   });
   const dispatchResult = await sendTransactionalEmail({
     to: emailLower,
@@ -4906,6 +5336,7 @@ async function sendMerchantOrderAlertEmail(params) {
     fallbackAdminEmails: [PRIMARY_SUPER_ADMIN_EMAIL, "raqkibrony@gmail.com"]
   });
   if (recipients.length === 0) return [];
+  const enrichedItems = await enrichOrderEmailItemsWithImages(params.items);
   const payload = buildMerchantOrderAlertEmailPayload({
     origin: params.origin,
     orderId: params.orderId,
@@ -4923,7 +5354,7 @@ async function sendMerchantOrderAlertEmail(params) {
     status: params.status,
     statusNote: params.statusNote,
     riderName: params.riderName,
-    items: params.items
+    items: enrichedItems
   });
   return Promise.allSettled(
     recipients.map(async (to) => {
@@ -5292,16 +5723,16 @@ function validatePaymentGatewayConfiguration(row, envConfigured = false) {
 
 // server.ts
 var __filename = fileURLToPath(import.meta.url);
-var __dirname = path.dirname(__filename);
-var PROJECT_ROOT = path.basename(__dirname) === "api" ? path.resolve(__dirname, "..") : __dirname;
-var UPLOADS_DIR = process.env.VERCEL ? path.join("/tmp", "foodora-uploads") : path.resolve(PROJECT_ROOT, "public", "uploads");
+var __dirname = path2.dirname(__filename);
+var PROJECT_ROOT = path2.basename(__dirname) === "api" ? path2.resolve(__dirname, "..") : __dirname;
+var UPLOADS_DIR2 = process.env.VERCEL ? path2.join("/tmp", "foodora-uploads") : path2.resolve(PROJECT_ROOT, "public", "uploads");
 try {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  fs2.mkdirSync(UPLOADS_DIR2, { recursive: true });
 } catch {
 }
 var app = express();
 app.use(express.json({ limit: "8mb" }));
-app.use("/uploads", express.static(UPLOADS_DIR));
+app.use("/uploads", express.static(UPLOADS_DIR2));
 app.use("/api", async (req, res, next) => {
   if (req.path === "/health" || req.path === "/export/project-zip") {
     return next();
@@ -6487,10 +6918,14 @@ app.post("/api/orders", requireAuth, async (req, res) => {
         });
         const lineTotal = unitPrice * reqItem.quantity;
         subtotal += lineTotal;
+        const rawImg = (found.imageUrl || "").trim();
+        const isMissingLocalUpload = rawImg.startsWith("/uploads/") && !fs2.existsSync(path2.join(UPLOADS_DIR2, rawImg.replace(/^\/uploads\//, "")));
+        const resolvedSnapshotImg = !rawImg || isMissingLocalUpload ? rest.coverUrl || "/src/assets/images/food_kacchi_biriyani_1794831373742.jpg" : rawImg;
         snapshotItems.push({
           foodItemId: found.id,
           name: found.name,
           nameBn: found.nameBn,
+          imageUrl: resolvedSnapshotImg,
           quantity: reqItem.quantity,
           unitPrice,
           variation: matchedVar?.name,
@@ -8238,8 +8673,8 @@ app.post(
       if (process.env.VERCEL) {
         return res.status(201).json({ imageUrl: parsed.data.dataUrl.trim() });
       }
-      const outPath = path.join(UPLOADS_DIR, outName);
-      await fs.promises.writeFile(outPath, buffer);
+      const outPath = path2.join(UPLOADS_DIR2, outName);
+      await fs2.promises.writeFile(outPath, buffer);
       res.status(201).json({ imageUrl: `/uploads/${outName}` });
     } catch (error) {
       res.status(500).json({ error: error.message || "Image upload failed" });
@@ -9405,7 +9840,11 @@ app.post(
       return res.status(400).json({ error: "Please enter a valid recipient email address." });
     }
     try {
-      const result = await sendTestEmail(parsed.data.to, parsed.data.templateStatus);
+      const result = await sendTestEmail(
+        parsed.data.to,
+        parsed.data.templateStatus,
+        getRequestOrigin(req)
+      );
       if (!result.ok) {
         return res.status(400).json({
           ok: false,
@@ -9616,10 +10055,10 @@ var EXCLUDED_ZIP_DIRS = /* @__PURE__ */ new Set([
 ]);
 var EXCLUDED_ZIP_FILES = /* @__PURE__ */ new Set([".env", ".DS_Store"]);
 async function addDirectoryToZip(zipFolder, fsDir, relBase = "") {
-  const entries = await fs.promises.readdir(fsDir, { withFileTypes: true });
+  const entries = await fs2.promises.readdir(fsDir, { withFileTypes: true });
   for (const entry of entries) {
     const relPath = relBase ? `${relBase}/${entry.name}` : entry.name;
-    const fullPath = path.join(fsDir, entry.name);
+    const fullPath = path2.join(fsDir, entry.name);
     if (entry.isDirectory()) {
       if (EXCLUDED_ZIP_DIRS.has(entry.name)) continue;
       if (relPath === "public/assets/aistudio" || relPath === "public\\assets\\aistudio") continue;
@@ -9627,7 +10066,7 @@ async function addDirectoryToZip(zipFolder, fsDir, relBase = "") {
     } else if (entry.isFile()) {
       if (EXCLUDED_ZIP_FILES.has(entry.name)) continue;
       if (entry.name.endsWith(".log") || entry.name.endsWith(".zip")) continue;
-      const content = await fs.promises.readFile(fullPath);
+      const content = await fs2.promises.readFile(fullPath);
       zipFolder.file(relPath, content);
     }
   }
@@ -9852,11 +10291,11 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(PROJECT_ROOT, "dist");
-    if (fs.existsSync(distPath)) {
+    const distPath = path2.resolve(PROJECT_ROOT, "dist");
+    if (fs2.existsSync(distPath)) {
       app.use(express.static(distPath));
       app.get("*", (_req, res) => {
-        res.sendFile(path.join(distPath, "index.html"));
+        res.sendFile(path2.join(distPath, "index.html"));
       });
     }
   }
@@ -9867,7 +10306,7 @@ async function startServer() {
   });
 }
 var isServerless = Boolean(
-  process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NOW_REGION || path.basename(__dirname) === "api"
+  process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NOW_REGION || path2.basename(__dirname) === "api"
 );
 if (!isServerless) {
   startServer();

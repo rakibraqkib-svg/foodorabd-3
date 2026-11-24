@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import {
   AdvancedMarker,
   APIProvider,
@@ -29,6 +31,64 @@ import {
 } from '../lib/marketplace-logic';
 import type { Lang } from '../types/marketplace';
 
+const GMP_BLOCK_KEY = 'foodora_gmp_quota_blocked_until';
+const MAP_PREF_KEY = 'foodora_preferred_map_mode';
+
+function escapeHtml(raw: string): string {
+  return String(raw || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function isGoogleMapsBlockedInSession(): boolean {
+  if (typeof window === 'undefined') return false;
+  if ((window as unknown as { __foodoraGmpBlocked?: boolean }).__foodoraGmpBlocked) {
+    return true;
+  }
+  try {
+    const until = Number(sessionStorage.getItem(GMP_BLOCK_KEY) || '0');
+    return Number.isFinite(until) && until > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+function setGoogleMapsBlockedInSession(blocked: boolean) {
+  if (typeof window === 'undefined') return;
+  (window as unknown as { __foodoraGmpBlocked?: boolean }).__foodoraGmpBlocked = blocked;
+  try {
+    if (blocked) {
+      sessionStorage.setItem(GMP_BLOCK_KEY, String(Date.now() + 30 * 60 * 1000));
+    } else {
+      sessionStorage.removeItem(GMP_BLOCK_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function getPreferredMapMode(): 'google' | 'osm' | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const v = localStorage.getItem(MAP_PREF_KEY);
+    return v === 'osm' || v === 'google' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function setPreferredMapMode(mode: 'google' | 'osm') {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(MAP_PREF_KEY, mode);
+  } catch {
+    // ignore
+  }
+}
+
 export interface ExtraRiderMapPin {
   id: number;
   label: string;
@@ -36,6 +96,29 @@ export interface ExtraRiderMapPin {
   lng: number;
   isAvailable: boolean;
   selected?: boolean;
+}
+
+class GoogleMapErrorBoundary extends React.Component<
+  { children: React.ReactNode; onCrash: () => void },
+  { hasError: boolean }
+> {
+  constructor(props: { children: React.ReactNode; onCrash: () => void }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+
+  componentDidCatch() {
+    this.props.onCrash();
+  }
+
+  render() {
+    if (this.state.hasError) return null;
+    return this.props.children;
+  }
 }
 
 interface DhakaMapPickerProps {
@@ -439,6 +522,10 @@ function GoogleMapInner({
   const showBangladeshZoom = Boolean(
     (extraRiders && extraRiders.length > 0) || !isPointInsideDhakaMetro(center.lat, center.lng)
   );
+  const isGoogleMapsReady =
+    status === APILoadingStatus.LOADED &&
+    typeof window !== 'undefined' &&
+    Boolean((window as unknown as { google?: { maps?: { marker?: { AdvancedMarkerElement?: unknown } } } }).google?.maps?.marker?.AdvancedMarkerElement);
 
   return (
     <div
@@ -465,22 +552,24 @@ function GoogleMapInner({
         }}
       >
         <MapCenterSync center={center} skipPanRef={skipPanRef} />
-        <AdvancedMarker
-          position={center}
-          title={pinAppearance.primaryLabel}
-          draggable={Boolean(interactive)}
-          onDragEnd={(ev) => {
-            if (interactive && ev.latLng) {
-              emitLocation(ev.latLng.lat(), ev.latLng.lng());
-            }
-          }}
-        >
-          <MapPinMarkerBadge
-            label={pinAppearance.primaryLabel}
-            role={pinAppearance.primaryRole}
-          />
-        </AdvancedMarker>
-        {secondaryPoint && (
+        {isGoogleMapsReady && (
+          <AdvancedMarker
+            position={center}
+            title={pinAppearance.primaryLabel}
+            draggable={Boolean(interactive)}
+            onDragEnd={(ev) => {
+              if (interactive && ev.latLng) {
+                emitLocation(ev.latLng.lat(), ev.latLng.lng());
+              }
+            }}
+          >
+            <MapPinMarkerBadge
+              label={pinAppearance.primaryLabel}
+              role={pinAppearance.primaryRole}
+            />
+          </AdvancedMarker>
+        )}
+        {isGoogleMapsReady && secondaryPoint && (
           <AdvancedMarker
             position={{ lat: secondaryPoint.lat, lng: secondaryPoint.lng }}
             title={pinAppearance.secondaryLabel || secondaryPoint.label}
@@ -491,7 +580,7 @@ function GoogleMapInner({
             />
           </AdvancedMarker>
         )}
-        {riderPoint && (
+        {isGoogleMapsReady && riderPoint && (
           <AdvancedMarker
             position={{ lat: riderPoint.lat, lng: riderPoint.lng }}
             title={riderPoint.label}
@@ -503,40 +592,43 @@ function GoogleMapInner({
             </div>
           </AdvancedMarker>
         )}
-        {extraRiders?.map((er) => (
-          <AdvancedMarker
-            key={er.id}
-            position={{ lat: er.lat, lng: er.lng }}
-            title={er.label}
-            onClick={() => onSelectRiderPin?.(er.id)}
-          >
-            <div
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold shadow-md border-2 ${
-                er.selected
-                  ? 'bg-[#E21B70] text-white border-white scale-110'
-                  : er.isAvailable
-                  ? 'bg-emerald-600 text-white border-white'
-                  : 'bg-neutral-600 text-white border-white'
-              }`}
+        {isGoogleMapsReady &&
+          extraRiders?.map((er) => (
+            <AdvancedMarker
+              key={er.id}
+              position={{ lat: er.lat, lng: er.lng }}
+              title={er.label}
+              onClick={() => onSelectRiderPin?.(er.id)}
             >
-              <Bike className="w-3 h-3 shrink-0" />
-              <span>{er.label}</span>
-            </div>
-          </AdvancedMarker>
-        ))}
-        {secondaryPoint && (
+              <div
+                className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold shadow-md border-2 ${
+                  er.selected
+                    ? 'bg-[#E21B70] text-white border-white scale-110'
+                    : er.isAvailable
+                    ? 'bg-emerald-600 text-white border-white'
+                    : 'bg-neutral-600 text-white border-white'
+                }`}
+              >
+                <Bike className="w-3 h-3 shrink-0" />
+                <span>{er.label}</span>
+              </div>
+            </AdvancedMarker>
+          ))}
+        {isGoogleMapsReady && secondaryPoint && (
           <RouteOverlay
             origin={{ lat: secondaryPoint.lat, lng: secondaryPoint.lng }}
             destination={center}
             skipFitBounds={Boolean(riderPoint)}
           />
         )}
-        <TrackingBoundsAndRiderVector
-          center={center}
-          secondaryPoint={secondaryPoint}
-          riderPoint={riderPoint}
-          riderTarget={riderTarget}
-        />
+        {isGoogleMapsReady && (
+          <TrackingBoundsAndRiderVector
+            center={center}
+            secondaryPoint={secondaryPoint}
+            riderPoint={riderPoint}
+            riderTarget={riderTarget}
+          />
+        )}
       </GoogleMap>
       {interactive && (
         <div className="absolute bottom-2.5 left-2.5 right-12 flex items-center justify-between gap-2 bg-white/95 backdrop-blur-xs border border-neutral-200 rounded-lg px-2.5 py-1.5 text-[11px] font-medium text-neutral-700 shadow-xs">
@@ -575,6 +667,31 @@ function GoogleMapInner({
   );
 }
 
+function buildLeafletPinHtml(label: string, role: 'user' | 'vendor'): string {
+  const isVendor = role === 'vendor';
+  const fill = isVendor ? '#111827' : '#DC2626';
+  const stroke = isVendor ? '#000000' : '#991B1B';
+  return `
+    <div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-100%);pointer-events:auto;">
+      <span style="padding:2px 8px;border-radius:6px;background:${fill};border:1px solid ${stroke};color:#ffffff;font-size:11px;font-weight:700;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.28);margin-bottom:3px;line-height:1.25;">${escapeHtml(label)}</span>
+      <svg width="26" height="34" viewBox="0 0 28 36" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 2px 4px rgba(0,0,0,0.32));">
+        <path d="M14 1.5C7.09644 1.5 1.5 7.09644 1.5 14C1.5 23.25 14 34.5 14 34.5C14 34.5 26.5 23.25 26.5 14C26.5 7.09644 20.9036 1.5 14 1.5Z" fill="${fill}" stroke="${stroke}" stroke-width="2"/>
+        <circle cx="14" cy="13.5" r="4.8" fill="#FFFFFF"/>
+      </svg>
+    </div>
+  `;
+}
+
+function buildLeafletRiderHtml(label: string, selected = false, isAvailable = true): string {
+  const bg = selected ? '#E21B70' : isAvailable ? '#059669' : '#4B5563';
+  return `
+    <div style="display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:9999px;background:${bg};color:#fff;font-size:11px;font-weight:700;border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,0.28);white-space:nowrap;transform:translate(-50%,-50%);">
+      <span style="width:7px;height:7px;border-radius:9999px;background:#A7F3D0;display:inline-block;"></span>
+      <span>🛵 ${escapeHtml(label)}</span>
+    </div>
+  `;
+}
+
 function FallbackDhakaMap({
   lang,
   center,
@@ -584,14 +701,25 @@ function FallbackDhakaMap({
   restaurantName,
   secondaryPoint,
   riderPoint,
+  riderTarget,
   extraRiders,
   onSelectRiderPin,
   interactive,
   heightClass,
   onSelectLocation,
 }: Omit<DhakaMapPickerProps, 'mapsApiKey'>) {
-  const [showOsm, setShowOsm] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const layersRef = useRef<L.LayerGroup | null>(null);
+  const fittedKeyRef = useRef<string>('');
+  const onSelectRef = useRef(onSelectLocation);
+  const onSelectRiderRef = useRef(onSelectRiderPin);
+  onSelectRef.current = onSelectLocation;
+  onSelectRiderRef.current = onSelectRiderPin;
+
   const reverseSeqRef = useRef(0);
+  const [resolving, setResolving] = useState(false);
+
   const pinAppearance = resolveMapPinAppearance({
     pinType,
     userName,
@@ -599,50 +727,43 @@ function FallbackDhakaMap({
     markerLabel,
     secondaryLabel: secondaryPoint?.label,
   });
+
   const distance = secondaryPoint
     ? haversineDistanceKm(center.lat, center.lng, secondaryPoint.lat, secondaryPoint.lng)
     : null;
 
-  const allPoints: Array<{ lat: number; lng: number }> = [
+  const allInsideDhaka = [
     center,
     ...(secondaryPoint ? [secondaryPoint] : []),
     ...(riderPoint ? [riderPoint] : []),
     ...(extraRiders || []),
-  ];
-  const allInsideDhaka = allPoints.every((pt) => isPointInsideDhakaMetro(pt.lat, pt.lng));
+  ].every((pt) => isPointInsideDhakaMetro(pt.lat, pt.lng));
 
-  // Scale either to Dhaka metro or All-Bangladesh depending on coordinates present
-  const bounds = allInsideDhaka
-    ? { minLat: 23.71, maxLat: 23.89, minLng: 90.34, maxLng: 90.47 }
-    : { minLat: 20.6, maxLat: 26.5, minLng: 88.1, maxLng: 92.6 };
+  const emitOsmLocation = (lat: number, lng: number, preferredAreaName?: string) => {
+    const cb = onSelectRef.current;
+    if (!cb || !Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
-  const toXY = (lat: number, lng: number) => {
-    const x = Math.min(93, Math.max(7, ((lng - bounds.minLng) / (bounds.maxLng - bounds.minLng)) * 100));
-    const y = Math.min(89, Math.max(10, (1 - (lat - bounds.minLat) / (bounds.maxLat - bounds.minLat)) * 100));
-    return { x, y };
-  };
-
-  const emitFallbackPoint = (lat: number, lng: number, preferredAreaName?: string) => {
-    if (!onSelectLocation) return;
     const nearest = resolveNearestAreaFromList(lat, lng, BANGLADESH_AREAS);
     const immediateName =
       preferredAreaName ||
       (nearest.area && nearest.distanceKm <= 6
         ? nearest.area.name
         : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
-    const immediateDisplayName =
-      preferredAreaName
-        ? `${preferredAreaName}, Bangladesh`
-        : nearest.area && nearest.distanceKm <= 6
-        ? `${nearest.area.name}, Bangladesh`
-        : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)}), Bangladesh`;
-    onSelectLocation({
+    const immediateDisplayName = preferredAreaName
+      ? `${preferredAreaName}, Bangladesh`
+      : nearest.area && nearest.distanceKm <= 6
+      ? `${nearest.area.name}, Bangladesh`
+      : `Pinned (${lat.toFixed(4)}, ${lng.toFixed(4)}), Bangladesh`;
+
+    cb({
       lat,
       lng,
       areaName: immediateName,
       displayName: immediateDisplayName,
     });
+
     const seq = ++reverseSeqRef.current;
+    setResolving(true);
     apiFetch<{ displayName: string; areaName: string }>(
       `/api/free/reverse-geocode?lat=${lat}&lng=${lng}&lang=${lang}`
     )
@@ -652,233 +773,293 @@ function FallbackDhakaMap({
           preferredAreaName ||
           matchCanonicalAreaFromHints([res.areaName, res.displayName], lat, lng, BANGLADESH_AREAS) ||
           immediateName;
-        onSelectLocation({
+        onSelectRef.current?.({
           lat,
           lng,
           areaName: cleanArea,
           displayName: res.displayName || immediateDisplayName,
         });
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (seq === reverseSeqRef.current) {
+          setResolving(false);
+        }
+      });
   };
 
-  const fromClientPoint = (ev: React.MouseEvent<HTMLDivElement>) => {
-    if (!interactive || !onSelectLocation) return;
-    const rect = ev.currentTarget.getBoundingClientRect();
-    const pctX = ((ev.clientX - rect.left) / Math.max(1, rect.width)) * 100;
-    const pctY = ((ev.clientY - rect.top) / Math.max(1, rect.height)) * 100;
-    const lng = bounds.minLng + (pctX / 100) * (bounds.maxLng - bounds.minLng);
-    const lat = bounds.minLat + (1 - pctY / 100) * (bounds.maxLat - bounds.minLat);
-    emitFallbackPoint(lat, lng);
-  };
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
 
-  const p1 = toXY(center.lat, center.lng);
-  const p2 = secondaryPoint ? toXY(secondaryPoint.lat, secondaryPoint.lng) : null;
-  const pRider = riderPoint ? toXY(riderPoint.lat, riderPoint.lng) : null;
+    const initialZoom =
+      (extraRiders && extraRiders.length > 0) || !isPointInsideDhakaMetro(center.lat, center.lng)
+        ? 8
+        : 15;
+
+    const map = L.map(el, {
+      center: [center.lat, center.lng],
+      zoom: initialZoom,
+      zoomControl: true,
+      attributionControl: false,
+    });
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      subdomains: ['a', 'b', 'c'],
+    }).addTo(map);
+
+    const group = L.layerGroup().addTo(map);
+    mapRef.current = map;
+    layersRef.current = group;
+
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            map.invalidateSize({ animate: false });
+          })
+        : null;
+    resizeObserver?.observe(el);
+
+    return () => {
+      resizeObserver?.disconnect();
+      map.remove();
+      mapRef.current = null;
+      layersRef.current = null;
+      fittedKeyRef.current = '';
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const handleClick = (ev: L.LeafletMouseEvent) => {
+      if (!interactive) return;
+      emitOsmLocation(ev.latlng.lat, ev.latlng.lng);
+    };
+    map.on('click', handleClick);
+    return () => {
+      map.off('click', handleClick);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactive, lang]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const group = layersRef.current;
+    if (!map || !group) return;
+
+    group.clearLayers();
+
+    if (secondaryPoint) {
+      L.polyline(
+        [
+          [secondaryPoint.lat, secondaryPoint.lng],
+          [center.lat, center.lng],
+        ],
+        { color: '#E21B70', weight: 4, opacity: 0.85, dashArray: '8 6' }
+      ).addTo(group);
+    }
+
+    if (riderPoint) {
+      const target = riderTarget || center;
+      L.polyline(
+        [
+          [riderPoint.lat, riderPoint.lng],
+          [target.lat, target.lng],
+        ],
+        { color: '#059669', weight: 3.5, opacity: 0.85 }
+      ).addTo(group);
+    }
+
+    const primaryIcon = L.divIcon({
+      className: 'foodora-osm-pin-wrapper !bg-transparent !border-0',
+      html: buildLeafletPinHtml(pinAppearance.primaryLabel, pinAppearance.primaryRole),
+      iconSize: [0, 0],
+      iconAnchor: [0, 0],
+    });
+    const primaryMarker = L.marker([center.lat, center.lng], {
+      icon: primaryIcon,
+      draggable: Boolean(interactive),
+      title: pinAppearance.primaryLabel,
+    }).addTo(group);
+
+    if (interactive) {
+      primaryMarker.on('dragend', () => {
+        const ll = primaryMarker.getLatLng();
+        emitOsmLocation(ll.lat, ll.lng);
+      });
+    }
+
+    if (secondaryPoint) {
+      const vendorIcon = L.divIcon({
+        className: 'foodora-osm-pin-wrapper !bg-transparent !border-0',
+        html: buildLeafletPinHtml(
+          pinAppearance.secondaryLabel || secondaryPoint.label,
+          'vendor'
+        ),
+        iconSize: [0, 0],
+        iconAnchor: [0, 0],
+      });
+      L.marker([secondaryPoint.lat, secondaryPoint.lng], {
+        icon: vendorIcon,
+        title: pinAppearance.secondaryLabel || secondaryPoint.label,
+      }).addTo(group);
+    }
+
+    if (riderPoint) {
+      const riderIcon = L.divIcon({
+        className: 'foodora-osm-rider-wrapper !bg-transparent !border-0',
+        html: buildLeafletRiderHtml(riderPoint.label, false, true),
+        iconSize: [0, 0],
+        iconAnchor: [0, 0],
+      });
+      L.marker([riderPoint.lat, riderPoint.lng], {
+        icon: riderIcon,
+        title: riderPoint.label,
+      }).addTo(group);
+    }
+
+    extraRiders?.forEach((er) => {
+      const erIcon = L.divIcon({
+        className: 'foodora-osm-rider-wrapper !bg-transparent !border-0',
+        html: buildLeafletRiderHtml(er.label, Boolean(er.selected), er.isAvailable),
+        iconSize: [0, 0],
+        iconAnchor: [0, 0],
+      });
+      const m = L.marker([er.lat, er.lng], {
+        icon: erIcon,
+        title: er.label,
+      }).addTo(group);
+      m.on('click', () => {
+        onSelectRiderRef.current?.(er.id);
+      });
+    });
+
+    const multiPoints: Array<[number, number]> = [[center.lat, center.lng]];
+    if (secondaryPoint) multiPoints.push([secondaryPoint.lat, secondaryPoint.lng]);
+    if (riderPoint) multiPoints.push([riderPoint.lat, riderPoint.lng]);
+    if (extraRiders && extraRiders.length > 0) {
+      extraRiders.forEach((er) => multiPoints.push([er.lat, er.lng]));
+    }
+
+    if (multiPoints.length > 1) {
+      const boundsKey = multiPoints.map((pt) => `${pt[0].toFixed(4)},${pt[1].toFixed(4)}`).join('|');
+      if (fittedKeyRef.current !== boundsKey) {
+        map.fitBounds(L.latLngBounds(multiPoints), { padding: [42, 42], maxZoom: 15 });
+        fittedKeyRef.current = boundsKey;
+      }
+    } else {
+      const singleKey = `single:${center.lat.toFixed(5)},${center.lng.toFixed(5)}`;
+      if (fittedKeyRef.current !== singleKey) {
+        map.setView(
+          [center.lat, center.lng],
+          Math.max(map.getZoom(), isPointInsideDhakaMetro(center.lat, center.lng) ? 15 : 13),
+          { animate: true }
+        );
+        fittedKeyRef.current = singleKey;
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    center.lat,
+    center.lng,
+    pinAppearance.primaryLabel,
+    pinAppearance.primaryRole,
+    pinAppearance.secondaryLabel,
+    secondaryPoint?.lat,
+    secondaryPoint?.lng,
+    secondaryPoint?.label,
+    riderPoint?.lat,
+    riderPoint?.lng,
+    riderPoint?.label,
+    riderTarget?.lat,
+    riderTarget?.lng,
+    extraRiders,
+    interactive,
+  ]);
 
   const pinButtons = allInsideDhaka
-    ? DHAKA_AREAS
-    : BANGLADESH_AREAS.filter((a) => MAJOR_BD_CITY_NAMES.has(a.name));
+    ? DHAKA_AREAS.slice(0, 6)
+    : BANGLADESH_AREAS.filter((a) => MAJOR_BD_CITY_NAMES.has(a.name)).slice(0, 6);
 
   return (
     <div
-      onClick={fromClientPoint}
-      className={`relative w-full overflow-hidden rounded-xl border border-neutral-200 bg-[#F8FAFC] ${interactive ? 'cursor-crosshair' : ''} ${heightClass || 'h-[260px]'}`}
+      data-testid="osm-free-map"
+      className={`relative w-full overflow-hidden rounded-xl border border-neutral-200 bg-[#EEF2F6] ${heightClass || 'h-[260px]'}`}
     >
-      {/* Map Grid or OpenStreetMap Embed Alternative */}
-      {showOsm ? (
-        <iframe
-          title="OpenStreetMap Free Alternative"
-          className="absolute inset-0 w-full h-full border-0 pointer-events-auto"
-          src={`https://www.openstreetmap.org/export/embed.html?bbox=${center.lng - 0.02},${center.lat - 0.02},${center.lng + 0.02},${center.lat + 0.02}&layer=mapnik&marker=${center.lat},${center.lng}`}
-        />
-      ) : (
-        <svg
-          className="absolute inset-0 w-full h-full pointer-events-none"
-          viewBox="0 0 100 100"
-          preserveAspectRatio="none"
-        >
-          <defs>
-            <pattern id="bdGrid" width="12.5" height="12.5" patternUnits="userSpaceOnUse">
-              <path d="M 12.5 0 L 0 0 0 12.5" fill="none" stroke="#E2E8F0" strokeWidth="0.4" />
-            </pattern>
-          </defs>
-          <rect width="100" height="100" fill="url(#bdGrid)" />
-          <path
-            d={allInsideDhaka ? 'M 55 48 Q 62 52 68 46 Q 74 42 78 50' : 'M 42 15 Q 50 45 48 75 Q 52 86 68 92'}
-            fill="none"
-            stroke="#CBD5E1"
-            strokeWidth="2.2"
-            strokeLinecap="round"
-          />
-          {p2 && (
-            <line
-              x1={p2.x}
-              y1={p2.y}
-              x2={p1.x}
-              y2={p1.y}
-              stroke="#E21B70"
-              strokeWidth="1.2"
-              strokeDasharray="2.5 1.5"
-            />
-          )}
-          {pRider && (
-            <line
-              x1={pRider.x}
-              y1={pRider.y}
-              x2={p1.x}
-              y2={p1.y}
-              stroke="#059669"
-              strokeWidth="1.4"
-              strokeDasharray="1.8 1.2"
-            />
-          )}
-        </svg>
-      )}
+      <div ref={containerRef} className="w-full h-full z-0" />
 
-      {/* Mode Badge */}
-      <span className="pointer-events-none absolute top-2 left-2 z-10 px-2 py-0.5 rounded bg-white/90 border border-neutral-200 text-[10px] font-bold text-neutral-600">
-        {allInsideDhaka ? 'Dhaka Metro View' : 'Bangladesh Map View'}
+      <span className="pointer-events-none absolute top-2 right-2 z-[400] px-2 py-0.5 rounded-md bg-white/95 border border-emerald-200 text-[10px] font-bold text-emerald-700 shadow-xs">
+        🌍 OpenStreetMap · Free
       </span>
 
-      {/* Clickable Quick Area / City Pins */}
-      {interactive &&
-        pinButtons.map((area) => {
-          const pos = toXY(area.lat, area.lng);
-          const tol = allInsideDhaka ? 0.008 : 0.08;
-          const isClose =
-            Math.abs(area.lat - center.lat) < tol && Math.abs(area.lng - center.lng) < tol;
-          return (
-            <button
-              key={area.name}
-              type="button"
-              onClick={(ev) => {
-                ev.stopPropagation();
-                emitFallbackPoint(area.lat, area.lng, area.name);
-              }}
-              style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
-              className={`absolute -translate-x-1/2 -translate-y-1/2 px-2 py-0.5 rounded-md text-[10px] font-semibold transition-colors ${
-                isClose
-                  ? 'bg-[#E21B70] text-white shadow-sm z-20'
-                  : 'bg-white/95 text-[#2E3138] border border-neutral-200 hover:border-[#E21B70] z-10'
-              }`}
-            >
-              {area.name}
-            </button>
-          );
-        })}
-
-      {/* Primary Pin (Red for User, Black for Vendor/Restaurant) */}
-      <div
-        style={{ left: `${p1.x}%`, top: `${p1.y}%` }}
-        className="absolute -translate-x-1/2 -translate-y-full z-20 flex flex-col items-center pointer-events-none"
-      >
-        <span
-          className={`px-2 py-0.5 rounded text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5 ${
-            pinAppearance.primaryRole === 'vendor' ? 'bg-[#111827]' : 'bg-[#DC2626]'
-          }`}
-        >
-          {pinAppearance.primaryLabel}
-        </span>
-        <MapPin
-          className={`w-5 h-5 ${
-            pinAppearance.primaryRole === 'vendor'
-              ? 'text-[#111827] fill-[#111827]/25'
-              : 'text-[#DC2626] fill-[#DC2626]/25'
-          }`}
-        />
-      </div>
-
-      {/* Restaurant / Origin Pin (Black) */}
-      {p2 && secondaryPoint && (
-        <div
-          style={{ left: `${p2.x}%`, top: `${p2.y}%` }}
-          className="absolute -translate-x-1/2 -translate-y-full z-20 flex flex-col items-center pointer-events-none"
-        >
-          <span className="px-2 py-0.5 rounded bg-[#111827] text-white text-[10px] font-semibold shadow-sm whitespace-nowrap mb-0.5">
-            {pinAppearance.secondaryLabel || secondaryPoint.label}
-          </span>
-          <MapPin className="w-5 h-5 text-[#111827] fill-[#111827]/25" />
+      {interactive && (
+        <div className="absolute top-2 left-12 right-36 z-[400] hidden sm:flex items-center gap-1 overflow-x-auto no-scrollbar pointer-events-auto">
+          {pinButtons.map((area) => {
+            const isClose =
+              Math.abs(area.lat - center.lat) < 0.008 && Math.abs(area.lng - center.lng) < 0.008;
+            return (
+              <button
+                key={area.name}
+                type="button"
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  emitOsmLocation(area.lat, area.lng, area.name);
+                }}
+                className={`px-2 py-0.5 rounded-md text-[10px] font-semibold whitespace-nowrap shadow-xs transition-colors ${
+                  isClose
+                    ? 'bg-[#E21B70] text-white'
+                    : 'bg-white/95 text-[#2E3138] border border-neutral-200 hover:border-[#E21B70]'
+                }`}
+              >
+                {area.name}
+              </button>
+            );
+          })}
         </div>
       )}
 
-      {/* Single Rider Live Marker */}
-      {pRider && riderPoint && (
-        <div
-          style={{ left: `${pRider.x}%`, top: `${pRider.y}%` }}
-          className="absolute -translate-x-1/2 -translate-y-1/2 z-30 flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-600 text-white text-[10px] font-bold shadow-md border border-white"
-        >
-          <span className="w-2 h-2 rounded-full bg-emerald-200 animate-pulse" />
-          <Bike className="w-3 h-3 shrink-0" />
-          <span className="whitespace-nowrap">{riderPoint.label}</span>
-        </div>
-      )}
-
-      {/* Multi-Rider Fleet Pins (Admin Fleet Control) */}
-      {extraRiders?.map((er) => {
-        const pos = toXY(er.lat, er.lng);
-        return (
-          <button
-            key={er.id}
-            type="button"
-            onClick={(ev) => {
-              ev.stopPropagation();
-              onSelectRiderPin?.(er.id);
-            }}
-            style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
-            className={`absolute -translate-x-1/2 -translate-y-1/2 flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold shadow-md border transition-transform ${
-              er.selected
-                ? 'bg-[#E21B70] text-white border-white z-40 scale-110'
-                : er.isAvailable
-                ? 'bg-emerald-600 text-white border-white z-30 hover:scale-105'
-                : 'bg-neutral-600 text-white border-white z-20 hover:scale-105'
-            }`}
-          >
-            <Bike className="w-3 h-3 shrink-0" />
-            <span className="whitespace-nowrap">{er.label}</span>
-          </button>
-        );
-      })}
-
-      <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between gap-2 bg-white/95 border border-neutral-200 rounded-lg px-3 py-1.5 text-xs text-neutral-600">
-        <span className="font-mono-nums truncate">
-          {center.lat.toFixed(4)}, {center.lng.toFixed(4)}
-          {distance !== null ? ` · ${distance.toFixed(1)} km` : ''}
-          {riderPoint ? ` · Rider ${riderPoint.lat.toFixed(4)}, ${riderPoint.lng.toFixed(4)}` : ''}
-        </span>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={(ev) => {
-              ev.stopPropagation();
-              setShowOsm(!showOsm);
-            }}
-            className="inline-flex items-center gap-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 font-semibold px-2 py-0.5 rounded text-[11px] border border-neutral-300"
-            title="Toggle OpenStreetMap vs Vector Grid"
-          >
-            <span>{showOsm ? '⚡ Vector Map' : '🌍 OpenStreetMap'}</span>
-          </button>
-          {interactive && (
-            <button
-              type="button"
-              onClick={(ev) => {
-                ev.stopPropagation();
-                if (navigator.geolocation) {
-                  navigator.geolocation.getCurrentPosition(
-                    (pos) => emitFallbackPoint(pos.coords.latitude, pos.coords.longitude),
-                    () => emitFallbackPoint(23.7949, 90.4144, 'Gulshan 2')
-                  );
-                } else {
-                  emitFallbackPoint(23.7949, 90.4144, 'Gulshan 2');
-                }
-              }}
-              className="inline-flex items-center gap-1 text-[#E21B70] font-semibold hover:underline whitespace-nowrap shrink-0"
-            >
-              <LocateFixed className="w-3.5 h-3.5" />
-              <span>GPS</span>
-            </button>
+      <div className="absolute bottom-2 left-2 right-2 z-[400] flex items-center justify-between gap-2 bg-white/95 backdrop-blur-xs border border-neutral-200 rounded-lg px-3 py-1.5 text-xs text-neutral-600 shadow-xs">
+        <span className="truncate">
+          {resolving ? (
+            <span className="font-medium text-[#E21B70]">
+              {lang === 'bn' ? 'ঠিকানা নির্ধারণ হচ্ছে...' : 'Resolving street address...'}
+            </span>
+          ) : (
+            <span className="font-mono-nums">
+              {interactive
+                ? lang === 'bn'
+                  ? 'ম্যাপে ক্লিক বা পিন টানুন · '
+                  : 'Tap map or drag pin · '
+                : ''}
+              {center.lat.toFixed(4)}, {center.lng.toFixed(4)}
+              {distance !== null ? ` · ${distance.toFixed(1)} km` : ''}
+              {riderPoint ? ` · Rider ${riderPoint.lat.toFixed(4)}, ${riderPoint.lng.toFixed(4)}` : ''}
+            </span>
           )}
-        </div>
+        </span>
+        {interactive && (
+          <button
+            type="button"
+            onClick={(ev) => {
+              ev.stopPropagation();
+              if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                  (pos) => emitOsmLocation(pos.coords.latitude, pos.coords.longitude),
+                  () => emitOsmLocation(23.7949, 90.4144, 'Gulshan 2')
+                );
+              } else {
+                emitOsmLocation(23.7949, 90.4144, 'Gulshan 2');
+              }
+            }}
+            className="inline-flex items-center gap-1 text-[#E21B70] font-bold hover:underline whitespace-nowrap shrink-0"
+          >
+            <LocateFixed className="w-3.5 h-3.5" />
+            <span>GPS</span>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -888,38 +1069,43 @@ export function DhakaMapPicker(props: DhakaMapPickerProps) {
   const effectiveApiKey =
     props.mapsApiKey || (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || '';
 
-  const [useFallback, setUseFallback] = useState(!effectiveApiKey);
+  const [useFallback, setUseFallback] = useState<boolean>(() => {
+    if (!effectiveApiKey) return true;
+    if (isGoogleMapsBlockedInSession()) return true;
+    return getPreferredMapMode() === 'osm';
+  });
   const [activeMethod, setActiveMethod] = useState<'gps' | 'google_maps' | 'wifi' | 'cell_tower' | 'pin'>('google_maps');
   const [positioningNote, setPositioningNote] = useState<string>('');
   const [showGuide, setShowGuide] = useState(false);
   const [detecting, setDetecting] = useState(false);
 
   useEffect(() => {
-    if (!effectiveApiKey) {
+    if (!effectiveApiKey || isGoogleMapsBlockedInSession()) {
       setUseFallback(true);
       return;
     }
     const handleAuthFailure = () => {
+      setGoogleMapsBlockedInSession(true);
       setUseFallback(true);
       setPositioningNote(
         props.lang === 'bn'
-          ? '⚠️ গুগল ম্যাপস লোড হয়নি বা এপিআই রেস্ট্রিকশন সমস্যা (ফলব্যাক ভেক্টর ম্যাপ সক্রিয়)'
-          : '⚠️ Google Maps auth/loading failure detected. Switched to high-speed vector fallback map.'
+          ? '⚠️ গুগল ম্যাপস লোড হয়নি বা এপিআই রেস্ট্রিকশন সমস্যা — ফ্রি OpenStreetMap চালু হয়েছে'
+          : '⚠️ Google Maps auth/loading error detected — switched to free interactive OpenStreetMap.'
       );
     };
     window.addEventListener('gm_authFailure', handleAuthFailure);
 
     const handleQuotaExceeded = () => {
+      setGoogleMapsBlockedInSession(true);
       setUseFallback(true);
       setPositioningNote(
         props.lang === 'bn'
-          ? '⚠️ গুগল ম্যাপস কোটা পূর্ণ হয়েছে (ফলব্যাক ভেক্টর ম্যাপ সক্রিয়)'
-          : '⚠️ Google Maps quota reached. Switched to high-speed vector fallback map.'
+          ? '⚠️ গুগল ম্যাপস দৈনিক কোটা পূর্ণ হয়েছে — ফ্রি OpenStreetMap চালু হয়েছে'
+          : '⚠️ Google Maps quota reached — switched to unlimited free OpenStreetMap.'
       );
     };
     window.addEventListener('gmp-quota-exceeded', handleQuotaExceeded);
 
-    // Safety timeout: if Google Maps API doesn't load within 5 seconds, fall back to vector map gracefully
     const timer = setTimeout(() => {
       if (typeof window !== 'undefined' && !(window as any).google?.maps && !useFallback) {
         setUseFallback(true);
@@ -1031,6 +1217,17 @@ export function DhakaMapPicker(props: DhakaMapPickerProps) {
     );
   };
 
+  const handleMapsCrashOrAuthFailure = () => {
+    setGoogleMapsBlockedInSession(true);
+    setPreferredMapMode('osm');
+    setUseFallback(true);
+    setPositioningNote(
+      props.lang === 'bn'
+        ? '⚠️ গুগল ম্যাপস লোড হয়নি বা এপিআই কী চালু নেই — ফ্রি OpenStreetMap চালু হয়েছে'
+        : '⚠️ Google Maps failed to authenticate/activate — switched safely to OpenStreetMap.'
+    );
+  };
+
   const mapContent =
     !effectiveApiKey || useFallback ? (
       <FallbackDhakaMap
@@ -1042,6 +1239,7 @@ export function DhakaMapPicker(props: DhakaMapPickerProps) {
         restaurantName={props.restaurantName}
         secondaryPoint={props.secondaryPoint}
         riderPoint={props.riderPoint}
+        riderTarget={props.riderTarget}
         extraRiders={props.extraRiders}
         onSelectRiderPin={props.onSelectRiderPin}
         interactive={props.interactive}
@@ -1049,24 +1247,32 @@ export function DhakaMapPicker(props: DhakaMapPickerProps) {
         onSelectLocation={handleSelectLocation}
       />
     ) : (
-      <APIProvider apiKey={effectiveApiKey} language={props.lang} region="BD" libraries={['places']}>
-        <GoogleMapInner
-          lang={props.lang}
-          center={props.center}
-          markerLabel={props.markerLabel}
-          pinType={props.pinType}
-          userName={props.userName}
-          restaurantName={props.restaurantName}
-          secondaryPoint={props.secondaryPoint}
-          riderPoint={props.riderPoint}
-          riderTarget={props.riderTarget}
-          extraRiders={props.extraRiders}
-          onSelectRiderPin={props.onSelectRiderPin}
-          interactive={props.interactive}
-          heightClass={props.heightClass}
-          onSelectLocation={handleSelectLocation}
-        />
-      </APIProvider>
+      <GoogleMapErrorBoundary onCrash={handleMapsCrashOrAuthFailure}>
+        <APIProvider
+          apiKey={effectiveApiKey}
+          language={props.lang}
+          region="BD"
+          libraries={['places', 'marker']}
+          onError={handleMapsCrashOrAuthFailure}
+        >
+          <GoogleMapInner
+            lang={props.lang}
+            center={props.center}
+            markerLabel={props.markerLabel}
+            pinType={props.pinType}
+            userName={props.userName}
+            restaurantName={props.restaurantName}
+            secondaryPoint={props.secondaryPoint}
+            riderPoint={props.riderPoint}
+            riderTarget={props.riderTarget}
+            extraRiders={props.extraRiders}
+            onSelectRiderPin={props.onSelectRiderPin}
+            interactive={props.interactive}
+            heightClass={props.heightClass}
+            onSelectLocation={handleSelectLocation}
+          />
+        </APIProvider>
+      </GoogleMapErrorBoundary>
     );
 
   if (!props.interactive) {
@@ -1081,14 +1287,33 @@ export function DhakaMapPicker(props: DhakaMapPickerProps) {
       <div className="rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2 space-y-2 text-xs">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => setUseFallback(!useFallback)}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border font-semibold text-[11px] bg-white border-neutral-200 hover:border-[#E21B70] text-[#E21B70]"
-              title="Toggle Google Maps vs Instant Vector Map"
-            >
-              <span>{useFallback ? (props.lang === 'bn' ? '🗺️ গুগল ম্যাপস' : '🗺️ Google Maps') : (props.lang === 'bn' ? '⚡ ১০০% ফ্রি ম্যাপ' : '⚡ 100% Free Map')}</span>
-            </button>
+            {effectiveApiKey && (
+              <button
+                type="button"
+                onClick={() => {
+                  const nextFallback = !useFallback;
+                  if (!nextFallback) {
+                    setGoogleMapsBlockedInSession(false);
+                    setPreferredMapMode('google');
+                  } else {
+                    setPreferredMapMode('osm');
+                  }
+                  setUseFallback(nextFallback);
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border font-semibold text-[11px] bg-white border-neutral-200 hover:border-[#E21B70] text-[#E21B70]"
+                title="Switch between Google Maps and Free OpenStreetMap"
+              >
+                <span>
+                  {useFallback
+                    ? props.lang === 'bn'
+                      ? '🗺️ গুগল ম্যাপস চেষ্টা করুন'
+                      : '🗺️ Try Google Maps'
+                    : props.lang === 'bn'
+                    ? '🌍 ফ্রি OpenStreetMap'
+                    : '🌍 Free OpenStreetMap'}
+                </span>
+              </button>
+            )}
 
             <button
               type="button"

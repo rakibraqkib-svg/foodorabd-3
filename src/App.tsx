@@ -27,7 +27,6 @@ import {
   Store,
   User,
   UserPlus,
-  UtensilsCrossed,
   Volume2,
   VolumeX,
   X,
@@ -1282,12 +1281,11 @@ function MarketplaceApp() {
               aria-label={`${sc.brandPrefix}${sc.brandSuffix} Home`}
               className="flex items-center gap-1.5 sm:gap-2 shrink-0 group whitespace-nowrap"
             >
-              <span
-                style={{ backgroundColor: sc.accentColor }}
-                className="w-7 h-7 sm:w-9 sm:h-9 rounded-lg sm:rounded-xl text-white flex items-center justify-center shadow-xs shrink-0 group-hover:scale-105 transition-transform"
-              >
-                <UtensilsCrossed className="w-3.5 h-3.5 sm:w-5 sm:h-5" />
-              </span>
+              <img
+                src="/foodora-icon.svg"
+                alt="Foodora BD Icon"
+                className="w-7 h-7 sm:w-9 sm:h-9 rounded-lg sm:rounded-xl shadow-xs shrink-0 group-hover:scale-105 transition-transform object-cover"
+              />
               <span
                 style={{ color: sc.accentColor }}
                 className="text-sm min-[390px]:text-base sm:text-[21px] font-extrabold tracking-tight leading-none whitespace-nowrap"
@@ -2807,12 +2805,11 @@ function MarketplaceApp() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8 items-start">
             <div className="space-y-2">
               <div className="inline-flex items-center gap-2">
-                <span
-                  style={{ backgroundColor: sc.accentColor }}
-                  className="w-7 h-7 rounded-lg text-white flex items-center justify-center shrink-0"
-                >
-                  <UtensilsCrossed className="w-3.5 h-3.5" />
-                </span>
+                <img
+                  src="/foodora-icon.svg"
+                  alt="Foodora BD Icon"
+                  className="w-7 h-7 rounded-lg shrink-0 object-cover"
+                />
                 <p style={{ color: sc.accentColor }} className="text-base sm:text-lg font-extrabold tracking-tight">
                   {sc.brandPrefix}
                   <span className="text-[#2E3138]">{sc.brandSuffix}</span>

@@ -1628,6 +1628,7 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
         foodItemId: number;
         name: string;
         nameBn: string;
+        imageUrl?: string;
         quantity: number;
         unitPrice: number;
         variation?: string;
@@ -1664,10 +1665,20 @@ app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
         const lineTotal = unitPrice * reqItem.quantity;
         subtotal += lineTotal;
 
+        const rawImg = (found.imageUrl || '').trim();
+        const isMissingLocalUpload =
+          rawImg.startsWith('/uploads/') &&
+          !fs.existsSync(path.join(UPLOADS_DIR, rawImg.replace(/^\/uploads\//, '')));
+        const resolvedSnapshotImg =
+          !rawImg || isMissingLocalUpload
+            ? rest.coverUrl || '/src/assets/images/food_kacchi_biriyani_1794831373742.jpg'
+            : rawImg;
+
         snapshotItems.push({
           foodItemId: found.id,
           name: found.name,
           nameBn: found.nameBn,
+          imageUrl: resolvedSnapshotImg,
           quantity: reqItem.quantity,
           unitPrice,
           variation: matchedVar?.name,
@@ -5292,7 +5303,11 @@ app.post(
       return res.status(400).json({ error: 'Please enter a valid recipient email address.' });
     }
     try {
-      const result = await sendTestEmail(parsed.data.to, parsed.data.templateStatus);
+      const result = await sendTestEmail(
+        parsed.data.to,
+        parsed.data.templateStatus,
+        getRequestOrigin(req)
+      );
       if (!result.ok) {
         return res.status(400).json({
           ok: false,

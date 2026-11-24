@@ -1,5 +1,18 @@
 import React, { useEffect, useState } from 'react';
-import { AlertCircle, Bike, CreditCard, Mail, ShieldCheck, ShoppingBag, Store, Tag, Trash2, Truck, X } from 'lucide-react';
+import {
+  AlertCircle,
+  Bike,
+  CreditCard,
+  Mail,
+  ShieldCheck,
+  ShoppingBag,
+  Store,
+  Tag,
+  Trash2,
+  Truck,
+  UtensilsCrossed,
+  X,
+} from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import {
   buildRestaurantUnavailableMessage,
@@ -41,6 +54,57 @@ interface CartCheckoutDrawerProps {
     trackingToken?: string,
     meta?: { orderNumber?: string; restaurantName?: string; estimatedMinutes?: number }
   ) => void;
+}
+
+const DEFAULT_FOOD_THUMB = '/src/assets/images/food_kacchi_biriyani_1794831373742.jpg';
+
+function CartItemThumbnail({
+  src,
+  fallbackSrc,
+  alt,
+  sizeClass = 'w-14 h-14',
+}: {
+  src?: string;
+  fallbackSrc?: string;
+  alt: string;
+  sizeClass?: string;
+}) {
+  const primary = (src || '').trim();
+  const secondary = (fallbackSrc || '').trim() || DEFAULT_FOOD_THUMB;
+  const [activeSrc, setActiveSrc] = useState<string>(primary || secondary);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setActiveSrc(primary || secondary);
+    setFailed(false);
+  }, [primary, secondary]);
+
+  if (!activeSrc || failed) {
+    return (
+      <div
+        className={`${sizeClass} rounded-xl bg-[#FFF0F6] border border-pink-200 text-[#E21B70] flex items-center justify-center shrink-0`}
+      >
+        <UtensilsCrossed className="w-5 h-5" />
+      </div>
+    );
+  }
+  return (
+    <img
+      src={activeSrc}
+      alt={alt}
+      referrerPolicy="no-referrer"
+      onError={() => {
+        if (activeSrc !== secondary && secondary) {
+          setActiveSrc(secondary);
+        } else if (activeSrc !== DEFAULT_FOOD_THUMB) {
+          setActiveSrc(DEFAULT_FOOD_THUMB);
+        } else {
+          setFailed(true);
+        }
+      }}
+      className={`${sizeClass} rounded-xl object-cover border border-neutral-200 bg-neutral-50 shrink-0`}
+    />
+  );
 }
 
 export function CartCheckoutDrawer({
@@ -358,6 +422,12 @@ export function CartCheckoutDrawer({
                       key={`${item.foodItemId}-${idx}`}
                       className="flex items-start justify-between gap-3 p-3 rounded-xl border border-neutral-200"
                     >
+                      <CartItemThumbnail
+                        src={item.imageUrl}
+                        fallbackSrc={restaurant?.coverUrl}
+                        alt={lang === 'bn' ? item.nameBn : item.name}
+                        sizeClass="w-14 h-14"
+                      />
                       <div className="min-w-0 flex-1">
                         <p className="font-semibold text-sm text-[#2E3138] truncate">
                           {lang === 'bn' ? item.nameBn : item.name}
@@ -522,6 +592,65 @@ export function CartCheckoutDrawer({
               >
                 ← {lang === 'bn' ? 'কার্টে ফিরুন' : 'Back to Cart'}
               </button>
+
+              {/* Ordered Products Summary with Thumbnails */}
+              <div
+                data-testid="checkout-items-summary"
+                className="rounded-xl border border-neutral-200 bg-neutral-50/80 p-3 space-y-2.5"
+              >
+                <div className="flex items-center justify-between text-xs font-bold text-[#2E3138]">
+                  <span>
+                    {lang === 'bn'
+                      ? `অর্ডার আইটেম (${cartItems.reduce((s, i) => s + i.quantity, 0)})`
+                      : `Your Order Items (${cartItems.reduce((s, i) => s + i.quantity, 0)})`}
+                  </span>
+                  {restaurant && (
+                    <span className="text-[11px] font-semibold text-neutral-500 truncate max-w-[180px]">
+                      {lang === 'bn' ? restaurant.nameBn : restaurant.name}
+                    </span>
+                  )}
+                </div>
+                <div className="space-y-2 max-h-44 overflow-y-auto pr-0.5">
+                  {cartItems.map((item, idx) => {
+                    const unit = calculateCartItemUnitPrice(item);
+                    const itemTitle = lang === 'bn' ? item.nameBn : item.name;
+                    return (
+                      <div
+                        key={`checkout-item-${item.foodItemId}-${idx}`}
+                        className="flex items-center gap-2.5 bg-white p-2 rounded-lg border border-neutral-200/80"
+                      >
+                        <CartItemThumbnail
+                          src={item.imageUrl}
+                          fallbackSrc={restaurant?.coverUrl}
+                          alt={itemTitle}
+                          sizeClass="w-11 h-11"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold text-[#2E3138] truncate">
+                            <span className="text-[#E21B70] font-bold mr-1">{item.quantity}x</span>
+                            {itemTitle}
+                          </p>
+                          {(item.variationName || item.addons.length > 0) && (
+                            <p className="text-[11px] text-neutral-500 truncate">
+                              {[
+                                item.variationName,
+                                item.addons.length > 0
+                                  ? `+ ${item.addons.map((a) => a.name).join(', ')}`
+                                  : '',
+                              ]
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </p>
+                          )}
+                        </div>
+                        <span className="text-xs font-bold text-[#2E3138] tabular-nums shrink-0">
+                          {formatBdt(unit * item.quantity, lang)}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
 
               {restaurant && (restaurant.status !== 'approved' || !restaurant.isOpen) && (
                 <div

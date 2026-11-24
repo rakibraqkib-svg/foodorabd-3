@@ -1364,6 +1364,132 @@ export function formatResolvedMapAddress(input: {
   return '';
 }
 
+export const DEFAULT_ORDER_EMAIL_IMAGE_PATH =
+  '/src/assets/images/food_kacchi_biriyani_1794831373742.jpg';
+
+export function resolveOrderEmailImageUrl(
+  imageUrl?: string | null,
+  origin: string = 'https://foodora.bd'
+): string {
+  const raw = String(imageUrl || '').trim();
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (raw.startsWith('data:image/')) return raw;
+  const cleanOrigin = String(origin || 'https://foodora.bd').replace(/\/+$/, '');
+  return `${cleanOrigin}${raw.startsWith('/') ? '' : '/'}${raw}`;
+}
+
+export interface ExtractedEmailCidImage {
+  cid: string;
+  kind: 'local' | 'data';
+  localPath?: string;
+  dataMimeType?: string;
+  dataBase64?: string;
+  originalSrcs: string[];
+}
+
+export function classifyEmailImageSrcForCid(
+  rawSrc: string
+):
+  | { kind: 'local'; key: string; localPath: string }
+  | { kind: 'data'; key: string; dataMimeType: string; dataBase64: string }
+  | null {
+  const clean = String(rawSrc || '').replace(/&amp;/g, '&').trim();
+  if (!clean || clean.startsWith('cid:')) return null;
+
+  const dataMatch = clean.match(
+    /^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i
+  );
+  if (dataMatch) {
+    const mime =
+      dataMatch[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : dataMatch[1].toLowerCase();
+    const b64 = dataMatch[2].replace(/\s+/g, '');
+    if (!b64) return null;
+    return {
+      kind: 'data',
+      key: `data:${mime}:${b64.slice(0, 48)}:${b64.length}`,
+      dataMimeType: mime,
+      dataBase64: b64,
+    };
+  }
+
+  let pathname = '';
+  if (clean.startsWith('/')) {
+    pathname = clean.split('?')[0].split('#')[0];
+  } else if (/^https?:\/\//i.test(clean)) {
+    try {
+      pathname = new URL(clean).pathname;
+    } catch {
+      return null;
+    }
+  } else {
+    return null;
+  }
+
+  try {
+    pathname = decodeURIComponent(pathname);
+  } catch {
+    // keep original pathname
+  }
+
+  if (!/^\/(?:src\/assets\/|assets\/|uploads\/|foodora-icon\.)/i.test(pathname)) {
+    return null;
+  }
+
+  return {
+    kind: 'local',
+    key: `local:${pathname}`,
+    localPath: pathname,
+  };
+}
+
+export function extractEmailInlineCidPlan(html: string): {
+  html: string;
+  images: ExtractedEmailCidImage[];
+} {
+  if (!html) return { html, images: [] };
+  const byKey = new Map<string, ExtractedEmailCidImage>();
+  let seq = 0;
+
+  const rewrittenHtml = html.replace(
+    /(<img\b[^>]*?\bsrc\s*=\s*)(["'])([^"']+)\2/gi,
+    (fullMatch, prefix: string, quote: string, attrVal: string) => {
+      const classified = classifyEmailImageSrcForCid(attrVal);
+      if (!classified) return fullMatch;
+
+      let entry = byKey.get(classified.key);
+      if (!entry) {
+        seq += 1;
+        const cid = `foodora-img-${seq}`;
+        entry =
+          classified.kind === 'local'
+            ? {
+                cid,
+                kind: 'local',
+                localPath: classified.localPath,
+                originalSrcs: [attrVal],
+              }
+            : {
+                cid,
+                kind: 'data',
+                dataMimeType: classified.dataMimeType,
+                dataBase64: classified.dataBase64,
+                originalSrcs: [attrVal],
+              };
+        byKey.set(classified.key, entry);
+      } else if (!entry.originalSrcs.includes(attrVal)) {
+        entry.originalSrcs.push(attrVal);
+      }
+      return `${prefix}${quote}cid:${entry.cid}${quote}`;
+    }
+  );
+
+  return {
+    html: rewrittenHtml,
+    images: Array.from(byKey.values()),
+  };
+}
+
 export function buildOrderTrackingEmailPayload(input: {
   origin: string;
   orderId: number;
@@ -1390,8 +1516,10 @@ export function buildOrderTrackingEmailPayload(input: {
   etaMinutes?: number | null;
   createdAt?: string | Date | null;
   items?: Array<{
+    foodItemId?: number;
     name: string;
     nameBn?: string;
+    imageUrl?: string | null;
     quantity: number;
     unitPrice?: number;
     variation?: string;
@@ -1534,7 +1662,7 @@ export function buildOrderTrackingEmailPayload(input: {
            <table style="width:100%;border-collapse:collapse;font-size:12px;color:#374151;">
              <thead>
                <tr style="border-bottom:1px solid #F3F4F6;text-align:left;color:#6B7280;">
-                 <th style="padding:4px 0;">Item</th>
+                 <th style="padding:4px 0;">Product</th>
                  <th style="padding:4px 0;text-align:center;">Qty</th>
                  <th style="padding:4px 0;text-align:right;">Total</th>
                </tr>
@@ -1546,12 +1674,29 @@ export function buildOrderTrackingEmailPayload(input: {
                    const varPart = it.variation ? ` (${escapeXml(it.variation)})` : '';
                    const unitPart =
                      typeof it.unitPrice === 'number' && it.unitPrice > 0
-                       ? ` <span style="color:#6B7280;font-size:11px;">@ ৳${it.unitPrice}</span>`
+                       ? `<div style="color:#6B7280;font-size:11px;margin-top:2px;">@ ৳${it.unitPrice}</div>`
                        : '';
+                   const resolvedImg = resolveOrderEmailImageUrl(
+                     it.imageUrl || DEFAULT_ORDER_EMAIL_IMAGE_PATH,
+                     input.origin
+                   );
+                   const thumbHtml = resolvedImg
+                     ? `<img src="${escapeXml(resolvedImg)}" alt="${escapeXml(it.name)}" width="44" height="44" style="width:44px;height:44px;object-fit:cover;border-radius:8px;display:block;border:1px solid #FBCFE8;background:#ffffff;" />`
+                     : `<div style="width:44px;height:44px;border-radius:8px;border:1px solid #FBCFE8;background:#ffffff;text-align:center;line-height:44px;font-size:18px;">🍽️</div>`;
                    return `<tr style="border-bottom:1px solid #F9FAFB;">
-                     <td style="padding:5px 0;">${escapeXml(it.name)}${varPart}${unitPart}</td>
-                     <td style="padding:5px 0;text-align:center;">${it.quantity}</td>
-                     <td style="padding:5px 0;text-align:right;font-weight:bold;">৳${it.lineTotal}</td>
+                     <td style="padding:7px 6px 7px 0;vertical-align:middle;">
+                       <table role="presentation" style="border-collapse:collapse;">
+                         <tr>
+                           <td style="width:52px;padding-right:10px;vertical-align:middle;">${thumbHtml}</td>
+                           <td style="vertical-align:middle;">
+                             <div style="font-weight:bold;color:#2E3138;line-height:1.3;">${escapeXml(it.name)}${varPart}</div>
+                             ${unitPart}
+                           </td>
+                         </tr>
+                       </table>
+                     </td>
+                     <td style="padding:7px 0;text-align:center;vertical-align:middle;">${it.quantity}x</td>
+                     <td style="padding:7px 0;text-align:right;font-weight:bold;vertical-align:middle;">৳${it.lineTotal}</td>
                    </tr>`;
                  })
                  .join('')}
@@ -1725,8 +1870,20 @@ export function getOrderEmailTemplatePreview(
         : null,
     etaMinutes: status === 'on_the_way' ? 12 : 25,
     items: [
-      { name: 'Mutton Kacchi (Half)', quantity: 1, unitPrice: 450, lineTotal: 450 },
-      { name: 'Jali Kabab & Borhani', quantity: 1, unitPrice: 200, lineTotal: 200 },
+      {
+        name: 'Mutton Kacchi (Half)',
+        imageUrl: '/src/assets/images/food_kacchi_biriyani_1794831373742.jpg',
+        quantity: 1,
+        unitPrice: 450,
+        lineTotal: 450,
+      },
+      {
+        name: 'Jali Kabab & Borhani',
+        imageUrl: '/src/assets/images/food_tandoori_kabab_1794831377175.jpg',
+        quantity: 1,
+        unitPrice: 200,
+        lineTotal: 200,
+      },
     ],
   });
 }
@@ -2174,7 +2331,9 @@ export function buildMerchantOrderAlertEmailPayload(input: {
   statusNote?: string;
   riderName?: string | null;
   items?: Array<{
+    foodItemId?: number;
     name: string;
+    imageUrl?: string | null;
     quantity: number;
     variation?: string;
     lineTotal: number;
@@ -2201,17 +2360,27 @@ export function buildMerchantOrderAlertEmailPayload(input: {
   const itemsList = Array.isArray(input.items) ? input.items : [];
   const itemsHtml =
     itemsList.length > 0
-      ? `<ul style="margin:8px 0 0;padding-left:18px;font-size:12px;color:#374151;">
+      ? `<table style="width:100%;border-collapse:collapse;margin:10px 0 0;font-size:12px;color:#374151;">
           ${itemsList
             .slice(0, 20)
-            .map(
-              (it) =>
-                `<li style="margin:3px 0;"><strong>${it.quantity}x</strong> ${escapeXml(it.name)}${
+            .map((it) => {
+              const resolvedImg = resolveOrderEmailImageUrl(
+                it.imageUrl || DEFAULT_ORDER_EMAIL_IMAGE_PATH,
+                input.origin
+              );
+              const thumbHtml = resolvedImg
+                ? `<img src="${escapeXml(resolvedImg)}" alt="${escapeXml(it.name)}" width="40" height="40" style="width:40px;height:40px;object-fit:cover;border-radius:8px;display:block;border:1px solid #FBCFE8;background:#ffffff;" />`
+                : '';
+              return `<tr style="border-top:1px solid #FBCFE8;">
+                <td style="width:48px;padding:6px 8px 6px 0;vertical-align:middle;">${thumbHtml}</td>
+                <td style="padding:6px 6px 6px 0;vertical-align:middle;"><strong>${it.quantity}x</strong> ${escapeXml(it.name)}${
                   it.variation ? ` (${escapeXml(it.variation)})` : ''
-                } — <strong>৳${it.lineTotal}</strong></li>`
-            )
+                }</td>
+                <td style="padding:6px 0;text-align:right;font-weight:bold;vertical-align:middle;">৳${it.lineTotal}</td>
+              </tr>`;
+            })
             .join('')}
-        </ul>`
+        </table>`
       : '';
 
   const html = `<!doctype html>

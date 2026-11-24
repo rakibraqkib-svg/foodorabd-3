@@ -62,6 +62,10 @@ import {
   ORDER_EMAIL_TEMPLATE_PRESETS,
   getOrderEmailTemplatePreview,
   expandAddressSearchQueries,
+  resolveOrderEmailImageUrl,
+  DEFAULT_ORDER_EMAIL_IMAGE_PATH,
+  classifyEmailImageSrcForCid,
+  extractEmailInlineCidPlan,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 import { BANGLADESH_AREAS, BANGLADESH_SEARCH_PLACES, DHAKA_DELIVERY_ZONES } from './i18n';
@@ -1170,6 +1174,84 @@ test('ORDER_EMAIL_TEMPLATE_PRESETS and getOrderEmailTemplatePreview generate bil
   });
   assert.ok(paidEmail.subject.includes('Payment Confirmed'));
   assert.ok(paidEmail.html.includes('পেমেন্ট সম্পন্ন'));
+});
+
+test('resolveOrderEmailImageUrl and invoice email HTML include ordered product thumbnail images', () => {
+  assert.equal(
+    resolveOrderEmailImageUrl('/src/assets/images/kacchi.jpg', 'https://foodora.bd/'),
+    'https://foodora.bd/src/assets/images/kacchi.jpg'
+  );
+  assert.equal(
+    resolveOrderEmailImageUrl('https://cdn.example.com/burger.png', 'https://foodora.bd'),
+    'https://cdn.example.com/burger.png'
+  );
+  assert.equal(resolveOrderEmailImageUrl('', 'https://foodora.bd'), '');
+
+  const preview = getOrderEmailTemplatePreview(
+    'confirmed',
+    'https://ais-pre-example.run.app',
+    'raqkibrony@gmail.com'
+  );
+  assert.ok(
+    preview.html.includes(
+      'https://ais-pre-example.run.app/src/assets/images/food_kacchi_biriyani_1794831373742.jpg'
+    )
+  );
+  assert.ok(
+    preview.html.includes(
+      'https://ais-pre-example.run.app/src/assets/images/food_tandoori_kabab_1794831377175.jpg'
+    )
+  );
+  assert.ok(preview.html.includes('<img src='));
+});
+
+test('extractEmailInlineCidPlan converts local/preview image URLs and data URIs into deduplicated cid attachments while preserving external CDNs', () => {
+  const sampleHtml = `
+    <div>
+      <img src="http://ais-dev-demo.run.app/src/assets/images/food_kacchi_biriyani_1794831373742.jpg" />
+      <img src="https://ais-pre-demo.run.app/src/assets/images/food_kacchi_biriyani_1794831373742.jpg" />
+      <img src="/uploads/dish-special.png" />
+      <img src="https://cdn.example.com/public-burger.jpg" />
+      <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" />
+    </div>
+  `;
+  const plan = extractEmailInlineCidPlan(sampleHtml);
+  assert.equal(plan.images.length, 3);
+  assert.equal(plan.images[0].cid, 'foodora-img-1');
+  assert.equal(plan.images[0].localPath, '/src/assets/images/food_kacchi_biriyani_1794831373742.jpg');
+  assert.equal(plan.images[1].cid, 'foodora-img-2');
+  assert.equal(plan.images[1].localPath, '/uploads/dish-special.png');
+  assert.equal(plan.images[2].cid, 'foodora-img-3');
+  assert.equal(plan.images[2].kind, 'data');
+
+  // Same local file via two origins shares cid foodora-img-1
+  assert.equal((plan.html.match(/src="cid:foodora-img-1"/g) || []).length, 2);
+  assert.ok(plan.html.includes('src="cid:foodora-img-2"'));
+  assert.ok(plan.html.includes('src="cid:foodora-img-3"'));
+  // External CDN URL stays untouched
+  assert.ok(plan.html.includes('src="https://cdn.example.com/public-burger.jpg"'));
+
+  // Merchant alert email now embeds product thumbnails too
+  const merchantAlert = buildMerchantOrderAlertEmailPayload({
+    origin: 'https://ais-pre-demo.run.app',
+    orderId: 91,
+    orderNumber: 'FD-BD-9911',
+    eventKind: 'new_order',
+    restaurantName: "Sultan's Dine",
+    customerName: 'Rakib',
+    deliveryArea: 'Banani',
+    totalAmount: 450,
+    paymentMethod: 'cod',
+    status: 'confirmed',
+    items: [{ name: 'Zdf', quantity: 1, lineTotal: 350 }],
+  });
+  assert.ok(merchantAlert.html.includes(DEFAULT_ORDER_EMAIL_IMAGE_PATH));
+  assert.ok(merchantAlert.html.includes('<img src='));
+
+  const alertCidPlan = extractEmailInlineCidPlan(merchantAlert.html);
+  assert.equal(alertCidPlan.images.length, 1);
+  assert.ok(alertCidPlan.html.includes('src="cid:foodora-img-1"'));
+  assert.equal(classifyEmailImageSrcForCid('https://cdn.example.com/photo.jpg'), null);
 });
 
 
