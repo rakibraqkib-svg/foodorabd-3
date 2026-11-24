@@ -2274,7 +2274,7 @@ export interface OrderSnapshotItem {
 
 export function detectOrderBatchChanges<T extends OrderSnapshotItem>(
   prevMap: Map<number, { status: string; paymentStatus?: string }> | null,
-  nextOrders: readonly T[]
+  nextOrders: readonly T[] | null | undefined
 ): {
   newOrders: T[];
   updatedOrders: T[];
@@ -2283,8 +2283,10 @@ export function detectOrderBatchChanges<T extends OrderSnapshotItem>(
   const nextMap = new Map<number, { status: string; paymentStatus?: string }>();
   const newOrders: T[] = [];
   const updatedOrders: T[] = [];
+  const safeList = Array.isArray(nextOrders) ? nextOrders : [];
 
-  for (const ord of nextOrders) {
+  for (const ord of safeList) {
+    if (!ord || typeof ord.id !== 'number') continue;
     nextMap.set(ord.id, { status: ord.status, paymentStatus: ord.paymentStatus });
     if (!prevMap) continue;
     const prev = prevMap.get(ord.id);

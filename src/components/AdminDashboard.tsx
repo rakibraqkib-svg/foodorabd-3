@@ -461,7 +461,7 @@ export function AdminDashboard({
   }, [tab, loadBackendStatus]);
 
   const myRestaurants = useMemo(
-    () => restaurants.filter((r) => isOwnerRestaurant(r.ownerUid, currentUser.uid)),
+    () => (restaurants || []).filter((r) => isOwnerRestaurant(r.ownerUid, currentUser.uid)),
     [restaurants, currentUser.uid]
   );
 
@@ -471,7 +471,7 @@ export function AdminDashboard({
   );
 
   const filteredRestaurants = useMemo(() => {
-    return restaurants.filter((r) => {
+    return (restaurants || []).filter((r) => {
       if (restaurantOwnershipFilter === 'own' && !myRestaurantIds.has(r.id)) return false;
       if (restaurantOwnershipFilter === 'partner' && myRestaurantIds.has(r.id)) return false;
       if (restaurantZoneFilter !== 'all') {
@@ -504,14 +504,14 @@ export function AdminDashboard({
 
   const restaurantNameMap = useMemo(() => {
     const map = new Map<number, string>();
-    for (const r of restaurants) {
+    for (const r of (restaurants || [])) {
       map.set(r.id, lang === 'bn' ? r.nameBn : r.name);
     }
     return map;
   }, [restaurants, lang]);
 
   const filteredProducts = useMemo(() => {
-    return products.filter((item) => {
+    return (products || []).filter((item) => {
       if (productOwnershipFilter === 'own' && !myRestaurantIds.has(item.restaurantId)) {
         return false;
       }

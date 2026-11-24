@@ -410,6 +410,12 @@ function GoogleMapInner({
     void resolveViaBackend();
   };
 
+  useEffect(() => {
+    if (status === APILoadingStatus.FAILED || status === APILoadingStatus.AUTH_FAILURE) {
+      window.dispatchEvent(new CustomEvent('gm_authFailure'));
+    }
+  }, [status]);
+
   if (status === APILoadingStatus.FAILED || status === APILoadingStatus.AUTH_FAILURE) {
     return (
       <FallbackDhakaMap
@@ -584,6 +590,7 @@ function FallbackDhakaMap({
   heightClass,
   onSelectLocation,
 }: Omit<DhakaMapPickerProps, 'mapsApiKey'>) {
+  const [showOsm, setShowOsm] = useState(false);
   const reverseSeqRef = useRef(0);
   const pinAppearance = resolveMapPinAppearance({
     pinType,
@@ -678,48 +685,56 @@ function FallbackDhakaMap({
       onClick={fromClientPoint}
       className={`relative w-full overflow-hidden rounded-xl border border-neutral-200 bg-[#F8FAFC] ${interactive ? 'cursor-crosshair' : ''} ${heightClass || 'h-[260px]'}`}
     >
-      {/* Map Grid */}
-      <svg
-        className="absolute inset-0 w-full h-full pointer-events-none"
-        viewBox="0 0 100 100"
-        preserveAspectRatio="none"
-      >
-        <defs>
-          <pattern id="bdGrid" width="12.5" height="12.5" patternUnits="userSpaceOnUse">
-            <path d="M 12.5 0 L 0 0 0 12.5" fill="none" stroke="#E2E8F0" strokeWidth="0.4" />
-          </pattern>
-        </defs>
-        <rect width="100" height="100" fill="url(#bdGrid)" />
-        <path
-          d={allInsideDhaka ? 'M 55 48 Q 62 52 68 46 Q 74 42 78 50' : 'M 42 15 Q 50 45 48 75 Q 52 86 68 92'}
-          fill="none"
-          stroke="#CBD5E1"
-          strokeWidth="2.2"
-          strokeLinecap="round"
+      {/* Map Grid or OpenStreetMap Embed Alternative */}
+      {showOsm ? (
+        <iframe
+          title="OpenStreetMap Free Alternative"
+          className="absolute inset-0 w-full h-full border-0 pointer-events-auto"
+          src={`https://www.openstreetmap.org/export/embed.html?bbox=${center.lng - 0.02},${center.lat - 0.02},${center.lng + 0.02},${center.lat + 0.02}&layer=mapnik&marker=${center.lat},${center.lng}`}
         />
-        {p2 && (
-          <line
-            x1={p2.x}
-            y1={p2.y}
-            x2={p1.x}
-            y2={p1.y}
-            stroke="#E21B70"
-            strokeWidth="1.2"
-            strokeDasharray="2.5 1.5"
+      ) : (
+        <svg
+          className="absolute inset-0 w-full h-full pointer-events-none"
+          viewBox="0 0 100 100"
+          preserveAspectRatio="none"
+        >
+          <defs>
+            <pattern id="bdGrid" width="12.5" height="12.5" patternUnits="userSpaceOnUse">
+              <path d="M 12.5 0 L 0 0 0 12.5" fill="none" stroke="#E2E8F0" strokeWidth="0.4" />
+            </pattern>
+          </defs>
+          <rect width="100" height="100" fill="url(#bdGrid)" />
+          <path
+            d={allInsideDhaka ? 'M 55 48 Q 62 52 68 46 Q 74 42 78 50' : 'M 42 15 Q 50 45 48 75 Q 52 86 68 92'}
+            fill="none"
+            stroke="#CBD5E1"
+            strokeWidth="2.2"
+            strokeLinecap="round"
           />
-        )}
-        {pRider && (
-          <line
-            x1={pRider.x}
-            y1={pRider.y}
-            x2={p1.x}
-            y2={p1.y}
-            stroke="#059669"
-            strokeWidth="1.4"
-            strokeDasharray="1.8 1.2"
-          />
-        )}
-      </svg>
+          {p2 && (
+            <line
+              x1={p2.x}
+              y1={p2.y}
+              x2={p1.x}
+              y2={p1.y}
+              stroke="#E21B70"
+              strokeWidth="1.2"
+              strokeDasharray="2.5 1.5"
+            />
+          )}
+          {pRider && (
+            <line
+              x1={pRider.x}
+              y1={pRider.y}
+              x2={p1.x}
+              y2={p1.y}
+              stroke="#059669"
+              strokeWidth="1.4"
+              strokeDasharray="1.8 1.2"
+            />
+          )}
+        </svg>
+      )}
 
       {/* Mode Badge */}
       <span className="pointer-events-none absolute top-2 left-2 z-10 px-2 py-0.5 rounded bg-white/90 border border-neutral-200 text-[10px] font-bold text-neutral-600">
@@ -831,40 +846,92 @@ function FallbackDhakaMap({
           {distance !== null ? ` · ${distance.toFixed(1)} km` : ''}
           {riderPoint ? ` · Rider ${riderPoint.lat.toFixed(4)}, ${riderPoint.lng.toFixed(4)}` : ''}
         </span>
-        {interactive && (
+        <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={(ev) => {
               ev.stopPropagation();
-              if (navigator.geolocation) {
-                navigator.geolocation.getCurrentPosition(
-                  (pos) => emitFallbackPoint(pos.coords.latitude, pos.coords.longitude),
-                  () => emitFallbackPoint(23.7949, 90.4144, 'Gulshan 2')
-                );
-              } else {
-                emitFallbackPoint(23.7949, 90.4144, 'Gulshan 2');
-              }
+              setShowOsm(!showOsm);
             }}
-            className="inline-flex items-center gap-1 text-[#E21B70] font-semibold hover:underline whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 font-semibold px-2 py-0.5 rounded text-[11px] border border-neutral-300"
+            title="Toggle OpenStreetMap vs Vector Grid"
           >
-            <LocateFixed className="w-3.5 h-3.5" />
-            <span>GPS</span>
+            <span>{showOsm ? '⚡ Vector Map' : '🌍 OpenStreetMap'}</span>
           </button>
-        )}
+          {interactive && (
+            <button
+              type="button"
+              onClick={(ev) => {
+                ev.stopPropagation();
+                if (navigator.geolocation) {
+                  navigator.geolocation.getCurrentPosition(
+                    (pos) => emitFallbackPoint(pos.coords.latitude, pos.coords.longitude),
+                    () => emitFallbackPoint(23.7949, 90.4144, 'Gulshan 2')
+                  );
+                } else {
+                  emitFallbackPoint(23.7949, 90.4144, 'Gulshan 2');
+                }
+              }}
+              className="inline-flex items-center gap-1 text-[#E21B70] font-semibold hover:underline whitespace-nowrap shrink-0"
+            >
+              <LocateFixed className="w-3.5 h-3.5" />
+              <span>GPS</span>
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
 export function DhakaMapPicker(props: DhakaMapPickerProps) {
-  const [useFallback] = useState(false);
+  const effectiveApiKey =
+    props.mapsApiKey || (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || '';
+
+  const [useFallback, setUseFallback] = useState(!effectiveApiKey);
   const [activeMethod, setActiveMethod] = useState<'gps' | 'google_maps' | 'wifi' | 'cell_tower' | 'pin'>('google_maps');
   const [positioningNote, setPositioningNote] = useState<string>('');
   const [showGuide, setShowGuide] = useState(false);
   const [detecting, setDetecting] = useState(false);
 
-  const effectiveApiKey =
-    props.mapsApiKey || (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) || '';
+  useEffect(() => {
+    if (!effectiveApiKey) {
+      setUseFallback(true);
+      return;
+    }
+    const handleAuthFailure = () => {
+      setUseFallback(true);
+      setPositioningNote(
+        props.lang === 'bn'
+          ? '⚠️ গুগল ম্যাপস লোড হয়নি বা এপিআই রেস্ট্রিকশন সমস্যা (ফলব্যাক ভেক্টর ম্যাপ সক্রিয়)'
+          : '⚠️ Google Maps auth/loading failure detected. Switched to high-speed vector fallback map.'
+      );
+    };
+    window.addEventListener('gm_authFailure', handleAuthFailure);
+
+    const handleQuotaExceeded = () => {
+      setUseFallback(true);
+      setPositioningNote(
+        props.lang === 'bn'
+          ? '⚠️ গুগল ম্যাপস কোটা পূর্ণ হয়েছে (ফলব্যাক ভেক্টর ম্যাপ সক্রিয়)'
+          : '⚠️ Google Maps quota reached. Switched to high-speed vector fallback map.'
+      );
+    };
+    window.addEventListener('gmp-quota-exceeded', handleQuotaExceeded);
+
+    // Safety timeout: if Google Maps API doesn't load within 5 seconds, fall back to vector map gracefully
+    const timer = setTimeout(() => {
+      if (typeof window !== 'undefined' && !(window as any).google?.maps && !useFallback) {
+        setUseFallback(true);
+      }
+    }, 5000);
+
+    return () => {
+      window.removeEventListener('gm_authFailure', handleAuthFailure);
+      window.removeEventListener('gmp-quota-exceeded', handleQuotaExceeded);
+      clearTimeout(timer);
+    };
+  }, [effectiveApiKey, props.lang, useFallback]);
 
   const handleSelectLocation = (coords: {
     lat: number;
@@ -1014,6 +1081,15 @@ export function DhakaMapPicker(props: DhakaMapPickerProps) {
       <div className="rounded-xl border border-neutral-200 bg-neutral-50/90 px-3 py-2 space-y-2 text-xs">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setUseFallback(!useFallback)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border font-semibold text-[11px] bg-white border-neutral-200 hover:border-[#E21B70] text-[#E21B70]"
+              title="Toggle Google Maps vs Instant Vector Map"
+            >
+              <span>{useFallback ? (props.lang === 'bn' ? '🗺️ গুগল ম্যাপস' : '🗺️ Google Maps') : (props.lang === 'bn' ? '⚡ ১০০% ফ্রি ম্যাপ' : '⚡ 100% Free Map')}</span>
+            </button>
+
             <button
               type="button"
               disabled={detecting}
