@@ -1954,7 +1954,7 @@ async function runSeedIfEmpty() {
 }
 
 // src/db/queries.ts
-import { and, asc, desc, eq, like, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, like, or } from "drizzle-orm";
 
 // src/lib/marketplace-logic.ts
 function calculateCartItemUnitPrice(item) {
@@ -3429,13 +3429,14 @@ async function getVendorWorkspace(ownerUid, isSuperAdmin, requestedRestaurantId)
     const rawList = isSuperAdmin ? await db.select().from(restaurants).orderBy(restaurants.id) : await db.select().from(restaurants).where(eq(restaurants.ownerUid, ownerUid)).orderBy(restaurants.id);
     const partitioned = partitionOwnedVsPartnerRestaurants(rawList, ownerUid);
     const owned = partitioned.ordered;
-    const requestedMatch = requestedRestaurantId && Number.isInteger(requestedRestaurantId) ? owned.find((r) => r.id === requestedRestaurantId) ?? null : null;
+    const isAllRestaurants = requestedRestaurantId === -1;
+    const requestedMatch = !isAllRestaurants && requestedRestaurantId && Number.isInteger(requestedRestaurantId) ? owned.find((r) => r.id === requestedRestaurantId) ?? null : null;
     const target = requestedMatch ?? owned[0] ?? null;
     if (!target) {
       return {
         restaurant: null,
-        restaurants: [],
-        ownRestaurantIds: [],
+        restaurants: owned,
+        ownRestaurantIds: partitioned.own.map((r) => r.id),
         menuItems: [],
         orders: [],
         ledger: [],
@@ -3443,7 +3444,8 @@ async function getVendorWorkspace(ownerUid, isSuperAdmin, requestedRestaurantId)
       };
     }
     const menuItems = await db.select().from(foodItems).where(eq(foodItems.restaurantId, target.id)).orderBy(desc(foodItems.id));
-    const restOrders = await db.select().from(orders).where(eq(orders.restaurantId, target.id)).orderBy(desc(orders.createdAt));
+    const restaurantIdsToQuery = isAllRestaurants ? owned.map((r) => r.id) : [target.id];
+    const restOrders = restaurantIdsToQuery.length > 0 ? await db.select().from(orders).where(inArray(orders.restaurantId, restaurantIdsToQuery)).orderBy(desc(orders.createdAt)) : [];
     const ledger = await db.select().from(commissionLedger).where(eq(commissionLedger.restaurantId, target.id)).orderBy(desc(commissionLedger.createdAt));
     const payouts = await db.select().from(restaurantPayouts).where(eq(restaurantPayouts.restaurantId, target.id)).orderBy(desc(restaurantPayouts.requestedAt));
     return {
@@ -4534,7 +4536,7 @@ import crypto2 from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import nodemailer from "nodemailer";
-import { desc as desc2, eq as eq3, inArray } from "drizzle-orm";
+import { desc as desc2, eq as eq3, inArray as inArray2 } from "drizzle-orm";
 var EMAIL_CONFIG_KEY = "__email_transport_config__";
 var EMAIL_CONFIG_UID = "sys-email-transport-config";
 function deriveEncryptionKey() {
@@ -4928,46 +4930,7 @@ function resolveFallbackFoodImageBuffer() {
     return null;
   }
 }
-function buildOriginFallbackImageUrl(srcUrl) {
-  if (!srcUrl || !/^https?:\/\//i.test(srcUrl)) return null;
-  try {
-    const parsed = new URL(srcUrl);
-    return `${parsed.origin}${DEFAULT_ORDER_EMAIL_IMAGE_PATH}`;
-  } catch {
-    return null;
-  }
-}
-async function fetchRemoteImageAsBuffer(imageUrl, cid) {
-  if (!/^https?:\/\//i.test(imageUrl)) return null;
-  try {
-    const res = await fetch(imageUrl, { signal: AbortSignal.timeout(5e3) });
-    if (!res.ok) return null;
-    const rawType = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-    const extMap = {
-      "image/jpeg": ".jpg",
-      "image/jpg": ".jpg",
-      "image/png": ".png",
-      "image/webp": ".webp",
-      "image/gif": ".gif"
-    };
-    const normalizedType = rawType === "image/jpg" ? "image/jpeg" : rawType;
-    if (!normalizedType.startsWith("image/")) return null;
-    const arrBuf = await res.arrayBuffer();
-    if (!arrBuf || arrBuf.byteLength === 0 || arrBuf.byteLength > 5 * 1024 * 1024) {
-      return null;
-    }
-    const ext = extMap[normalizedType] || ".jpg";
-    return {
-      filename: `${cid}${ext}`,
-      content: Buffer.from(arrBuf),
-      contentType: normalizedType,
-      cid
-    };
-  } catch {
-    return null;
-  }
-}
-function resolveDiskOrDataCidAttachment(entry, allowFallback) {
+function resolveCidEntryToAttachment(entry) {
   if (entry.kind === "data" && entry.dataBase64 && entry.dataMimeType) {
     const extMap = {
       "image/jpeg": ".jpg",
@@ -5013,7 +4976,6 @@ function resolveDiskOrDataCidAttachment(entry, allowFallback) {
       }
     }
   }
-  if (!allowFallback) return null;
   const fallback = resolveFallbackFoodImageBuffer();
   if (!fallback) return null;
   return {
@@ -5023,7 +4985,7 @@ function resolveDiskOrDataCidAttachment(entry, allowFallback) {
     cid: entry.cid
   };
 }
-async function prepareEmailWithInlineCidAttachmentsAsync(html) {
+function prepareEmailWithInlineCidAttachments(html) {
   const plan = extractEmailInlineCidPlan(html);
   if (plan.images.length === 0) {
     return { html, attachments: [] };
@@ -5031,27 +4993,7 @@ async function prepareEmailWithInlineCidAttachmentsAsync(html) {
   const attachments = [];
   let finalHtml = plan.html;
   for (const entry of plan.images) {
-    let resolved = resolveDiskOrDataCidAttachment(entry, false);
-    if (!resolved && entry.originalSrcs[0]) {
-      resolved = await fetchRemoteImageAsBuffer(entry.originalSrcs[0], entry.cid);
-    }
-    if (!resolved) {
-      const diskFallback = resolveFallbackFoodImageBuffer();
-      if (diskFallback) {
-        resolved = {
-          filename: diskFallback.filename,
-          content: diskFallback.content,
-          contentType: diskFallback.contentType,
-          cid: entry.cid
-        };
-      }
-    }
-    if (!resolved && entry.originalSrcs[0]) {
-      const remoteFallbackUrl = buildOriginFallbackImageUrl(entry.originalSrcs[0]);
-      if (remoteFallbackUrl && remoteFallbackUrl !== entry.originalSrcs[0]) {
-        resolved = await fetchRemoteImageAsBuffer(remoteFallbackUrl, entry.cid);
-      }
-    }
+    const resolved = resolveCidEntryToAttachment(entry);
     if (resolved) {
       attachments.push(resolved);
     } else if (entry.originalSrcs[0]) {
@@ -5071,7 +5013,7 @@ async function sendTransactionalEmail(params) {
     };
   }
   const cfg = await resolveEffectiveConfig();
-  const prepared = await prepareEmailWithInlineCidAttachmentsAsync(params.html);
+  const prepared = prepareEmailWithInlineCidAttachments(params.html);
   let lastSmtpError = "";
   if ((cfg.providerMode === "gmail" || cfg.providerMode === "smtp") && cfg.smtpHost && cfg.smtpUser && cfg.smtpPass) {
     const attempts = [
@@ -5251,7 +5193,7 @@ async function enrichOrderEmailItemsWithImages(items) {
   );
   if (missingIds.length > 0) {
     try {
-      const dbFoods = await db.select({ id: foodItems.id, imageUrl: foodItems.imageUrl }).from(foodItems).where(inArray(foodItems.id, missingIds));
+      const dbFoods = await db.select({ id: foodItems.id, imageUrl: foodItems.imageUrl }).from(foodItems).where(inArray2(foodItems.id, missingIds));
       const imgMap = new Map(dbFoods.map((f) => [f.id, f.imageUrl]));
       next = next.map(
         (it) => !it.imageUrl && typeof it.foodItemId === "number" ? { ...it, imageUrl: imgMap.get(it.foodItemId) || it.imageUrl } : it
@@ -7499,7 +7441,7 @@ app.get(
     try {
       const isSuperAdmin = req.user.role === "super_admin" || req.user.role === "admin";
       const requestedRaw = Number(req.query.restaurantId);
-      const requestedRestaurantId = Number.isInteger(requestedRaw) && requestedRaw > 0 ? requestedRaw : null;
+      const requestedRestaurantId = Number.isInteger(requestedRaw) && (requestedRaw > 0 || requestedRaw === -1) ? requestedRaw : null;
       const data = await getVendorWorkspace(req.user.uid, isSuperAdmin, requestedRestaurantId);
       res.json(data);
     } catch (error) {

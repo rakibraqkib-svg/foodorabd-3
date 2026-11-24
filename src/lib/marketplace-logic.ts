@@ -104,7 +104,9 @@ export function canAddToSingleRestaurantCart(
   incomingRestaurantId: number
 ): boolean {
   if (existingItems.length === 0) return true;
-  return existingItems[0].restaurantId === incomingRestaurantId;
+  const existingRestId = existingItems[0].restaurantId;
+  if (existingRestId === undefined || existingRestId === null) return true;
+  return Number(existingRestId) === Number(incomingRestaurantId);
 }
 
 export function evaluateCoupon(

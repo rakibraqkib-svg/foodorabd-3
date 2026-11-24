@@ -36,8 +36,14 @@ export function getAuthToken(): string | null {
 }
 
 export async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers || {});
-  if (!headers.has('Content-Type') && options.body) {
+  const safeOptions = options || {};
+  let headers: Headers;
+  try {
+    headers = new Headers(safeOptions.headers || {});
+  } catch {
+    headers = new Headers();
+  }
+  if (!headers.has('Content-Type') && safeOptions.body) {
     headers.set('Content-Type', 'application/json');
   }
   if (activeToken) {
@@ -45,15 +51,18 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
   }
 
   const res = await fetch(url, {
-    ...options,
+    ...safeOptions,
     headers,
   });
 
   const rawText = await res.text().catch(() => '');
   let data: Record<string, any> = {};
-  if (rawText) {
+  if (rawText && typeof rawText === 'string') {
     try {
-      data = JSON.parse(rawText);
+      const parsed = JSON.parse(rawText);
+      if (parsed && typeof parsed === 'object') {
+        data = parsed;
+      }
     } catch {
       data = {};
     }

@@ -2381,7 +2381,7 @@ app.get(
       const isSuperAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
       const requestedRaw = Number(req.query.restaurantId);
       const requestedRestaurantId =
-        Number.isInteger(requestedRaw) && requestedRaw > 0 ? requestedRaw : null;
+        Number.isInteger(requestedRaw) && (requestedRaw > 0 || requestedRaw === -1) ? requestedRaw : null;
       const data = await getVendorWorkspace(req.user!.uid, isSuperAdmin, requestedRestaurantId);
       res.json(data);
     } catch (error: any) {

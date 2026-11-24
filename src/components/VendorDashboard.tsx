@@ -1368,11 +1368,14 @@ export function VendorDashboard({
             <div className="flex flex-wrap items-center gap-2.5">
               {allRestaurants.length > 1 && (
                 <select
-                  value={restaurant.id}
+                  value={selectedRestaurantId ?? restaurant?.id ?? ''}
                   onChange={(e) => setSelectedRestaurantId(Number(e.target.value))}
                   aria-label="Switch Restaurant Store"
-                  className="px-3 py-2 rounded-xl border border-neutral-200 bg-neutral-50 text-xs font-semibold text-[#2E3138] max-w-[240px]"
+                  className="px-3 py-2 rounded-xl border border-neutral-200 bg-neutral-50 text-xs font-semibold text-[#2E3138] max-w-[270px]"
                 >
+                  <option value={-1}>
+                    {lang === 'bn' ? '⚡ সকল রেস্টুরেন্ট (একসাথে সব অর্ডার)' : '⚡ All Restaurants (All Orders Together)'}
+                  </option>
                   {allRestaurants.map((r) => {
                     const isMine = ownRestaurantIds.includes(r.id) || r.ownerUid === user.uid;
                     return (
@@ -1478,7 +1481,7 @@ export function VendorDashboard({
                   >
                     <div className="space-y-1">
                       <p className="text-xs font-mono-nums text-neutral-500">
-                        {ord.orderNumber} · {ord.customerName} ({ord.customerPhone}) · {ord.deliveryMode}
+                        {ord.restaurantName ? `🏠 ${ord.restaurantName} · ` : ''}{ord.orderNumber} · {ord.customerName} ({ord.customerPhone}) · {ord.deliveryMode}
                       </p>
                       <p className="font-bold text-sm text-[#2E3138]">
                         {ord.itemsSnapshotJson

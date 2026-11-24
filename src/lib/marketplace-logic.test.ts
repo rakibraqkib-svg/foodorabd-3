@@ -97,6 +97,7 @@ test('single-restaurant cart constraint blocks mixing different restaurants', ()
   assert.equal(canAddToSingleRestaurantCart([], 5), true);
   assert.equal(canAddToSingleRestaurantCart([{ restaurantId: 5 }], 5), true);
   assert.equal(canAddToSingleRestaurantCart([{ restaurantId: 5 }], 9), false);
+  assert.equal(canAddToSingleRestaurantCart([{ restaurantId: '5' as any }], 5), true);
 });
 
 test('coupon evaluation handles percentage cap, minimum order, and free delivery', () => {

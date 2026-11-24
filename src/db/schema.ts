@@ -167,8 +167,6 @@ export const orders = pgTable('orders', {
   customerUid: text('customer_uid').notNull(),
   customerName: text('customer_name').notNull(),
   customerPhone: text('customer_phone').notNull(),
-  customerEmail: text('customer_email').notNull().default(''),
-  trackingToken: text('tracking_token').notNull().default(''),
   restaurantId: integer('restaurant_id')
     .references(() => restaurants.id)
     .notNull(),
@@ -205,7 +203,6 @@ export const orders = pgTable('orders', {
         foodItemId: number;
         name: string;
         nameBn: string;
-        imageUrl?: string;
         quantity: number;
         unitPrice: number;
         variation?: string;

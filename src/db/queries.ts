@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, like, or } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, like, or } from 'drizzle-orm';
 import { db, withDbRetry } from './index.ts';
 import {
   auditLogs,
@@ -347,8 +347,10 @@ export async function getVendorWorkspace(
     const partitioned = partitionOwnedVsPartnerRestaurants(rawList, ownerUid);
     const owned = partitioned.ordered;
 
+    const isAllRestaurants = requestedRestaurantId === -1;
+
     const requestedMatch =
-      requestedRestaurantId && Number.isInteger(requestedRestaurantId)
+      !isAllRestaurants && requestedRestaurantId && Number.isInteger(requestedRestaurantId)
         ? owned.find((r) => r.id === requestedRestaurantId) ?? null
         : null;
     const target = requestedMatch ?? owned[0] ?? null;
@@ -356,8 +358,8 @@ export async function getVendorWorkspace(
     if (!target) {
       return {
         restaurant: null,
-        restaurants: [],
-        ownRestaurantIds: [] as number[],
+        restaurants: owned,
+        ownRestaurantIds: partitioned.own.map((r) => r.id),
         menuItems: [],
         orders: [],
         ledger: [],
@@ -370,11 +372,19 @@ export async function getVendorWorkspace(
       .from(foodItems)
       .where(eq(foodItems.restaurantId, target.id))
       .orderBy(desc(foodItems.id));
-    const restOrders = await db
-      .select()
-      .from(orders)
-      .where(eq(orders.restaurantId, target.id))
-      .orderBy(desc(orders.createdAt));
+
+    const restaurantIdsToQuery = isAllRestaurants
+      ? owned.map((r) => r.id)
+      : [target.id];
+
+    const restOrders = restaurantIdsToQuery.length > 0
+      ? await db
+          .select()
+          .from(orders)
+          .where(inArray(orders.restaurantId, restaurantIdsToQuery))
+          .orderBy(desc(orders.createdAt))
+      : [];
+
     const ledger = await db
       .select()
       .from(commissionLedger)

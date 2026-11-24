@@ -2940,21 +2940,28 @@ function MarketplaceApp() {
                 ? `আপনার কার্টে ইতিমধ্যে ${cartRestaurant?.name}-এর খাবার রয়েছে। নতুন রেস্টুরেন্টের খাবার যোগ করলে পূর্বের কার্ট খালি হবে।`
                 : `Your cart contains items from ${cartRestaurant?.name}. Starting a new order will clear your previous cart.`}
             </p>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setPendingSwitchItem(null)}
-                className="px-4 py-2 rounded-xl border border-neutral-200 text-xs font-semibold"
-              >
-                {lang === 'bn' ? 'বাতিল' : 'Keep Existing'}
-              </button>
-              <button
-                type="button"
-                onClick={confirmSwitchRestaurantCart}
-                className="px-4 py-2 rounded-xl bg-[#E21B70] text-white text-xs font-semibold"
-              >
-                {lang === 'bn' ? 'নতুন কার্ট শুরু করুন' : 'Start New Cart'}
-              </button>
+            <div className="space-y-2 pt-1">
+              <p className="text-[11px] text-neutral-500 bg-neutral-50 p-2 rounded-lg border border-neutral-100">
+                {lang === 'bn'
+                  ? '• Keep Existing: পূর্বের কার্ট বহাল রাখে এবং নতুন আইটেম যোগ বাতিল করে।\n• Start New Cart: পূর্বের কার্ট খালি করে নতুন রেস্টুরেন্টের আইটেমটি যোগ করে।'
+                  : '• Keep Existing: Keeps current cart & cancels adding this item.\n• Start New Cart: Clears old cart & adds this new item.'}
+              </p>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setPendingSwitchItem(null)}
+                  className="px-3.5 py-2 rounded-xl border border-neutral-200 text-xs font-semibold text-neutral-700 hover:bg-neutral-50"
+                >
+                  {lang === 'bn' ? 'বাতিল (Keep Existing)' : 'Keep Existing'}
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmSwitchRestaurantCart}
+                  className="px-3.5 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold"
+                >
+                  {lang === 'bn' ? 'নতুন কার্ট শুরু করুন (Start New)' : 'Start New Cart'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
