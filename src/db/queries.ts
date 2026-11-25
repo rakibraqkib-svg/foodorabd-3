@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, like, or } from 'drizzle-orm';
 import { db, withDbRetry } from './index.ts';
 import {
+  aiProviders,
   auditLogs,
   commissionLedger,
   coupons,
@@ -17,10 +18,14 @@ import {
   restaurantPayouts,
   restaurants,
   reviews,
+  riderJobApplications,
+  riderJobs,
   riders,
   users,
+  vendorAdminMessages,
 } from './schema.ts';
 import {
+  DEFAULT_AI_PROVIDERS,
   DEFAULT_PAYMENT_GATEWAYS,
   partitionOwnedVsPartnerRestaurants,
   pickNearestStandbyRider,
@@ -334,6 +339,43 @@ export async function ensureDefaultPaymentGateways() {
   }
 }
 
+export async function ensureDefaultAiProviders() {
+  try {
+    const existing = await withDbRetry(() =>
+      db
+        .select()
+        .from(aiProviders)
+        .orderBy(asc(aiProviders.sortOrder), asc(aiProviders.id))
+    );
+
+    if (existing.length === 0) {
+      await db
+        .insert(aiProviders)
+        .values(
+          DEFAULT_AI_PROVIDERS.map((p) => ({
+            ...p,
+            apiKey: '',
+          }))
+        )
+        .onConflictDoNothing();
+      return await db
+        .select()
+        .from(aiProviders)
+        .orderBy(asc(aiProviders.sortOrder), asc(aiProviders.id));
+    }
+    return existing;
+  } catch (error) {
+    console.error('Failed to load AI providers:', error);
+    return DEFAULT_AI_PROVIDERS.map((p, idx) => ({
+      id: idx + 1,
+      ...p,
+      apiKey: '',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
+  }
+}
+
 export async function getVendorWorkspace(
   ownerUid: string,
   isSuperAdmin: boolean,
@@ -364,37 +406,82 @@ export async function getVendorWorkspace(
         orders: [],
         ledger: [],
         payouts: [],
+        riderJobs: [],
+        riderJobApplications: [],
+        unreadMessageCount: 0,
       };
     }
-
-    const menuItems = await db
-      .select()
-      .from(foodItems)
-      .where(eq(foodItems.restaurantId, target.id))
-      .orderBy(desc(foodItems.id));
 
     const restaurantIdsToQuery = isAllRestaurants
       ? owned.map((r) => r.id)
       : [target.id];
 
-    const restOrders = restaurantIdsToQuery.length > 0
-      ? await db
-          .select()
-          .from(orders)
-          .where(inArray(orders.restaurantId, restaurantIdsToQuery))
-          .orderBy(desc(orders.createdAt))
-      : [];
+    const restaurantNameMap = new Map(owned.map((r) => [r.id, r.name]));
 
-    const ledger = await db
-      .select()
-      .from(commissionLedger)
-      .where(eq(commissionLedger.restaurantId, target.id))
-      .orderBy(desc(commissionLedger.createdAt));
-    const payouts = await db
-      .select()
-      .from(restaurantPayouts)
-      .where(eq(restaurantPayouts.restaurantId, target.id))
-      .orderBy(desc(restaurantPayouts.requestedAt));
+    const rawMenuItems =
+      restaurantIdsToQuery.length > 0
+        ? await db
+            .select()
+            .from(foodItems)
+            .where(inArray(foodItems.restaurantId, restaurantIdsToQuery))
+            .orderBy(desc(foodItems.id))
+        : [];
+
+    const menuItems = rawMenuItems.map((item) => ({
+      ...item,
+      restaurantName: restaurantNameMap.get(item.restaurantId) || target.name,
+    }));
+
+    const restOrders =
+      restaurantIdsToQuery.length > 0
+        ? await db
+            .select()
+            .from(orders)
+            .where(inArray(orders.restaurantId, restaurantIdsToQuery))
+            .orderBy(desc(orders.createdAt))
+        : [];
+
+    const [ledger, payouts, jobs, applications, unreadRows] = await Promise.all([
+      restaurantIdsToQuery.length > 0
+        ? db
+            .select()
+            .from(commissionLedger)
+            .where(inArray(commissionLedger.restaurantId, restaurantIdsToQuery))
+            .orderBy(desc(commissionLedger.createdAt))
+        : Promise.resolve([]),
+      restaurantIdsToQuery.length > 0
+        ? db
+            .select()
+            .from(restaurantPayouts)
+            .where(inArray(restaurantPayouts.restaurantId, restaurantIdsToQuery))
+            .orderBy(desc(restaurantPayouts.requestedAt))
+        : Promise.resolve([]),
+      restaurantIdsToQuery.length > 0
+        ? db
+            .select()
+            .from(riderJobs)
+            .where(inArray(riderJobs.restaurantId, restaurantIdsToQuery))
+            .orderBy(desc(riderJobs.createdAt))
+        : Promise.resolve([]),
+      restaurantIdsToQuery.length > 0
+        ? db
+            .select()
+            .from(riderJobApplications)
+            .where(inArray(riderJobApplications.restaurantId, restaurantIdsToQuery))
+            .orderBy(desc(riderJobApplications.createdAt))
+        : Promise.resolve([]),
+      restaurantIdsToQuery.length > 0
+        ? db
+            .select({ id: vendorAdminMessages.id })
+            .from(vendorAdminMessages)
+            .where(
+              and(
+                inArray(vendorAdminMessages.restaurantId, restaurantIdsToQuery),
+                eq(vendorAdminMessages.isReadByVendor, false)
+              )
+            )
+        : Promise.resolve([]),
+    ]);
 
     return {
       restaurant: target,
@@ -404,6 +491,9 @@ export async function getVendorWorkspace(
       orders: restOrders,
       ledger,
       payouts,
+      riderJobs: jobs,
+      riderJobApplications: applications,
+      unreadMessageCount: unreadRows.length,
     };
   } catch (error) {
     console.error('Failed to fetch vendor workspace:', error);

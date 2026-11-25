@@ -1874,6 +1874,7 @@ function MarketplaceApp() {
             initialRestaurantId={view.restaurantId ?? null}
             onRefreshUser={refreshUser}
             onMenuMutated={loadStorefront}
+            onTrackOrder={(orderId) => setView({ type: 'tracking', orderId })}
             onBack={() => setView({ type: 'home' })}
           />
         ) : view.type === 'rider' ? (

@@ -6,11 +6,12 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import JSZip from 'jszip';
-import { and, desc, eq, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, ne, or, sql } from 'drizzle-orm';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { z } from 'zod';
 import { db, hasDatabaseConfig } from './src/db/index.ts';
 import {
+  aiProviders,
   auditLogs,
   commissionLedger,
   coupons,
@@ -26,12 +27,16 @@ import {
   restaurantPayouts,
   restaurants,
   reviews,
+  riderJobApplications,
+  riderJobs,
   riders,
   users,
+  vendorAdminMessages,
 } from './src/db/schema.ts';
 import { ensureSchemaTables } from './src/db/ensure-schema.ts';
 import { ensureDatabaseSeeded, IMG_BANGLA } from './src/db/seed.ts';
 import {
+  ensureDefaultAiProviders,
   ensureDefaultPaymentGateways,
   getActiveCoupons,
   getAdminWorkspace,
@@ -73,14 +78,21 @@ import {
   doesEmailMatchOrder,
   estimateDeliveryFeeAndEta,
   evaluateCoupon,
+  haversineDistanceKm,
   isProtectedSuperAdminEmail,
+  isValidExternalAiBaseUrl,
+  normalizeAiProviderCode,
   normalizeGatewayCode,
   normalizePartnerProductInput,
   OrderStatus,
   PaymentMethod,
+  pickNearestStandbyRider,
+  toAdminAiProviderView,
   toAdminPaymentGatewayView,
+  toPublicAiProviderView,
   toPublicPaymentGatewayView,
   validateBroadcastNotification,
+  validateRiderJobPayload,
 } from './src/lib/marketplace-logic.ts';
 import { mergeStorefrontConfig } from './src/lib/storefront-config.ts';
 import { getDeliveryProvider } from './src/services/delivery.ts';
@@ -109,6 +121,7 @@ import {
   attachSseRealtimeClient,
   broadcastNotificationEvent,
   broadcastOrderEvent,
+  broadcastVendorAdminMessage,
   initRealtimeWebSocketServer,
 } from './src/services/realtime.ts';
 import {
@@ -2453,6 +2466,24 @@ app.patch(
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId)) return res.status(400).json({ error: 'Invalid item ID' });
 
+    const schema = z.object({
+      category: z.string().trim().min(1).max(60).optional(),
+      name: z.string().trim().min(1).max(120).optional(),
+      nameBn: z.string().trim().min(1).max(120).optional(),
+      description: z.string().max(600).optional(),
+      imageUrl: z.string().max(600).optional(),
+      inStock: z.boolean().optional(),
+      isAvailable: z.boolean().optional(),
+      isPopular: z.boolean().optional(),
+      isVisibleOnStorefront: z.boolean().optional(),
+      price: z.number().int().positive().max(100000).optional(),
+      discountPrice: z.number().int().positive().max(100000).nullable().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid menu item update' });
+    }
+
     try {
       const itemRows = await db.select().from(foodItems).where(eq(foodItems.id, itemId)).limit(1);
       if (itemRows.length === 0) return res.status(404).json({ error: 'Food item not found' });
@@ -2467,39 +2498,21 @@ app.patch(
         return res.status(403).json({ error: 'Forbidden' });
       }
 
+      const d = parsed.data;
       const updated = await db
         .update(foodItems)
         .set({
-          category:
-            typeof req.body.category === 'string' && req.body.category.trim()
-              ? req.body.category.trim()
-              : itemRows[0].category,
-          name:
-            typeof req.body.name === 'string' && req.body.name.trim()
-              ? req.body.name.trim()
-              : itemRows[0].name,
-          nameBn:
-            typeof req.body.nameBn === 'string' && req.body.nameBn.trim()
-              ? req.body.nameBn.trim()
-              : itemRows[0].nameBn,
-          description:
-            typeof req.body.description === 'string'
-              ? req.body.description
-              : itemRows[0].description,
-          imageUrl:
-            typeof req.body.imageUrl === 'string' && req.body.imageUrl.trim()
-              ? req.body.imageUrl.trim()
-              : itemRows[0].imageUrl,
-          inStock: req.body.inStock ?? itemRows[0].inStock,
-          isAvailable: req.body.isAvailable ?? itemRows[0].isAvailable,
-          isPopular: req.body.isPopular ?? itemRows[0].isPopular,
-          price: typeof req.body.price === 'number' && req.body.price > 0 ? req.body.price : itemRows[0].price,
-          discountPrice:
-            req.body.discountPrice === null
-              ? null
-              : typeof req.body.discountPrice === 'number' && req.body.discountPrice > 0
-              ? req.body.discountPrice
-              : itemRows[0].discountPrice,
+          category: d.category ?? itemRows[0].category,
+          name: d.name ?? itemRows[0].name,
+          nameBn: d.nameBn ?? itemRows[0].nameBn,
+          description: d.description ?? itemRows[0].description,
+          imageUrl: d.imageUrl && d.imageUrl.trim() ? d.imageUrl.trim() : itemRows[0].imageUrl,
+          inStock: d.inStock ?? itemRows[0].inStock,
+          isAvailable: d.isAvailable ?? itemRows[0].isAvailable,
+          isPopular: d.isPopular ?? itemRows[0].isPopular,
+          isVisibleOnStorefront: d.isVisibleOnStorefront ?? itemRows[0].isVisibleOnStorefront,
+          price: d.price ?? itemRows[0].price,
+          discountPrice: d.discountPrice === undefined ? itemRows[0].discountPrice : d.discountPrice,
           updatedAt: new Date(),
         })
         .where(eq(foodItems.id, itemId))
@@ -3143,6 +3156,931 @@ app.patch(
       res.json({ order: updated[0] });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Vendor Dispatch: list available approved riders (sorted by availability & distance to restaurant)
+app.get(
+  '/api/vendor/riders',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    try {
+      const restId = Number(req.query.restaurantId);
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      let targetRest: typeof restaurants.$inferSelect | null = null;
+      if (Number.isInteger(restId) && restId > 0) {
+        const restRows = await db
+          .select()
+          .from(restaurants)
+          .where(eq(restaurants.id, restId))
+          .limit(1);
+        if (restRows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
+        if (!isAdmin && restRows[0].ownerUid !== req.user!.uid) {
+          return res.status(403).json({ error: 'Forbidden' });
+        }
+        targetRest = restRows[0];
+      }
+
+      const riderRows = await db
+        .select({
+          id: riders.id,
+          uid: riders.uid,
+          fullName: riders.fullName,
+          phone: riders.phone,
+          vehicleType: riders.vehicleType,
+          zone: riders.zone,
+          isAvailable: riders.isAvailable,
+          status: riders.status,
+          currentLat: riders.currentLat,
+          currentLng: riders.currentLng,
+          totalDeliveries: riders.totalDeliveries,
+        })
+        .from(riders)
+        .where(eq(riders.status, 'approved'));
+
+      const enriched = riderRows
+        .map((r) => ({
+          ...r,
+          distanceKm: targetRest
+            ? Math.round(
+                haversineDistanceKm(r.currentLat, r.currentLng, targetRest.lat, targetRest.lng) *
+                  100
+              ) / 100
+            : null,
+        }))
+        .sort((a, b) => {
+          if (a.isAvailable !== b.isAvailable) return a.isAvailable ? -1 : 1;
+          if (a.distanceKm !== null && b.distanceKm !== null) {
+            return a.distanceKm - b.distanceKm;
+          }
+          return b.totalDeliveries - a.totalDeliveries;
+        });
+
+      res.json({ riders: enriched });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to load riders' });
+    }
+  }
+);
+
+// Vendor Dispatch: assign or auto-pick nearest rider to restaurant's order
+app.post(
+  '/api/vendor/orders/:id/assign-rider',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const orderId = Number(req.params.id);
+    const schema = z.object({
+      riderUid: z.string().nullable().optional(),
+      autoAssignNearest: z.boolean().optional(),
+      note: z.string().max(240).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!Number.isInteger(orderId) || !parsed.success) {
+      return res.status(400).json({ error: 'Invalid rider assignment request' });
+    }
+
+    try {
+      const orderRows = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+      if (orderRows.length === 0) return res.status(404).json({ error: 'Order not found' });
+      const order = orderRows[0];
+
+      const restRows = await db
+        .select()
+        .from(restaurants)
+        .where(eq(restaurants.id, order.restaurantId))
+        .limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
+      const rest = restRows[0];
+
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      if (!isAdmin && rest.ownerUid !== req.user!.uid) {
+        return res.status(403).json({ error: 'Forbidden: Order belongs to another restaurant' });
+      }
+
+      if (order.status === 'delivered' || order.status === 'cancelled') {
+        return res.status(400).json({
+          error: `Cannot assign rider to a ${order.status} order.`,
+        });
+      }
+
+      let nextRiderUid: string | null = order.riderUid || null;
+      let nextRiderName: string | null = order.riderName || null;
+      let assignedRiderPhone = '';
+
+      if (parsed.data.autoAssignNearest) {
+        const approvedRiders = await db
+          .select()
+          .from(riders)
+          .where(eq(riders.status, 'approved'));
+        const picked = pickNearestStandbyRider(
+          approvedRiders.map((r) => ({
+            uid: r.uid,
+            fullName: r.fullName,
+            phone: r.phone,
+            vehicleType: r.vehicleType,
+            zone: r.zone,
+            isAvailable: r.isAvailable,
+            lat: r.currentLat,
+            lng: r.currentLng,
+            locationUpdatedAt: r.locationUpdatedAt,
+          })),
+          rest.lat,
+          rest.lng
+        );
+        if (!picked) {
+          return res.status(404).json({ error: 'No approved riders available to assign right now.' });
+        }
+        nextRiderUid = picked.rider.uid;
+        nextRiderName = picked.rider.fullName;
+        assignedRiderPhone = picked.rider.phone;
+      } else if (parsed.data.riderUid === null || parsed.data.riderUid === '') {
+        nextRiderUid = null;
+        nextRiderName = null;
+      } else if (parsed.data.riderUid) {
+        const riderRows = await db
+          .select()
+          .from(riders)
+          .where(eq(riders.uid, parsed.data.riderUid))
+          .limit(1);
+        if (riderRows.length === 0) {
+          return res.status(404).json({ error: 'Selected rider not found' });
+        }
+        nextRiderUid = riderRows[0].uid;
+        nextRiderName = riderRows[0].fullName;
+        assignedRiderPhone = riderRows[0].phone;
+      }
+
+      const shouldMoveToAssigned =
+        Boolean(nextRiderUid) &&
+        ['confirmed', 'accepted', 'preparing', 'ready'].includes(order.status);
+      const nextStatus: OrderStatus = shouldMoveToAssigned
+        ? 'rider_assigned'
+        : (order.status as OrderStatus);
+
+      const updated = await db
+        .update(orders)
+        .set({
+          riderUid: nextRiderUid,
+          riderName: nextRiderName,
+          status: nextStatus,
+          deliveryMode: nextRiderUid ? 'platform' : order.deliveryMode,
+          deliveryProvider: nextRiderUid ? 'Foodora Rider' : order.deliveryProvider,
+          updatedAt: new Date(),
+        })
+        .where(eq(orders.id, order.id))
+        .returning();
+
+      const statusNote =
+        parsed.data.note?.trim() ||
+        (nextRiderName
+          ? `Rider ${nextRiderName} assigned by ${order.restaurantName}`
+          : `Rider unassigned by ${order.restaurantName}`);
+
+      await db.insert(orderStatusHistory).values({
+        orderId: order.id,
+        status: nextStatus,
+        note: statusNote,
+        actorUid: req.user!.uid,
+      });
+
+      await db.insert(notifications).values({
+        recipientUid: order.customerUid,
+        roleTarget: 'customer',
+        title: nextRiderName
+          ? `Rider Assigned · ${order.orderNumber}`
+          : `Order Updated · ${order.orderNumber}`,
+        message: nextRiderName
+          ? `${nextRiderName} is assigned to pick up your order from ${order.restaurantName}.`
+          : statusNote,
+        type: 'order',
+        relatedOrderId: order.id,
+      });
+
+      if (nextRiderUid) {
+        await db.insert(notifications).values({
+          recipientUid: nextRiderUid,
+          roleTarget: 'rider',
+          title: `Delivery Assigned · ${order.orderNumber}`,
+          message: `Pickup at ${order.restaurantName} → Dropoff ${order.deliveryArea}`,
+          type: 'order',
+          relatedOrderId: order.id,
+        });
+      }
+
+      const recipientEmail = await resolveCustomerEmailForOrder(
+        updated[0].customerEmail,
+        updated[0].customerUid
+      );
+      if (recipientEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: updated[0].id,
+          orderNumber: updated[0].orderNumber,
+          trackingToken: updated[0].trackingToken,
+          customerName: updated[0].customerName,
+          customerEmail: recipientEmail,
+          restaurantName: updated[0].restaurantName,
+          deliveryArea: updated[0].deliveryArea,
+          deliveryAddress: updated[0].deliveryAddress,
+          subtotal: updated[0].subtotal,
+          discountAmount: updated[0].discountAmount,
+          couponCode: updated[0].couponCode,
+          deliveryFee: updated[0].deliveryFee,
+          serviceFee: updated[0].serviceFee,
+          taxAmount: updated[0].taxAmount,
+          totalAmount: updated[0].totalAmount,
+          paymentMethod: updated[0].paymentMethod,
+          paymentStatus: updated[0].paymentStatus,
+          status: updated[0].status,
+          statusEvent: updated[0].status,
+          statusNote,
+          riderName: updated[0].riderName,
+          riderPhone: assignedRiderPhone || null,
+          etaMinutes: updated[0].estimatedMinutes,
+          createdAt: updated[0].createdAt,
+          items: updated[0].itemsSnapshotJson,
+        }).catch(() => null);
+      }
+
+      broadcastOrderEvent('order:updated', {
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        restaurantId: updated[0].restaurantId,
+        restaurantName: updated[0].restaurantName,
+        restaurantOwnerUid: rest.ownerUid,
+        customerUid: updated[0].customerUid,
+        customerName: updated[0].customerName,
+        riderUid: updated[0].riderUid,
+        riderName: updated[0].riderName,
+        status: updated[0].status,
+        deliveryMode: updated[0].deliveryMode,
+        deliveryArea: updated[0].deliveryArea,
+        totalAmount: updated[0].totalAmount,
+      });
+      broadcastNotificationEvent({
+        recipientUid: order.customerUid,
+        roleTarget: 'customer',
+        title: `Order ${order.orderNumber}: ${updated[0].status.replace(/_/g, ' ')}`,
+        message: statusNote,
+        type: 'order',
+        relatedOrderId: order.id,
+      });
+      if (nextRiderUid) {
+        broadcastNotificationEvent({
+          recipientUid: nextRiderUid,
+          roleTarget: 'rider',
+          title: `New Delivery · ${order.orderNumber}`,
+          message: `Pickup from ${order.restaurantName} (${order.deliveryArea})`,
+          type: 'order',
+          relatedOrderId: order.id,
+        });
+      }
+
+      res.json({ order: updated[0] });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to assign rider' });
+    }
+  }
+);
+
+// ---------- Restaurant Rider Job Board & Applications ----------
+
+app.get('/api/rider-jobs', async (_req, res) => {
+  try {
+    const jobs = await db
+      .select({
+        id: riderJobs.id,
+        restaurantId: riderJobs.restaurantId,
+        restaurantName: riderJobs.restaurantName,
+        ownerUid: riderJobs.ownerUid,
+        title: riderJobs.title,
+        titleBn: riderJobs.titleBn,
+        zone: riderJobs.zone,
+        vehicleType: riderJobs.vehicleType,
+        salaryRange: riderJobs.salaryRange,
+        shiftHours: riderJobs.shiftHours,
+        vacancies: riderJobs.vacancies,
+        description: riderJobs.description,
+        isActive: riderJobs.isActive,
+        createdAt: riderJobs.createdAt,
+        updatedAt: riderJobs.updatedAt,
+      })
+      .from(riderJobs)
+      .innerJoin(restaurants, eq(riderJobs.restaurantId, restaurants.id))
+      .where(and(eq(riderJobs.isActive, true), eq(restaurants.status, 'approved')))
+      .orderBy(desc(riderJobs.createdAt));
+
+    res.json({ jobs });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load rider jobs' });
+  }
+});
+
+app.post('/api/rider-jobs/:id/apply', optionalAuth, async (req: AuthRequest, res) => {
+  const jobId = Number(req.params.id);
+  const schema = z.object({
+    fullName: z.string().trim().min(2).max(100),
+    phone: z.string().trim().min(6).max(30),
+    email: z.string().trim().email(),
+    vehicleType: z.string().trim().min(2).max(50).default('Motorbike'),
+    zone: z.string().trim().min(2).max(120),
+    nidNumber: z.string().trim().max(50).optional().default(''),
+    experienceNote: z.string().trim().max(400).optional().default(''),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!Number.isInteger(jobId) || !parsed.success) {
+    return res.status(400).json({
+      error: parsed.success ? 'Invalid job ID' : parsed.error.issues[0]?.message || 'Invalid application',
+    });
+  }
+
+  try {
+    const jobRows = await db.select().from(riderJobs).where(eq(riderJobs.id, jobId)).limit(1);
+    if (jobRows.length === 0 || !jobRows[0].isActive) {
+      return res.status(404).json({ error: 'This rider job post is no longer open.' });
+    }
+    const job = jobRows[0];
+
+    const inserted = await db
+      .insert(riderJobApplications)
+      .values({
+        jobId: job.id,
+        restaurantId: job.restaurantId,
+        applicantUid: req.user?.uid || '',
+        fullName: parsed.data.fullName,
+        phone: parsed.data.phone,
+        email: parsed.data.email.toLowerCase(),
+        vehicleType: parsed.data.vehicleType,
+        zone: parsed.data.zone,
+        nidNumber: parsed.data.nidNumber,
+        experienceNote: parsed.data.experienceNote,
+        status: 'pending',
+      })
+      .returning();
+
+    await db.insert(notifications).values({
+      recipientUid: job.ownerUid,
+      roleTarget: 'restaurant_owner',
+      title: `New Rider Applicant · ${job.restaurantName}`,
+      message: `${parsed.data.fullName} (${parsed.data.vehicleType}) applied for "${job.title}".`,
+      type: 'system',
+    });
+
+    broadcastNotificationEvent({
+      recipientUid: job.ownerUid,
+      roleTarget: 'restaurant_owner',
+      title: `New Rider Applicant · ${job.restaurantName}`,
+      message: `${parsed.data.fullName} applied for ${job.title}`,
+      type: 'system',
+    });
+
+    res.status(201).json({ application: inserted[0] });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to submit rider application' });
+  }
+});
+
+app.get(
+  '/api/vendor/rider-jobs',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    try {
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      const reqRestId = Number(req.query.restaurantId);
+      const owned = isAdmin
+        ? await db.select().from(restaurants)
+        : await db.select().from(restaurants).where(eq(restaurants.ownerUid, req.user!.uid));
+
+      let targetIds = owned.map((r) => r.id);
+      if (Number.isInteger(reqRestId) && reqRestId > 0) {
+        if (!isAdmin && !targetIds.includes(reqRestId)) {
+          return res.status(403).json({ error: 'Forbidden' });
+        }
+        targetIds = [reqRestId];
+      }
+
+      if (targetIds.length === 0) {
+        return res.json({ jobs: [], applications: [] });
+      }
+
+      const [jobs, applications] = await Promise.all([
+        db
+          .select()
+          .from(riderJobs)
+          .where(inArray(riderJobs.restaurantId, targetIds))
+          .orderBy(desc(riderJobs.createdAt)),
+        db
+          .select()
+          .from(riderJobApplications)
+          .where(inArray(riderJobApplications.restaurantId, targetIds))
+          .orderBy(desc(riderJobApplications.createdAt)),
+      ]);
+
+      res.json({ jobs, applications });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to load restaurant rider jobs' });
+    }
+  }
+);
+
+app.post(
+  '/api/vendor/rider-jobs',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const check = validateRiderJobPayload(req.body || {});
+    if (check.valid === false) {
+      return res.status(400).json({ error: check.reason });
+    }
+
+    try {
+      const restRows = await db
+        .select()
+        .from(restaurants)
+        .where(eq(restaurants.id, check.data.restaurantId))
+        .limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
+      const rest = restRows[0];
+
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      if (!isAdmin && rest.ownerUid !== req.user!.uid) {
+        return res.status(403).json({ error: 'Forbidden: Not owner of this restaurant' });
+      }
+
+      const inserted = await db
+        .insert(riderJobs)
+        .values({
+          restaurantId: rest.id,
+          restaurantName: rest.name,
+          ownerUid: rest.ownerUid,
+          title: check.data.title,
+          titleBn: check.data.titleBn,
+          zone: check.data.zone,
+          vehicleType: check.data.vehicleType,
+          salaryRange: check.data.salaryRange,
+          shiftHours: check.data.shiftHours,
+          vacancies: check.data.vacancies,
+          description: check.data.description,
+          isActive: true,
+        })
+        .returning();
+
+      res.status(201).json({ job: inserted[0] });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to publish rider job' });
+    }
+  }
+);
+
+app.patch(
+  '/api/vendor/rider-jobs/:id',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const jobId = Number(req.params.id);
+    if (!Number.isInteger(jobId)) return res.status(400).json({ error: 'Invalid job ID' });
+
+    const schema = z.object({
+      isActive: z.boolean().optional(),
+      title: z.string().trim().min(3).max(120).optional(),
+      titleBn: z.string().trim().min(2).max(120).optional(),
+      zone: z.string().trim().min(2).max(120).optional(),
+      vehicleType: z.string().trim().min(2).max(60).optional(),
+      salaryRange: z.string().trim().min(2).max(80).optional(),
+      shiftHours: z.string().trim().min(2).max(80).optional(),
+      vacancies: z.number().int().min(1).max(100).optional(),
+      description: z.string().max(600).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid job update' });
+
+    try {
+      const rows = await db.select().from(riderJobs).where(eq(riderJobs.id, jobId)).limit(1);
+      if (rows.length === 0) return res.status(404).json({ error: 'Rider job not found' });
+
+      const restRows = await db
+        .select()
+        .from(restaurants)
+        .where(eq(restaurants.id, rows[0].restaurantId))
+        .limit(1);
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      if (!isAdmin && restRows[0]?.ownerUid !== req.user!.uid) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const d = parsed.data;
+      const updated = await db
+        .update(riderJobs)
+        .set({
+          isActive: d.isActive ?? rows[0].isActive,
+          title: d.title ?? rows[0].title,
+          titleBn: d.titleBn ?? rows[0].titleBn,
+          zone: d.zone ?? rows[0].zone,
+          vehicleType: d.vehicleType ?? rows[0].vehicleType,
+          salaryRange: d.salaryRange ?? rows[0].salaryRange,
+          shiftHours: d.shiftHours ?? rows[0].shiftHours,
+          vacancies: d.vacancies ?? rows[0].vacancies,
+          description: d.description ?? rows[0].description,
+          updatedAt: new Date(),
+        })
+        .where(eq(riderJobs.id, jobId))
+        .returning();
+
+      res.json({ job: updated[0] });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to update rider job' });
+    }
+  }
+);
+
+app.delete(
+  '/api/vendor/rider-jobs/:id',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const jobId = Number(req.params.id);
+    if (!Number.isInteger(jobId)) return res.status(400).json({ error: 'Invalid job ID' });
+
+    try {
+      const rows = await db.select().from(riderJobs).where(eq(riderJobs.id, jobId)).limit(1);
+      if (rows.length === 0) return res.status(404).json({ error: 'Rider job not found' });
+
+      const restRows = await db
+        .select()
+        .from(restaurants)
+        .where(eq(restaurants.id, rows[0].restaurantId))
+        .limit(1);
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      if (!isAdmin && restRows[0]?.ownerUid !== req.user!.uid) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      await db.delete(riderJobs).where(eq(riderJobs.id, jobId));
+      res.json({ deleted: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to delete rider job' });
+    }
+  }
+);
+
+app.patch(
+  '/api/vendor/rider-applications/:id',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const appId = Number(req.params.id);
+    const schema = z.object({
+      status: z.enum(['pending', 'hired', 'rejected']),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!Number.isInteger(appId) || !parsed.success) {
+      return res.status(400).json({ error: 'Invalid rider application update' });
+    }
+
+    try {
+      const appRows = await db
+        .select()
+        .from(riderJobApplications)
+        .where(eq(riderJobApplications.id, appId))
+        .limit(1);
+      if (appRows.length === 0) return res.status(404).json({ error: 'Application not found' });
+      const appRow = appRows[0];
+
+      const restRows = await db
+        .select()
+        .from(restaurants)
+        .where(eq(restaurants.id, appRow.restaurantId))
+        .limit(1);
+      const rest = restRows[0];
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      if (!isAdmin && rest?.ownerUid !== req.user!.uid) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const updated = await db
+        .update(riderJobApplications)
+        .set({
+          status: parsed.data.status,
+          updatedAt: new Date(),
+        })
+        .where(eq(riderJobApplications.id, appId))
+        .returning();
+
+      if (parsed.data.status === 'hired') {
+        const emailLower = appRow.email.trim().toLowerCase();
+        const existingUsers = await db
+          .select()
+          .from(users)
+          .where(sql`lower(${users.email}) = ${emailLower}`)
+          .limit(1);
+
+        let riderUid = appRow.applicantUid?.trim() || existingUsers[0]?.uid || '';
+        if (!riderUid) {
+          riderUid = `rdr-${crypto.randomBytes(6).toString('hex')}`;
+        }
+
+        if (existingUsers.length === 0) {
+          await db.insert(users).values({
+            uid: riderUid,
+            email: emailLower,
+            fullName: appRow.fullName,
+            phone: appRow.phone,
+            role: 'rider',
+          });
+        } else if (existingUsers[0].role === 'customer') {
+          await db
+            .update(users)
+            .set({ role: 'rider', fullName: appRow.fullName, phone: appRow.phone })
+            .where(eq(users.uid, existingUsers[0].uid));
+        }
+
+        await db
+          .insert(riders)
+          .values({
+            uid: riderUid,
+            fullName: appRow.fullName,
+            phone: appRow.phone,
+            email: emailLower,
+            vehicleType: appRow.vehicleType,
+            zone: appRow.zone,
+            nidNumber: appRow.nidNumber || '',
+            currentLat: rest?.lat ?? 23.7949,
+            currentLng: rest?.lng ?? 90.4043,
+            isAvailable: true,
+            status: 'approved',
+          })
+          .onConflictDoUpdate({
+            target: riders.uid,
+            set: {
+              fullName: appRow.fullName,
+              phone: appRow.phone,
+              vehicleType: appRow.vehicleType,
+              zone: appRow.zone,
+              isAvailable: true,
+              status: 'approved',
+            },
+          });
+
+        await db.insert(notifications).values({
+          recipientUid: riderUid,
+          roleTarget: 'rider',
+          title: `Hired by ${rest?.name || 'Restaurant'}!`,
+          message: `You are now an approved rider for ${rest?.name || 'Foodora BD'}. Open Rider Portal to start deliveries.`,
+          type: 'system',
+        });
+
+        broadcastNotificationEvent({
+          recipientUid: riderUid,
+          roleTarget: 'rider',
+          title: `Rider Application Hired · ${rest?.name || 'Foodora BD'}`,
+          message: `You have been hired as a delivery rider!`,
+          type: 'system',
+        });
+      }
+
+      res.json({ application: updated[0] });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to update rider application' });
+    }
+  }
+);
+
+// ---------- Vendor ↔ Admin Live Messaging ----------
+
+app.get(
+  '/api/messages/vendor-admin',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    try {
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      const reqRestId = Number(req.query.restaurantId);
+
+      const accessibleRestaurants = isAdmin
+        ? await db.select().from(restaurants).orderBy(asc(restaurants.id))
+        : await db
+            .select()
+            .from(restaurants)
+            .where(eq(restaurants.ownerUid, req.user!.uid))
+            .orderBy(asc(restaurants.id));
+
+      const allowedIds = accessibleRestaurants.map((r) => r.id);
+      if (Number.isInteger(reqRestId) && reqRestId > 0) {
+        if (!isAdmin && !allowedIds.includes(reqRestId)) {
+          return res.status(403).json({ error: 'Forbidden' });
+        }
+      }
+
+      const queryIds =
+        Number.isInteger(reqRestId) && reqRestId > 0 ? [reqRestId] : allowedIds;
+
+      const messages =
+        queryIds.length > 0
+          ? await db
+              .select()
+              .from(vendorAdminMessages)
+              .where(inArray(vendorAdminMessages.restaurantId, queryIds))
+              .orderBy(asc(vendorAdminMessages.createdAt))
+          : [];
+
+      const threadMap = new Map<
+        number,
+        {
+          restaurantId: number;
+          restaurantName: string;
+          ownerUid: string;
+          lastMessage: string;
+          lastSenderRole: string;
+          lastAt: string;
+          unreadForAdmin: number;
+          unreadForVendor: number;
+        }
+      >();
+
+      for (const r of accessibleRestaurants) {
+        threadMap.set(r.id, {
+          restaurantId: r.id,
+          restaurantName: r.name,
+          ownerUid: r.ownerUid,
+          lastMessage: '',
+          lastSenderRole: '',
+          lastAt: '',
+          unreadForAdmin: 0,
+          unreadForVendor: 0,
+        });
+      }
+
+      for (const msg of messages) {
+        const cur = threadMap.get(msg.restaurantId) || {
+          restaurantId: msg.restaurantId,
+          restaurantName: msg.restaurantName,
+          ownerUid: msg.ownerUid,
+          lastMessage: '',
+          lastSenderRole: '',
+          lastAt: '',
+          unreadForAdmin: 0,
+          unreadForVendor: 0,
+        };
+        cur.lastMessage = msg.message;
+        cur.lastSenderRole = msg.senderRole;
+        cur.lastAt = new Date(msg.createdAt).toISOString();
+        if (!msg.isReadByAdmin) cur.unreadForAdmin += 1;
+        if (!msg.isReadByVendor) cur.unreadForVendor += 1;
+        threadMap.set(msg.restaurantId, cur);
+      }
+
+      const threads = Array.from(threadMap.values()).sort((a, b) => {
+        if (a.lastAt && b.lastAt) return b.lastAt.localeCompare(a.lastAt);
+        if (a.lastAt) return -1;
+        if (b.lastAt) return 1;
+        return a.restaurantId - b.restaurantId;
+      });
+
+      res.json({ messages, threads });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to load messages' });
+    }
+  }
+);
+
+app.post(
+  '/api/messages/vendor-admin',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      restaurantId: z.number().int().positive(),
+      message: z.string().trim().min(1, 'Message cannot be empty').max(1200),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid message' });
+    }
+
+    try {
+      const restRows = await db
+        .select()
+        .from(restaurants)
+        .where(eq(restaurants.id, parsed.data.restaurantId))
+        .limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
+      const rest = restRows[0];
+
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      if (!isAdmin && rest.ownerUid !== req.user!.uid) {
+        return res.status(403).json({ error: 'Forbidden: Not owner of this restaurant' });
+      }
+
+      const inserted = await db
+        .insert(vendorAdminMessages)
+        .values({
+          restaurantId: rest.id,
+          restaurantName: rest.name,
+          ownerUid: rest.ownerUid,
+          senderUid: req.user!.uid,
+          senderName: req.user!.fullName,
+          senderRole: req.user!.role,
+          message: parsed.data.message,
+          isReadByAdmin: isAdmin,
+          isReadByVendor: !isAdmin,
+        })
+        .returning();
+
+      const saved = inserted[0];
+      if (isAdmin) {
+        await db.insert(notifications).values({
+          recipientUid: rest.ownerUid,
+          roleTarget: 'restaurant_owner',
+          title: `Message from Admin · ${rest.name}`,
+          message: parsed.data.message.slice(0, 140),
+          type: 'system',
+        });
+        broadcastNotificationEvent({
+          recipientUid: rest.ownerUid,
+          roleTarget: 'restaurant_owner',
+          title: `Message from Admin · ${rest.name}`,
+          message: parsed.data.message.slice(0, 140),
+          type: 'system',
+        });
+      } else {
+        await db.insert(notifications).values({
+          recipientUid: 'demo-admin-uid',
+          roleTarget: 'super_admin',
+          title: `Vendor Message · ${rest.name}`,
+          message: parsed.data.message.slice(0, 140),
+          type: 'system',
+        });
+        broadcastNotificationEvent({
+          recipientUid: 'role-super_admin',
+          roleTarget: 'super_admin',
+          title: `Vendor Message · ${rest.name}`,
+          message: parsed.data.message.slice(0, 140),
+          type: 'system',
+        });
+      }
+
+      broadcastVendorAdminMessage({
+        id: saved.id,
+        restaurantId: saved.restaurantId,
+        restaurantName: saved.restaurantName,
+        ownerUid: saved.ownerUid,
+        senderUid: saved.senderUid,
+        senderName: saved.senderName,
+        senderRole: saved.senderRole,
+        message: saved.message,
+        createdAt: new Date(saved.createdAt).toISOString(),
+      });
+
+      res.status(201).json({ message: saved });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to send message' });
+    }
+  }
+);
+
+app.patch(
+  '/api/messages/vendor-admin/read',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      restaurantId: z.number().int().positive(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid restaurantId' });
+
+    try {
+      const restRows = await db
+        .select()
+        .from(restaurants)
+        .where(eq(restaurants.id, parsed.data.restaurantId))
+        .limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
+
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      if (!isAdmin && restRows[0].ownerUid !== req.user!.uid) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      if (isAdmin) {
+        await db
+          .update(vendorAdminMessages)
+          .set({ isReadByAdmin: true })
+          .where(eq(vendorAdminMessages.restaurantId, parsed.data.restaurantId));
+      } else {
+        await db
+          .update(vendorAdminMessages)
+          .set({ isReadByVendor: true })
+          .where(eq(vendorAdminMessages.restaurantId, parsed.data.restaurantId));
+      }
+
+      res.json({ ok: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to mark messages read' });
     }
   }
 );
@@ -5626,7 +6564,7 @@ app.post('/api/notifications/:id/read', requireAuth, async (req: AuthRequest, re
   res.json({ ok: true });
 });
 
-// ---------- Bilingual AI Help Assistant (Bangla & English via Gemini) ----------
+// ---------- Bilingual AI Help Assistant (Multi-Provider: Gemini, ChatGPT/OpenAI, Groq, DeepSeek, Claude, Custom) ----------
 
 function getGeminiHelpClient(): GoogleGenAI | null {
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
@@ -5645,6 +6583,7 @@ const aiHelpRequestSchema = z.object({
   message: z.string().trim().min(1, 'Please enter a question.').max(1500),
   langPreference: z.enum(['auto', 'bn', 'en']).optional().default('auto'),
   uiLang: z.enum(['en', 'bn']).optional().default('en'),
+  providerCode: z.string().trim().max(32).optional(),
   history: z
     .array(
       z.object({
@@ -5712,12 +6651,404 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 }
 
+function resolveDefaultBaseUrlForAiType(providerType: string): string {
+  if (providerType === 'openai') return 'https://api.openai.com/v1';
+  if (providerType === 'groq') return 'https://api.groq.com/openai/v1';
+  if (providerType === 'deepseek') return 'https://api.deepseek.com/v1';
+  if (providerType === 'anthropic') return 'https://api.anthropic.com';
+  return '';
+}
+
+async function callExternalAiProvider(options: {
+  providerType: string;
+  model: string;
+  apiBaseUrl: string;
+  apiKey: string;
+  systemInstruction: string;
+  history: Array<{ role: 'user' | 'model'; text: string }>;
+  message: string;
+}): Promise<string> {
+  const baseUrl = (options.apiBaseUrl || resolveDefaultBaseUrlForAiType(options.providerType))
+    .trim()
+    .replace(/\/+$/, '');
+  if (!isValidExternalAiBaseUrl(baseUrl)) {
+    const err = new Error('Invalid external AI API base URL (HTTPS required).');
+    (err as Error & { status?: number }).status = 400;
+    throw err;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 14000);
+  try {
+    if (options.providerType === 'anthropic') {
+      const res = await fetch(`${baseUrl}/v1/messages`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': options.apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: options.model,
+          max_tokens: 700,
+          system: options.systemInstruction,
+          messages: [
+            ...options.history.slice(-8).map((h) => ({
+              role: h.role === 'model' ? 'assistant' : 'user',
+              content: h.text,
+            })),
+            { role: 'user', content: options.message },
+          ],
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as {
+        content?: Array<{ text?: string }>;
+        error?: { message?: string };
+      };
+      if (!res.ok) {
+        const err = new Error(json?.error?.message || `Anthropic API failed (${res.status})`);
+        (err as Error & { status?: number }).status = res.status;
+        throw err;
+      }
+      const text = (json?.content?.[0]?.text || '').trim();
+      if (!text) throw new Error('Anthropic returned an empty response.');
+      return text;
+    }
+
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${options.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: options.model,
+        temperature: 0.4,
+        max_tokens: 700,
+        messages: [
+          { role: 'system', content: options.systemInstruction },
+          ...options.history.slice(-8).map((h) => ({
+            role: h.role === 'model' ? 'assistant' : 'user',
+            content: h.text,
+          })),
+          { role: 'user', content: options.message },
+        ],
+      }),
+    });
+    const json = (await res.json().catch(() => ({}))) as {
+      choices?: Array<{ message?: { content?: string } }>;
+      error?: { message?: string };
+    };
+    if (!res.ok) {
+      const err = new Error(json?.error?.message || `AI API failed (${res.status})`);
+      (err as Error & { status?: number }).status = res.status;
+      throw err;
+    }
+    const text = (json?.choices?.[0]?.message?.content || '').trim();
+    if (!text) throw new Error('AI API returned an empty response.');
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+app.get('/api/ai/providers', async (_req, res) => {
+  try {
+    const hasGeminiKey = Boolean((process.env.GEMINI_API_KEY || '').trim());
+    const rows = await ensureDefaultAiProviders();
+    res.json({
+      providers: rows
+        .map((r) => toPublicAiProviderView(r, hasGeminiKey))
+        .filter((p) => p.isActive),
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load AI providers' });
+  }
+});
+
+app.get(
+  '/api/admin/ai-providers',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (_req, res) => {
+    try {
+      const hasGeminiKey = Boolean((process.env.GEMINI_API_KEY || '').trim());
+      const rows = await ensureDefaultAiProviders();
+      res.json({
+        aiProviders: rows.map((r) => toAdminAiProviderView(r, hasGeminiKey)),
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to load admin AI providers' });
+    }
+  }
+);
+
+app.put(
+  '/api/admin/ai-providers',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      code: z.string().min(2).max(32),
+      name: z.string().trim().min(2).max(80),
+      providerType: z.enum(['gemini', 'openai', 'groq', 'deepseek', 'anthropic', 'custom_openai']),
+      model: z.string().trim().min(2).max(100),
+      apiBaseUrl: z.string().trim().max(240).optional().default(''),
+      apiKey: z.string().max(400).optional(),
+      isActive: z.boolean().default(true),
+      isDefault: z.boolean().default(false),
+      sortOrder: z.number().int().min(1).max(100).optional().default(10),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || 'Invalid AI provider configuration',
+      });
+    }
+
+    const code = normalizeAiProviderCode(parsed.data.code);
+    if (code.length < 2) {
+      return res.status(400).json({ error: 'Provider code must be at least 2 characters.' });
+    }
+
+    const resolvedBaseUrl =
+      parsed.data.providerType === 'gemini'
+        ? ''
+        : parsed.data.apiBaseUrl || resolveDefaultBaseUrlForAiType(parsed.data.providerType);
+
+    if (parsed.data.providerType !== 'gemini' && resolvedBaseUrl) {
+      if (!isValidExternalAiBaseUrl(resolvedBaseUrl)) {
+        return res.status(400).json({
+          error: 'API Base URL must be a valid public HTTPS endpoint.',
+        });
+      }
+    }
+
+    try {
+      await ensureDefaultAiProviders();
+      const existing = await db
+        .select()
+        .from(aiProviders)
+        .where(eq(aiProviders.code, code))
+        .limit(1);
+      const cur = existing[0];
+
+      let nextApiKey = '';
+      if (parsed.data.providerType !== 'gemini') {
+        const incoming = parsed.data.apiKey;
+        if (incoming === undefined) {
+          nextApiKey = cur?.apiKey || '';
+        } else {
+          const clean = incoming.trim();
+          nextApiKey = !clean || clean.startsWith('••••') ? cur?.apiKey || '' : clean;
+        }
+      }
+
+      if (parsed.data.isDefault) {
+        await db.update(aiProviders).set({ isDefault: false });
+      }
+
+      const nextValues = {
+        code,
+        name: parsed.data.name,
+        providerType: parsed.data.providerType,
+        model: parsed.data.model,
+        apiBaseUrl: resolvedBaseUrl,
+        apiKey: nextApiKey,
+        isActive: parsed.data.isActive,
+        isDefault: parsed.data.isDefault,
+        sortOrder: parsed.data.sortOrder,
+        updatedAt: new Date(),
+      };
+
+      const saved = await db
+        .insert(aiProviders)
+        .values(nextValues)
+        .onConflictDoUpdate({
+          target: aiProviders.code,
+          set: nextValues,
+        })
+        .returning();
+
+      await db.insert(auditLogs).values({
+        actorUid: req.user!.uid,
+        action: cur ? 'ai_provider_updated' : 'ai_provider_created',
+        targetType: 'ai_provider',
+        targetId: code,
+        details: JSON.stringify({
+          name: nextValues.name,
+          providerType: nextValues.providerType,
+          model: nextValues.model,
+          isActive: nextValues.isActive,
+          isDefault: nextValues.isDefault,
+        }),
+      });
+
+      const hasGeminiKey = Boolean((process.env.GEMINI_API_KEY || '').trim());
+      res.json({
+        aiProvider: toAdminAiProviderView(saved[0], hasGeminiKey),
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to save AI provider' });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/ai-providers/:code/test',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const code = normalizeAiProviderCode(String(req.params.code || ''));
+    if (!code) return res.status(400).json({ error: 'Invalid provider code' });
+
+    try {
+      await ensureDefaultAiProviders();
+      const rows = await db.select().from(aiProviders).where(eq(aiProviders.code, code)).limit(1);
+      if (rows.length === 0) return res.status(404).json({ error: 'AI provider not found' });
+      const row = rows[0];
+
+      if (row.providerType === 'gemini') {
+        const ai = getGeminiHelpClient();
+        if (!ai) {
+          return res.json({
+            ok: false,
+            message: 'GEMINI_API_KEY is missing in Settings > Secrets.',
+            model: row.model,
+          });
+        }
+        const testModel = row.model || 'gemini-4-hydrogen';
+        const resp = await withTimeout(
+          ai.models.generateContent({
+            model: testModel,
+            contents: [{ role: 'user', parts: [{ text: 'Reply strictly with: OK' }] }],
+          }),
+          8000,
+          testModel
+        );
+        return res.json({
+          ok: Boolean((resp.text || '').trim()),
+          message: `Connected cleanly to Gemini (${testModel}).`,
+          model: testModel,
+        });
+      }
+
+      if (!row.apiKey || !row.apiKey.trim()) {
+        return res.json({
+          ok: false,
+          message: `No API key saved for ${row.name}. Add an API key first.`,
+          model: row.model,
+        });
+      }
+
+      const reply = await callExternalAiProvider({
+        providerType: row.providerType,
+        model: row.model,
+        apiBaseUrl: row.apiBaseUrl || '',
+        apiKey: row.apiKey.trim(),
+        systemInstruction: 'You are a concise health check responder.',
+        history: [],
+        message: 'Reply strictly with: OK',
+      });
+
+      return res.json({
+        ok: Boolean(reply),
+        message: `Connected cleanly to ${row.name} (${row.model}).`,
+        model: row.model,
+      });
+    } catch (error: unknown) {
+      const { message } = extractReadableGeminiError(error);
+      return res.json({
+        ok: false,
+        message,
+      });
+    }
+  }
+);
+
+app.delete(
+  '/api/admin/ai-providers/:code',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const code = normalizeAiProviderCode(String(req.params.code || ''));
+    if (!code) return res.status(400).json({ error: 'Invalid provider code' });
+    if (code === 'gemini') {
+      return res.status(400).json({
+        error: 'Built-in Google Gemini provider cannot be deleted. Disable it instead.',
+      });
+    }
+
+    try {
+      await db.delete(aiProviders).where(eq(aiProviders.code, code));
+      await db.insert(auditLogs).values({
+        actorUid: req.user!.uid,
+        action: 'ai_provider_deleted',
+        targetType: 'ai_provider',
+        targetId: code,
+        details: `Deleted custom AI Help provider ${code}`,
+      });
+      res.json({ deleted: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to delete AI provider' });
+    }
+  }
+);
+
 app.post('/api/ai/help', optionalAuth, async (req: AuthRequest, res) => {
   try {
     const parsed = aiHelpRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({
         error: parsed.error.issues[0]?.message || 'Invalid AI Help request payload.',
+      });
+    }
+
+    const { message, langPreference, uiLang, providerCode, history, context } = parsed.data;
+    const systemInstruction = buildAiHelpSystemInstruction({
+      langPreference: langPreference as AiHelpLangPreference,
+      uiLang,
+      area: context?.area,
+      viewType: context?.viewType,
+      activeOrderNumber: context?.activeOrderNumber,
+    });
+
+    const allProviders = await ensureDefaultAiProviders();
+    const activeProviders = allProviders.filter((p) => p.isActive);
+    const hasGeminiKey = Boolean((process.env.GEMINI_API_KEY || '').trim());
+
+    const normalizedRequestedCode = providerCode ? normalizeAiProviderCode(providerCode) : '';
+    const chosenProvider =
+      (normalizedRequestedCode
+        ? activeProviders.find((p) => normalizeAiProviderCode(p.code) === normalizedRequestedCode)
+        : undefined) ||
+      activeProviders.find((p) => p.isDefault && toPublicAiProviderView(p, hasGeminiKey).isConfigured) ||
+      activeProviders.find((p) => toPublicAiProviderView(p, hasGeminiKey).isConfigured) ||
+      activeProviders.find((p) => p.providerType === 'gemini') ||
+      allProviders[0];
+
+    if (chosenProvider && chosenProvider.providerType !== 'gemini') {
+      if (!chosenProvider.apiKey || !chosenProvider.apiKey.trim()) {
+        return res.status(503).json({
+          error: `${chosenProvider.name} API key is not configured yet in Super Admin > Backend Control.`,
+        });
+      }
+      const reply = await callExternalAiProvider({
+        providerType: chosenProvider.providerType,
+        model: chosenProvider.model,
+        apiBaseUrl: chosenProvider.apiBaseUrl || '',
+        apiKey: chosenProvider.apiKey.trim(),
+        systemInstruction,
+        history,
+        message,
+      });
+      return res.json({
+        reply,
+        model: chosenProvider.model,
+        providerCode: chosenProvider.code,
+        providerName: chosenProvider.name,
       });
     }
 
@@ -5728,15 +7059,6 @@ app.post('/api/ai/help', optionalAuth, async (req: AuthRequest, res) => {
           'AI Help is unavailable because GEMINI_API_KEY is not configured in Settings > Secrets.',
       });
     }
-
-    const { message, langPreference, uiLang, history, context } = parsed.data;
-    const systemInstruction = buildAiHelpSystemInstruction({
-      langPreference: langPreference as AiHelpLangPreference,
-      uiLang,
-      area: context?.area,
-      viewType: context?.viewType,
-      activeOrderNumber: context?.activeOrderNumber,
-    });
 
     const contents = [
       ...history.slice(-8).map((item) => ({
@@ -5749,10 +7071,11 @@ app.post('/api/ai/help', optionalAuth, async (req: AuthRequest, res) => {
       },
     ];
 
+    const preferredGeminiModel = chosenProvider?.model?.trim() || 'gemini-4-hydrogen';
     const attempts: Array<{ model: string; thinkingLevel: ThinkingLevel; timeoutMs: number }> = [
+      { model: preferredGeminiModel, thinkingLevel: ThinkingLevel.LOW, timeoutMs: 9000 },
       { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 9000 },
-      { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW, timeoutMs: 9000 },
-      { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 10000 },
+      { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW, timeoutMs: 10000 },
     ];
 
     let reply = '';
@@ -5801,6 +7124,8 @@ app.post('/api/ai/help', optionalAuth, async (req: AuthRequest, res) => {
     return res.json({
       reply,
       model: usedModel,
+      providerCode: chosenProvider?.code || 'gemini',
+      providerName: chosenProvider?.name || 'Google Gemini',
     });
   } catch (err: unknown) {
     const { status, message } = extractReadableGeminiError(err);

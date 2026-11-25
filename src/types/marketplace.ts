@@ -53,6 +53,7 @@ export interface Restaurant {
 export interface FoodItem {
   id: number;
   restaurantId: number;
+  restaurantName?: string;
   category: string;
   name: string;
   nameBn: string;
@@ -396,5 +397,74 @@ export interface BackendStatusSummary {
     auditLogs: number;
   };
 }
+
+export interface RiderJob {
+  id: number;
+  restaurantId: number;
+  restaurantName: string;
+  ownerUid: string;
+  title: string;
+  titleBn: string;
+  zone: string;
+  vehicleType: string;
+  salaryRange: string;
+  shiftHours: string;
+  vacancies: number;
+  description: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface RiderJobApplication {
+  id: number;
+  jobId: number;
+  restaurantId: number;
+  restaurantName?: string;
+  jobTitle?: string;
+  applicantUid: string;
+  fullName: string;
+  phone: string;
+  email: string;
+  vehicleType: string;
+  zone: string;
+  nidNumber: string;
+  experienceNote: string;
+  status: 'pending' | 'hired' | 'rejected';
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface VendorAdminMessage {
+  id: number;
+  restaurantId: number;
+  restaurantName: string;
+  ownerUid: string;
+  senderUid: string;
+  senderName: string;
+  senderRole: 'restaurant_owner' | 'admin' | 'super_admin';
+  message: string;
+  isReadByAdmin: boolean;
+  isReadByVendor: boolean;
+  createdAt: string;
+}
+
+export interface PublicAiProvider {
+  code: string;
+  name: string;
+  providerType: 'gemini' | 'openai' | 'groq' | 'deepseek' | 'anthropic' | 'custom_openai';
+  model: string;
+  isActive: boolean;
+  isDefault: boolean;
+  isConfigured: boolean;
+  sortOrder: number;
+}
+
+export interface AdminAiProvider extends PublicAiProvider {
+  apiBaseUrl: string;
+  hasApiKey: boolean;
+  apiKeyPreview: string;
+}
+
 
 

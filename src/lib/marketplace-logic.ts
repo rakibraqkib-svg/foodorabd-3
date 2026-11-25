@@ -195,11 +195,11 @@ export function calculateOrderFinancials(params: OrderFinancialParams): OrderFin
 }
 
 const VALID_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  confirmed: ['accepted', 'preparing', 'cancelled'],
-  accepted: ['preparing', 'ready', 'cancelled'],
-  preparing: ['ready', 'cancelled'],
+  confirmed: ['accepted', 'preparing', 'ready', 'rider_assigned', 'cancelled'],
+  accepted: ['preparing', 'ready', 'rider_assigned', 'cancelled'],
+  preparing: ['ready', 'rider_assigned', 'cancelled'],
   ready: ['rider_assigned', 'picked_up', 'on_the_way', 'delivered', 'cancelled'],
-  rider_assigned: ['picked_up', 'on_the_way', 'cancelled'],
+  rider_assigned: ['picked_up', 'on_the_way', 'delivered', 'cancelled'],
   picked_up: ['on_the_way', 'delivered'],
   on_the_way: ['delivered'],
   delivered: [],
@@ -2196,7 +2196,7 @@ export function buildAiHelpSystemInstruction(params: {
     '- Why "This restaurant is currently unavailable for orders" appears: It means either the restaurant has "Store Open" switched OFF (isOpen = false) in Vendor/Admin Dashboard, or its status is not "approved" yet (e.g. pending/suspended). Re-enabling "Store Open" in Partner/Admin Dashboard or picking an Open restaurant resolves it immediately.',
     '- Nationwide Map & Location: Users can search any city/thana across all 64 districts of Bangladesh, enter a custom area, click anywhere on the interactive map or drag the pin to set that exact location, or press Back / click outside the map modal to return.',
     '- Live Rider Tracking & ETA: Users can click "Track Rider" in the header or look up orders via Checkout Email + Order Number to see live rider GPS coordinates, nearest standby rider, and estimated arrival time (ETA).',
-    '- Partner & Rider Portals: Restaurant owners can register, add custom cuisines/categories/areas, and integrate Partner APIs; Riders anywhere in Bangladesh can apply to join and share live GPS locations.',
+    '- Partner & Rider Portals: Restaurant owners can register, manage Orders & Dispatch (including assigning riders), toggle product stock/availability, post Rider Jobs & hire riders, message Platform Admin directly, and integrate Partner APIs; Riders anywhere in Bangladesh can apply to join or apply to restaurant rider jobs and share live GPS locations.',
     contextNotes,
   ]
     .filter(Boolean)
@@ -2779,4 +2779,270 @@ export function resolveMapPinAppearance(input: {
     secondaryBorderColor: '#000000',
   };
 }
+
+export type AiProviderType =
+  | 'gemini'
+  | 'openai'
+  | 'groq'
+  | 'deepseek'
+  | 'anthropic'
+  | 'custom_openai';
+
+export interface AiProviderRowLike {
+  id?: number;
+  code: string;
+  name: string;
+  providerType: string;
+  model: string;
+  apiBaseUrl?: string | null;
+  apiKey?: string | null;
+  isActive: boolean;
+  isDefault: boolean;
+  sortOrder?: number | null;
+}
+
+export const DEFAULT_AI_PROVIDERS: Array<{
+  code: string;
+  name: string;
+  providerType: AiProviderType;
+  model: string;
+  apiBaseUrl: string;
+  isActive: boolean;
+  isDefault: boolean;
+  sortOrder: number;
+}> = [
+  {
+    code: 'gemini',
+    name: 'Google Gemini',
+    providerType: 'gemini',
+    model: 'gemini-4-hydrogen',
+    apiBaseUrl: '',
+    isActive: true,
+    isDefault: true,
+    sortOrder: 1,
+  },
+  {
+    code: 'chatgpt',
+    name: 'ChatGPT (OpenAI)',
+    providerType: 'openai',
+    model: 'gpt-4o-mini',
+    apiBaseUrl: 'https://api.openai.com/v1',
+    isActive: false,
+    isDefault: false,
+    sortOrder: 2,
+  },
+];
+
+export const AI_PROVIDER_PRESETS: Array<{
+  code: string;
+  name: string;
+  providerType: AiProviderType;
+  model: string;
+  apiBaseUrl: string;
+}> = [
+  {
+    code: 'chatgpt',
+    name: 'ChatGPT (OpenAI)',
+    providerType: 'openai',
+    model: 'gpt-4o-mini',
+    apiBaseUrl: 'https://api.openai.com/v1',
+  },
+  {
+    code: 'groq',
+    name: 'Groq (Llama 3.3)',
+    providerType: 'groq',
+    model: 'llama-3.3-70b-versatile',
+    apiBaseUrl: 'https://api.groq.com/openai/v1',
+  },
+  {
+    code: 'deepseek',
+    name: 'DeepSeek AI',
+    providerType: 'deepseek',
+    model: 'deepseek-chat',
+    apiBaseUrl: 'https://api.deepseek.com/v1',
+  },
+  {
+    code: 'claude',
+    name: 'Anthropic Claude',
+    providerType: 'anthropic',
+    model: 'claude-3-5-haiku-latest',
+    apiBaseUrl: 'https://api.anthropic.com',
+  },
+];
+
+export function normalizeAiProviderCode(input: string): string {
+  return String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 32);
+}
+
+export function isValidExternalAiBaseUrl(rawUrl: string): boolean {
+  const clean = String(rawUrl || '').trim();
+  if (!clean) return false;
+  try {
+    const parsed = new URL(clean);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host.endsWith('.local') ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      host === '169.254.169.254'
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isAiProviderConfigured(
+  row: Pick<AiProviderRowLike, 'providerType' | 'apiKey' | 'apiBaseUrl'>,
+  hasGeminiEnvKey = false
+): boolean {
+  if (row.providerType === 'gemini') {
+    return Boolean(hasGeminiEnvKey);
+  }
+  const hasKey = Boolean(row.apiKey && row.apiKey.trim());
+  if (!hasKey) return false;
+  if (row.providerType === 'custom_openai') {
+    return isValidExternalAiBaseUrl(row.apiBaseUrl || '');
+  }
+  return true;
+}
+
+export function toPublicAiProviderView(
+  row: AiProviderRowLike,
+  hasGeminiEnvKey = false
+) {
+  const allowedTypes: AiProviderType[] = [
+    'gemini',
+    'openai',
+    'groq',
+    'deepseek',
+    'anthropic',
+    'custom_openai',
+  ];
+  const providerType = (allowedTypes.includes(row.providerType as AiProviderType)
+    ? row.providerType
+    : 'custom_openai') as AiProviderType;
+
+  return {
+    code: normalizeAiProviderCode(row.code),
+    name: row.name,
+    providerType,
+    model: row.model,
+    isActive: Boolean(row.isActive),
+    isDefault: Boolean(row.isDefault),
+    isConfigured: isAiProviderConfigured({ ...row, providerType }, hasGeminiEnvKey),
+    sortOrder: Number(row.sortOrder ?? 10),
+  };
+}
+
+export function toAdminAiProviderView(
+  row: AiProviderRowLike,
+  hasGeminiEnvKey = false
+) {
+  const pub = toPublicAiProviderView(row, hasGeminiEnvKey);
+  const cleanKey = typeof row.apiKey === 'string' ? row.apiKey.trim() : '';
+  return {
+    ...pub,
+    apiBaseUrl: row.apiBaseUrl || '',
+    hasApiKey: pub.providerType === 'gemini' ? Boolean(hasGeminiEnvKey) : Boolean(cleanKey),
+    apiKeyPreview: pub.providerType === 'gemini' ? (hasGeminiEnvKey ? 'Server Env Configured' : 'Missing Env Key') : maskSecretValue(cleanKey),
+  };
+}
+
+export function validateRiderJobPayload(input: {
+  restaurantId?: unknown;
+  title?: unknown;
+  titleBn?: unknown;
+  zone?: unknown;
+  vehicleType?: unknown;
+  salaryRange?: unknown;
+  shiftHours?: unknown;
+  vacancies?: unknown;
+  description?: unknown;
+}):
+  | {
+      valid: true;
+      data: {
+        restaurantId: number;
+        title: string;
+        titleBn: string;
+        zone: string;
+        vehicleType: string;
+        salaryRange: string;
+        shiftHours: string;
+        vacancies: number;
+        description: string;
+      };
+    }
+  | { valid: false; reason: string } {
+  const restaurantId = Number(input.restaurantId);
+  if (!Number.isInteger(restaurantId) || restaurantId <= 0) {
+    return { valid: false, reason: 'Please select a valid restaurant for the rider job.' };
+  }
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  if (title.length < 3 || title.length > 120) {
+    return { valid: false, reason: 'Job title must be between 3 and 120 characters.' };
+  }
+  const titleBn =
+    typeof input.titleBn === 'string' && input.titleBn.trim().length > 0
+      ? input.titleBn.trim()
+      : title;
+  const zone = typeof input.zone === 'string' ? input.zone.trim() : '';
+  if (zone.length < 2 || zone.length > 120) {
+    return { valid: false, reason: 'Delivery zone / area is required.' };
+  }
+  const vehicleType =
+    typeof input.vehicleType === 'string' && input.vehicleType.trim().length >= 2
+      ? input.vehicleType.trim()
+      : 'Motorbike / Bicycle';
+  const salaryRange =
+    typeof input.salaryRange === 'string' && input.salaryRange.trim().length >= 2
+      ? input.salaryRange.trim()
+      : '৳15,000 - ৳22,000 / month';
+  const shiftHours =
+    typeof input.shiftHours === 'string' && input.shiftHours.trim().length >= 2
+      ? input.shiftHours.trim()
+      : 'Full-time · 11:00 AM - 11:00 PM';
+  const vacanciesRaw = Number(input.vacancies ?? 1);
+  const vacancies = Number.isInteger(vacanciesRaw) && vacanciesRaw >= 1 && vacanciesRaw <= 100 ? vacanciesRaw : 1;
+  const description = typeof input.description === 'string' ? input.description.trim().slice(0, 600) : '';
+
+  return {
+    valid: true,
+    data: {
+      restaurantId,
+      title,
+      titleBn,
+      zone,
+      vehicleType,
+      salaryRange,
+      shiftHours,
+      vacancies,
+      description,
+    },
+  };
+}
+
+export function filterOrdersByRestaurantOwnership<T extends { restaurantId: number }>(
+  allOrders: readonly T[],
+  ownedRestaurantIds: readonly number[],
+  isAdmin: boolean
+): T[] {
+  if (isAdmin) return [...allOrders];
+  const ownedSet = new Set(ownedRestaurantIds);
+  return allOrders.filter((o) => ownedSet.has(o.restaurantId));
+}
+
 

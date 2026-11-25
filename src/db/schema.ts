@@ -357,3 +357,76 @@ export const auditLogs = pgTable('audit_logs', {
   details: text('details').default(''),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+export const riderJobs = pgTable('rider_jobs', {
+  id: serial('id').primaryKey(),
+  restaurantId: integer('restaurant_id')
+    .references(() => restaurants.id, { onDelete: 'cascade' })
+    .notNull(),
+  restaurantName: text('restaurant_name').notNull(),
+  ownerUid: text('owner_uid').notNull(),
+  title: text('title').notNull(),
+  titleBn: text('title_bn').notNull(),
+  zone: text('zone').notNull(),
+  vehicleType: text('vehicle_type').notNull().default('Motorbike / Bicycle'),
+  salaryRange: text('salary_range').notNull().default('৳15,000 - ৳22,000 / month'),
+  shiftHours: text('shift_hours').notNull().default('Full-time · 11:00 AM - 11:00 PM'),
+  vacancies: integer('vacancies').notNull().default(1),
+  description: text('description').notNull().default(''),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const riderJobApplications = pgTable('rider_job_applications', {
+  id: serial('id').primaryKey(),
+  jobId: integer('job_id')
+    .references(() => riderJobs.id, { onDelete: 'cascade' })
+    .notNull(),
+  restaurantId: integer('restaurant_id')
+    .references(() => restaurants.id, { onDelete: 'cascade' })
+    .notNull(),
+  applicantUid: text('applicant_uid').default(''),
+  fullName: text('full_name').notNull(),
+  phone: text('phone').notNull(),
+  email: text('email').notNull(),
+  vehicleType: text('vehicle_type').notNull().default('Motorbike'),
+  zone: text('zone').notNull(),
+  nidNumber: text('nid_number').default(''),
+  experienceNote: text('experience_note').default(''),
+  status: text('status').notNull().default('pending'), // pending | hired | rejected
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const vendorAdminMessages = pgTable('vendor_admin_messages', {
+  id: serial('id').primaryKey(),
+  restaurantId: integer('restaurant_id')
+    .references(() => restaurants.id, { onDelete: 'cascade' })
+    .notNull(),
+  restaurantName: text('restaurant_name').notNull(),
+  ownerUid: text('owner_uid').notNull(),
+  senderUid: text('sender_uid').notNull(),
+  senderName: text('sender_name').notNull(),
+  senderRole: text('sender_role').notNull(), // restaurant_owner | admin | super_admin
+  message: text('message').notNull(),
+  isReadByAdmin: boolean('is_read_by_admin').notNull().default(false),
+  isReadByVendor: boolean('is_read_by_vendor').notNull().default(false),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const aiProviders = pgTable('ai_providers', {
+  id: serial('id').primaryKey(),
+  code: text('code').notNull().unique(), // gemini | chatgpt | groq | deepseek | claude | custom
+  name: text('name').notNull(),
+  providerType: text('provider_type').notNull().default('openai'), // gemini | openai | groq | deepseek | anthropic | custom_openai
+  model: text('model').notNull(),
+  apiBaseUrl: text('api_base_url').default(''),
+  apiKey: text('api_key').default(''),
+  isActive: boolean('is_active').notNull().default(true),
+  isDefault: boolean('is_default').notNull().default(false),
+  sortOrder: integer('sort_order').notNull().default(10),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+

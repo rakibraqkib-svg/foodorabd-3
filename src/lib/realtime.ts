@@ -12,7 +12,8 @@ export interface ClientRealtimeMessage {
     | 'order:created'
     | 'order:updated'
     | 'rider:location'
-    | 'notification:created';
+    | 'notification:created'
+    | 'message:created';
   payload: Record<string, any>;
   ts?: number;
 }

@@ -11,7 +11,8 @@ export type RealtimeEventType =
   | 'order:created'
   | 'order:updated'
   | 'rider:location'
-  | 'notification:created';
+  | 'notification:created'
+  | 'message:created';
 
 export interface RealtimeOrderEventPayload {
   orderId: number;
@@ -316,3 +317,37 @@ export function broadcastNotificationEvent(payload: RealtimeNotificationPayload)
     }
   }
 }
+
+export interface RealtimeVendorAdminMessagePayload {
+  id: number;
+  restaurantId: number;
+  restaurantName: string;
+  ownerUid: string;
+  senderUid: string;
+  senderName: string;
+  senderRole: string;
+  message: string;
+  createdAt: string;
+}
+
+export function broadcastVendorAdminMessage(payload: RealtimeVendorAdminMessagePayload) {
+  if (clients.size === 0) return;
+  const serialized = JSON.stringify({
+    type: 'message:created',
+    payload,
+    ts: Date.now(),
+  });
+  for (const client of clients.values()) {
+    const isAdmin = client.role === 'admin' || client.role === 'super_admin';
+    const isOwner = Boolean(client.uid && client.uid === payload.ownerUid);
+    const hasRestaurant = client.restaurantIds.has(payload.restaurantId);
+    if (isAdmin || isOwner || hasRestaurant) {
+      try {
+        client.send(serialized);
+      } catch {
+        clients.delete(client.id);
+      }
+    }
+  }
+}
+

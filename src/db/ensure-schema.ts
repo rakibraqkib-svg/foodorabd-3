@@ -33,6 +33,10 @@ const EXPECTED_TABLES = [
   'notifications',
   'platform_settings',
   'audit_logs',
+  'rider_jobs',
+  'rider_job_applications',
+  'vendor_admin_messages',
+  'ai_providers',
 ] as const;
 
 async function runCreateTablesIfMissing(): Promise<void> {
@@ -458,6 +462,86 @@ async function createMissingTables(existingSet: Set<string>): Promise<void> {
         target_id TEXT NOT NULL,
         details TEXT DEFAULT '',
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+
+  if (!existingSet.has('rider_jobs')) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS rider_jobs (
+        id SERIAL PRIMARY KEY,
+        restaurant_id INTEGER NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+        restaurant_name TEXT NOT NULL,
+        owner_uid TEXT NOT NULL,
+        title TEXT NOT NULL,
+        title_bn TEXT NOT NULL,
+        zone TEXT NOT NULL,
+        vehicle_type TEXT NOT NULL DEFAULT 'Motorbike / Bicycle',
+        salary_range TEXT NOT NULL DEFAULT '৳15,000 - ৳22,000 / month',
+        shift_hours TEXT NOT NULL DEFAULT 'Full-time · 11:00 AM - 11:00 PM',
+        vacancies INTEGER NOT NULL DEFAULT 1,
+        description TEXT NOT NULL DEFAULT '',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+
+  if (!existingSet.has('rider_job_applications')) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS rider_job_applications (
+        id SERIAL PRIMARY KEY,
+        job_id INTEGER NOT NULL REFERENCES rider_jobs(id) ON DELETE CASCADE,
+        restaurant_id INTEGER NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+        applicant_uid TEXT DEFAULT '',
+        full_name TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        email TEXT NOT NULL,
+        vehicle_type TEXT NOT NULL DEFAULT 'Motorbike',
+        zone TEXT NOT NULL,
+        nid_number TEXT DEFAULT '',
+        experience_note TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+
+  if (!existingSet.has('vendor_admin_messages')) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS vendor_admin_messages (
+        id SERIAL PRIMARY KEY,
+        restaurant_id INTEGER NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+        restaurant_name TEXT NOT NULL,
+        owner_uid TEXT NOT NULL,
+        sender_uid TEXT NOT NULL,
+        sender_name TEXT NOT NULL,
+        sender_role TEXT NOT NULL,
+        message TEXT NOT NULL,
+        is_read_by_admin BOOLEAN NOT NULL DEFAULT FALSE,
+        is_read_by_vendor BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+
+  if (!existingSet.has('ai_providers')) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS ai_providers (
+        id SERIAL PRIMARY KEY,
+        code TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        provider_type TEXT NOT NULL DEFAULT 'openai',
+        model TEXT NOT NULL,
+        api_base_url TEXT DEFAULT '',
+        api_key TEXT DEFAULT '',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        is_default BOOLEAN NOT NULL DEFAULT FALSE,
+        sort_order INTEGER NOT NULL DEFAULT 10,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
     `);
   }

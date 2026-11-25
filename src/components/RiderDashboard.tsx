@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Bell,
   Bike,
+  Briefcase,
   CheckCircle2,
   LocateFixed,
   MapPin,
@@ -24,7 +25,7 @@ import {
 import { emitLocalRealtimeSignal, playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
-import type { AppUser, Lang, OrderRecord, RiderRecord } from '../types/marketplace';
+import type { AppUser, Lang, OrderRecord, RiderJob, RiderRecord } from '../types/marketplace';
 
 interface RiderDashboardProps {
   user: AppUser | null;
@@ -76,6 +77,33 @@ export function RiderDashboard({
   });
   const [registering, setRegistering] = useState(false);
   const [registerError, setRegisterError] = useState<string | null>(null);
+
+  // Open Restaurant Rider Jobs Board
+  const [riderJobs, setRiderJobs] = useState<RiderJob[]>([]);
+  const [applyingJob, setApplyingJob] = useState<RiderJob | null>(null);
+  const [jobAppFullName, setJobAppFullName] = useState(user?.isSandbox ? '' : user?.fullName || '');
+  const [jobAppPhone, setJobAppPhone] = useState('');
+  const [jobAppEmail, setJobAppEmail] = useState(user && !user.isSandbox && user.email ? user.email : '');
+  const [jobAppVehicle, setJobAppVehicle] = useState('Motorbike');
+  const [jobAppZone, setJobAppZone] = useState(BANGLADESH_AREAS[0].name);
+  const [jobAppNid, setJobAppNid] = useState('');
+  const [jobAppNote, setJobAppNote] = useState('');
+  const [submittingJobApp, setSubmittingJobApp] = useState(false);
+  const [jobAppFeedback, setJobAppFeedback] = useState<string | null>(null);
+  const [jobAppError, setJobAppError] = useState<string | null>(null);
+
+  const loadOpenJobs = useCallback(async () => {
+    try {
+      const res = await apiFetch<{ jobs: RiderJob[] }>('/api/rider-jobs');
+      setRiderJobs(res.jobs || []);
+    } catch {
+      // non-blocking
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadOpenJobs();
+  }, [loadOpenJobs]);
 
   useEffect(() => {
     setShowJobForm(initialOnboarding);
@@ -298,6 +326,38 @@ export function RiderDashboard({
       setRegisterError(err instanceof Error ? err.message : 'Rider registration failed');
     } finally {
       setRegistering(false);
+    }
+  };
+
+  const handleSubmitJobApplication = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!applyingJob) return;
+    setSubmittingJobApp(true);
+    setJobAppError(null);
+    try {
+      await apiFetch(`/api/rider-jobs/${applyingJob.id}/apply`, {
+        method: 'POST',
+        body: JSON.stringify({
+          fullName: jobAppFullName.trim(),
+          phone: jobAppPhone.trim(),
+          email: jobAppEmail.trim(),
+          vehicleType: jobAppVehicle.trim() || 'Motorbike',
+          zone: jobAppZone.trim() || applyingJob.zone,
+          nidNumber: jobAppNid.trim(),
+          experienceNote: jobAppNote.trim(),
+        }),
+      });
+      setJobAppFeedback(
+        lang === 'bn'
+          ? `${applyingJob.restaurantName}-এর রাইডার জবে আপনার আবেদন জমা হয়েছে!`
+          : `Application submitted to ${applyingJob.restaurantName}!`
+      );
+      setApplyingJob(null);
+      setJobAppNote('');
+    } catch (err: unknown) {
+      setJobAppError(err instanceof Error ? err.message : 'Could not submit application');
+    } finally {
+      setSubmittingJobApp(false);
     }
   };
 
@@ -998,6 +1058,218 @@ export function RiderDashboard({
             })}
           </section>
         </>
+      )}
+
+      {/* Open Restaurant Rider Jobs Board (Visible to All Riders & Applicants) */}
+      <section className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-[#2E3138] flex items-center gap-2">
+              <Briefcase className="w-4 h-4 text-[#E21B70]" />
+              <span>
+                {lang === 'bn'
+                  ? `রেস্টুরেন্টের উন্মুক্ত রাইডার জব (${riderJobs.length})`
+                  : `Open Restaurant Rider Jobs (${riderJobs.length})`}
+              </span>
+            </h2>
+            <p className="text-xs text-neutral-500 mt-0.5">
+              {lang === 'bn'
+                ? 'রেস্টুরেন্ট মালিকদের পোস্ট করা রাইডার চাকরিতে সরাসরি আবেদন করুন।'
+                : 'Apply directly to delivery rider positions posted by partner restaurants.'}
+            </p>
+          </div>
+          {jobAppFeedback && (
+            <div className="px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-700">
+              {jobAppFeedback}
+            </div>
+          )}
+        </div>
+
+        {riderJobs.length === 0 ? (
+          <p className="text-xs text-neutral-500 py-3">
+            {lang === 'bn'
+              ? 'এই মুহূর্তে কোনো রেস্টুরেন্ট জব পোস্ট করেনি — উপরের ফর্মে সরাসরি ফ্লিট রাইডার হিসেবে যুক্ত হতে পারেন।'
+              : 'No restaurant-specific rider jobs posted right now — you can join the platform fleet directly above.'}
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {riderJobs.map((job) => (
+              <div
+                key={job.id}
+                className="rounded-xl border border-neutral-200 p-4 flex flex-col justify-between gap-3 bg-[#FAFAFB]"
+              >
+                <div className="space-y-1.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-[11px] font-bold text-[#E21B70]">
+                      {job.restaurantName}
+                    </span>
+                    <span className="text-[11px] font-semibold text-neutral-600 tabular-nums">
+                      {job.vacancies} {lang === 'bn' ? 'জন নিয়োগ' : 'openings'}
+                    </span>
+                  </div>
+                  <h3 className="text-sm font-bold text-[#2E3138]">
+                    {lang === 'bn' ? job.titleBn : job.title}
+                  </h3>
+                  <p className="text-xs text-neutral-600">
+                    {job.zone} · {job.vehicleType}
+                  </p>
+                  <p className="text-xs font-semibold text-[#2E3138] tabular-nums">
+                    {job.salaryRange}
+                  </p>
+                  <p className="text-[11px] text-neutral-500">{job.shiftHours}</p>
+                  {job.description && (
+                    <p className="text-[11px] text-neutral-600 line-clamp-2 pt-1">
+                      {job.description}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setApplyingJob(job);
+                    setJobAppZone(job.zone || BANGLADESH_AREAS[0].name);
+                    setJobAppError(null);
+                  }}
+                  className="w-full py-2 rounded-xl bg-[#2E3138] hover:bg-[#E21B70] text-white text-xs font-semibold transition-colors"
+                >
+                  {lang === 'bn' ? 'এই জবে আবেদন করুন' : 'Apply for Rider Job'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {applyingJob && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleSubmitJobApplication}
+            className="bg-white rounded-2xl border border-neutral-200 max-w-md w-full p-5 space-y-3"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-[#2E3138]">
+                  {lang === 'bn' ? applyingJob.titleBn : applyingJob.title}
+                </h3>
+                <p className="text-xs text-[#E21B70] font-semibold">
+                  {applyingJob.restaurantName} · {applyingJob.zone}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setApplyingJob(null)}
+                aria-label="Close application modal"
+                className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2.5 text-xs">
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">Full Name</label>
+                <input
+                  required
+                  value={jobAppFullName}
+                  onChange={(e) => setJobAppFullName(e.target.value)}
+                  placeholder="Your full name"
+                  className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block font-semibold text-neutral-700 mb-1">Phone</label>
+                  <input
+                    required
+                    value={jobAppPhone}
+                    onChange={(e) => setJobAppPhone(e.target.value)}
+                    placeholder="+88017..."
+                    className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-neutral-700 mb-1">Email</label>
+                  <input
+                    required
+                    type="email"
+                    value={jobAppEmail}
+                    onChange={(e) => setJobAppEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block font-semibold text-neutral-700 mb-1">Vehicle</label>
+                  <input
+                    required
+                    value={jobAppVehicle}
+                    onChange={(e) => setJobAppVehicle(e.target.value)}
+                    placeholder="Motorbike / Bicycle"
+                    className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-neutral-700 mb-1">Area / Zone</label>
+                  <input
+                    required
+                    value={jobAppZone}
+                    onChange={(e) => setJobAppZone(e.target.value)}
+                    placeholder="Gulshan, Dhaka"
+                    className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">
+                  NID Number (Optional)
+                </label>
+                <input
+                  value={jobAppNid}
+                  onChange={(e) => setJobAppNid(e.target.value)}
+                  placeholder="National ID"
+                  className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">
+                  Experience / Note
+                </label>
+                <textarea
+                  rows={2}
+                  value={jobAppNote}
+                  onChange={(e) => setJobAppNote(e.target.value)}
+                  placeholder="Years of delivery experience or preferred shift..."
+                  className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm"
+                />
+              </div>
+            </div>
+
+            {jobAppError && (
+              <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+                {jobAppError}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setApplyingJob(null)}
+                className="px-4 py-2 rounded-xl border border-neutral-200 text-xs font-semibold text-neutral-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={submittingJobApp}
+                className="px-4 py-2 rounded-xl bg-[#E21B70] text-white text-xs font-semibold disabled:opacity-50"
+              >
+                {submittingJobApp ? 'Submitting...' : 'Submit Application'}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
     </div>
   );

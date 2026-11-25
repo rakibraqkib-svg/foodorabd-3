@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   Bot,
+  Cpu,
   Languages,
   Send,
   Sparkles,
@@ -10,12 +11,13 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import type { AiHelpLangPreference } from '../lib/marketplace-logic';
-import type { Lang } from '../types/marketplace';
+import type { Lang, PublicAiProvider } from '../types/marketplace';
 
 interface AiChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  providerLabel?: string;
 }
 
 interface AiHelpWidgetProps {
@@ -38,9 +40,9 @@ const STARTER_PROMPTS = [
     labelBn: 'রাইডার কোথায় আছে ও সময় কীভাবে দেখবো?',
   },
   {
-    id: 'map',
-    labelEn: 'How to set custom delivery area on map?',
-    labelBn: 'ম্যাপে কাস্টম এলাকা কীভাবে সেট করবো?',
+    id: 'vendor',
+    labelEn: 'How do restaurant owners dispatch riders & edit stock?',
+    labelBn: 'রেস্টুরেন্ট ওনার কীভাবে রাইডার অ্যাসাইন ও স্টক এডিট করবেন?',
   },
   {
     id: 'partner',
@@ -58,11 +60,39 @@ export function AiHelpWidget({
 }: AiHelpWidgetProps) {
   const [open, setOpen] = useState(false);
   const [langPref, setLangPref] = useState<AiHelpLangPreference>('auto');
+  const [providers, setProviders] = useState<PublicAiProvider[]>([]);
+  const [selectedProviderCode, setSelectedProviderCode] = useState<string>('gemini');
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [messages, setMessages] = useState<AiChatMessage[]>([]);
   const listEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const loadProviders = async () => {
+      try {
+        const res = await apiFetch<{ providers: PublicAiProvider[] }>('/api/ai/providers');
+        if (!active || !Array.isArray(res.providers) || res.providers.length === 0) return;
+        setProviders(res.providers);
+        const preferred =
+          res.providers.find((p) => p.isDefault && p.isConfigured) ||
+          res.providers.find((p) => p.isConfigured) ||
+          res.providers[0];
+        if (preferred) {
+          setSelectedProviderCode((prev) =>
+            res.providers.some((p) => p.code === prev) ? prev : preferred.code
+          );
+        }
+      } catch {
+        // non-blocking fallback to default Gemini
+      }
+    };
+    void loadProviders();
+    return () => {
+      active = false;
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -97,12 +127,18 @@ export function AiHelpWidget({
     setSending(true);
 
     try {
-      const res = await apiFetch<{ reply: string; model?: string }>('/api/ai/help', {
+      const res = await apiFetch<{
+        reply: string;
+        model?: string;
+        providerCode?: string;
+        providerName?: string;
+      }>('/api/ai/help', {
         method: 'POST',
         body: JSON.stringify({
           message: trimmed,
           langPreference: langPref,
           uiLang,
+          providerCode: selectedProviderCode || undefined,
           history: messages.slice(-8).map((m) => ({
             role: m.role === 'assistant' ? 'model' : 'user',
             text: m.text,
@@ -115,12 +151,17 @@ export function AiHelpWidget({
         }),
       });
 
+      const providerLabel = res.providerName
+        ? `${res.providerName}${res.model ? ` · ${res.model}` : ''}`
+        : res.model;
+
       setMessages((prev) => [
         ...prev,
         {
           id: `a-${Date.now()}`,
           role: 'assistant',
           text: res.reply,
+          providerLabel,
         },
       ]);
     } catch (err: unknown) {
@@ -142,6 +183,7 @@ export function AiHelpWidget({
   };
 
   const displayBn = langPref === 'bn' || (langPref === 'auto' && uiLang === 'bn');
+  const activeProviderObj = providers.find((p) => p.code === selectedProviderCode);
 
   return (
     <>
@@ -171,7 +213,7 @@ export function AiHelpWidget({
             data-testid="ai-help-panel"
             aria-label="Foodora BD Bilingual AI Help"
             onClick={(e) => e.stopPropagation()}
-            className="bg-white w-full sm:w-[400px] max-h-[82vh] sm:max-h-[600px] rounded-2xl border border-neutral-200 shadow-2xl flex flex-col overflow-hidden"
+            className="bg-white w-full sm:w-[410px] max-h-[84vh] sm:max-h-[620px] rounded-2xl border border-neutral-200 shadow-2xl flex flex-col overflow-hidden"
           >
             {/* Header + Bangla / English / Auto Language Selector */}
             <div
@@ -187,7 +229,11 @@ export function AiHelpWidget({
                     {displayBn ? 'Foodora AI সহায়তা' : 'Foodora AI Help'}
                   </h3>
                   <p className="text-[11px] text-white/85 truncate">
-                    {displayBn ? 'বাংলা ও ইংরেজিতে তাৎক্ষণিক সাহায্য' : 'Instant support in বাংলা & English'}
+                    {activeProviderObj
+                      ? `${activeProviderObj.name} · ${activeProviderObj.model}`
+                      : displayBn
+                      ? 'বাংলা ও ইংরেজিতে তাৎক্ষণিক সাহায্য'
+                      : 'Instant support in বাংলা & English'}
                   </p>
                 </div>
               </div>
@@ -218,38 +264,61 @@ export function AiHelpWidget({
               </div>
             </div>
 
-            {/* Language Mode Bar */}
-            <div className="px-3.5 py-2 bg-[#FAFAFB] border-b border-neutral-200 flex items-center justify-between gap-2 text-[11px] shrink-0">
-              <span className="inline-flex items-center gap-1 font-semibold text-neutral-600">
-                <Languages className="w-3.5 h-3.5 text-[#E21B70]" />
-                <span>{displayBn ? 'উত্তরের ভাষা:' : 'Reply Language:'}</span>
-              </span>
-              <div
-                role="group"
-                aria-label="AI Help reply language"
-                className="inline-flex rounded-lg border border-neutral-200 bg-white p-0.5"
-              >
-                {(
-                  [
-                    { key: 'auto', label: 'Auto' },
-                    { key: 'bn', label: 'বাংলা' },
-                    { key: 'en', label: 'EN' },
-                  ] as const
-                ).map((opt) => (
-                  <button
-                    key={opt.key}
-                    type="button"
-                    onClick={() => setLangPref(opt.key)}
-                    className={`px-2 py-0.5 rounded-md font-bold transition-colors ${
-                      langPref === opt.key
-                        ? 'bg-[#E21B70] text-white'
-                        : 'text-neutral-600 hover:text-[#2E3138]'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+            {/* Language Mode & AI Model Selector Bar */}
+            <div className="px-3.5 py-2 bg-[#FAFAFB] border-b border-neutral-200 space-y-1.5 text-[11px] shrink-0">
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1 font-semibold text-neutral-600">
+                  <Languages className="w-3.5 h-3.5 text-[#E21B70]" />
+                  <span>{displayBn ? 'উত্তরের ভাষা:' : 'Reply Language:'}</span>
+                </span>
+                <div
+                  role="group"
+                  aria-label="AI Help reply language"
+                  className="inline-flex rounded-lg border border-neutral-200 bg-white p-0.5"
+                >
+                  {(
+                    [
+                      { key: 'auto', label: 'Auto' },
+                      { key: 'bn', label: 'বাংলা' },
+                      { key: 'en', label: 'EN' },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      onClick={() => setLangPref(opt.key)}
+                      className={`px-2 py-0.5 rounded-md font-bold transition-colors ${
+                        langPref === opt.key
+                          ? 'bg-[#E21B70] text-white'
+                          : 'text-neutral-600 hover:text-[#2E3138]'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
               </div>
+
+              {providers.length > 0 && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1 font-semibold text-neutral-600 shrink-0">
+                    <Cpu className="w-3.5 h-3.5 text-[#E21B70]" />
+                    <span>{displayBn ? 'AI ইঞ্জিন:' : 'AI Engine:'}</span>
+                  </span>
+                  <select
+                    aria-label="Select AI Help engine"
+                    value={selectedProviderCode}
+                    onChange={(e) => setSelectedProviderCode(e.target.value)}
+                    className="flex-1 min-w-0 max-w-[240px] px-2 py-1 rounded-lg border border-neutral-200 bg-white text-[11px] font-semibold text-[#2E3138]"
+                  >
+                    {providers.map((p) => (
+                      <option key={p.code} value={p.code}>
+                        {p.name} ({p.model}){!p.isConfigured ? ' — Needs Key' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
 
             {/* Messages Area */}
@@ -264,8 +333,8 @@ export function AiHelpWidget({
                     </p>
                     <p className="text-[11px] text-neutral-500">
                       {displayBn
-                        ? 'অর্ডার, রেস্টুরেন্ট বন্ধ থাকা, লাইভ রাইডার ট্র্যাকিং, ম্যাপ, পেমেন্ট বা পার্টনার অ্যাকাউন্ট নিয়ে বাংলা বা ইংরেজিতে যেকোনো প্রশ্ন করুন।'
-                        : 'Ask in Bangla or English about ordering, unavailable restaurants, live rider GPS/ETA, map locations, payments, or partner/rider portals.'}
+                        ? 'অর্ডার, রেস্টুরেন্ট ডিসপ্যাচ, রাইডার জব, স্টক আপডেট বা পেমেন্ট নিয়ে বাংলা বা ইংরেজিতে যেকোনো প্রশ্ন করুন।'
+                        : 'Ask in Bangla or English about ordering, restaurant dispatch, rider jobs, stock edits, or partner/admin portals.'}
                     </p>
                   </div>
 
@@ -303,7 +372,12 @@ export function AiHelpWidget({
                           : 'bg-white border border-neutral-200 text-[#2E3138] rounded-bl-sm shadow-2xs'
                       }`}
                     >
-                      {m.text}
+                      <p>{m.text}</p>
+                      {m.providerLabel && (
+                        <p className="mt-1.5 pt-1 border-t border-neutral-100 text-[10px] text-neutral-400">
+                          {m.providerLabel}
+                        </p>
+                      )}
                     </div>
                   </div>
                 ))

@@ -4,9 +4,11 @@ import {
   ArrowLeft,
   Bell,
   Bike,
+  Bot,
   Check,
   CheckCircle2,
   Copy,
+  Cpu,
   CreditCard,
   Database,
   Download,
@@ -19,6 +21,7 @@ import {
   LocateFixed,
   Mail,
   MapPin,
+  MessageSquare,
   Package,
   Pencil,
   Plus,
@@ -52,6 +55,8 @@ import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
 import {
   ADMIN_PIN_DEFAULT_EMAIL,
+  AI_PROVIDER_PRESETS,
+  type AiProviderType,
   canActorModifyUserAccount,
   CUISINE_PRESET_OPTIONS,
   detectOrderBatchChanges,
@@ -68,6 +73,7 @@ import {
 } from '../lib/marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from '../lib/storefront-config';
 import type {
+  AdminAiProvider,
   AdminEmailSettingsView,
   AdminPaymentGateway,
   AppUser,
@@ -84,6 +90,7 @@ import type {
   Restaurant,
   RiderRecord,
   StorefrontConfig,
+  VendorAdminMessage,
 } from '../types/marketplace';
 
 interface AdminUserRow {
@@ -161,6 +168,30 @@ interface GatewayFormState {
   sortOrder: string;
 }
 
+interface AiProviderFormState {
+  isNew: boolean;
+  code: string;
+  name: string;
+  providerType: AiProviderType;
+  model: string;
+  apiBaseUrl: string;
+  apiKey: string;
+  isActive: boolean;
+  isDefault: boolean;
+  sortOrder: string;
+}
+
+interface MessageThreadSummary {
+  restaurantId: number;
+  restaurantName: string;
+  ownerUid: string;
+  lastMessage: string;
+  lastSenderRole: string;
+  lastAt: string;
+  unreadForAdmin: number;
+  unreadForVendor: number;
+}
+
 const ORDER_STATUS_OPTIONS: OrderStatus[] = [
   'confirmed',
   'accepted',
@@ -189,6 +220,7 @@ export function AdminDashboard({
     | 'products'
     | 'restaurants'
     | 'orders'
+    | 'messages'
     | 'finance'
     | 'coupons'
     | 'users'
@@ -294,6 +326,22 @@ export function AdminDashboard({
     Record<string, { ok: boolean; message: string }>
   >({});
   const [copiedWebhookCode, setCopiedWebhookCode] = useState<string | null>(null);
+
+  // Multi-AI Provider Integrations (Gemini, ChatGPT/OpenAI, Groq, DeepSeek, Claude, Custom)
+  const [aiProviders, setAiProviders] = useState<AdminAiProvider[]>([]);
+  const [aiProviderModal, setAiProviderModal] = useState<AiProviderFormState | null>(null);
+  const [savingAiProvider, setSavingAiProvider] = useState(false);
+  const [testingAiCode, setTestingAiCode] = useState<string | null>(null);
+  const [aiTestResults, setAiTestResults] = useState<
+    Record<string, { ok: boolean; message: string }>
+  >({});
+
+  // Vendor <-> Admin Messaging Inbox State
+  const [vendorMessages, setVendorMessages] = useState<VendorAdminMessage[]>([]);
+  const [messageThreads, setMessageThreads] = useState<MessageThreadSummary[]>([]);
+  const [selectedMessageRestId, setSelectedMessageRestId] = useState<number | null>(null);
+  const [adminReplyText, setAdminReplyText] = useState('');
+  const [sendingAdminReply, setSendingAdminReply] = useState(false);
 
   // Restaurant Create / Edit Modal
   const [restaurantModal, setRestaurantModal] = useState<RestaurantFormState | null>(null);
@@ -409,13 +457,32 @@ export function AdminDashboard({
       }
       if (!silent) {
         try {
-          const gwRes = await apiFetch<{ paymentGateways: AdminPaymentGateway[] }>(
-            '/api/admin/payment-gateways'
-          );
+          const [gwRes, aiRes] = await Promise.all([
+            apiFetch<{ paymentGateways: AdminPaymentGateway[] }>('/api/admin/payment-gateways'),
+            apiFetch<{ aiProviders: AdminAiProvider[] }>('/api/admin/ai-providers').catch(() => ({
+              aiProviders: [],
+            })),
+          ]);
           setPaymentGateways(gwRes.paymentGateways || []);
+          setAiProviders(aiRes.aiProviders || []);
         } catch {
           // non-blocking
         }
+      }
+      try {
+        const msgRes = await apiFetch<{
+          messages: VendorAdminMessage[];
+          threads: MessageThreadSummary[];
+        }>('/api/messages/vendor-admin');
+        setVendorMessages(msgRes.messages || []);
+        setMessageThreads(msgRes.threads || []);
+        setSelectedMessageRestId((prev) =>
+          prev && (msgRes.threads || []).some((t) => t.restaurantId === prev)
+            ? prev
+            : msgRes.threads?.[0]?.restaurantId ?? null
+        );
+      } catch {
+        // non-blocking
       }
     } catch (err) {
       console.error('Failed to load admin workspace:', err);
@@ -434,7 +501,12 @@ export function AdminDashboard({
     pollFallbackMs: 4000,
     onSync: () => loadAdmin(true),
     onEvent: (ev) => {
-      if (ev.type === 'order:created' || ev.type === 'order:updated' || ev.type === 'notification:created') {
+      if (
+        ev.type === 'order:created' ||
+        ev.type === 'order:updated' ||
+        ev.type === 'notification:created' ||
+        ev.type === 'message:created'
+      ) {
         if (ev.type === 'order:created') {
           void playOrderAlertChime('new_order', {
             dedupKey: `order_created_${String(ev.payload.orderId || ev.payload.orderNumber || '')}`,
@@ -448,6 +520,12 @@ export function AdminDashboard({
           void playOrderAlertChime('status_update', {
             dedupKey: `order_status_${String(ev.payload.orderId || '')}_${String(ev.payload.status || '')}`,
           });
+        } else if (ev.type === 'message:created' && ev.payload.senderUid !== currentUser.uid) {
+          setFeedback(
+            lang === 'bn'
+              ? `${String(ev.payload.restaurantName || 'রেস্টুরেন্ট')} থেকে নতুন মেসেজ এসেছে`
+              : `New message from ${String(ev.payload.restaurantName || 'Restaurant')}`
+          );
         }
         loadAdmin(true);
       }
@@ -1085,6 +1163,187 @@ export function AdminDashboard({
     }
   };
 
+  // Multi-AI Provider Handlers
+  const openEditAiProviderModal = (p: AdminAiProvider) => {
+    setAiProviderModal({
+      isNew: false,
+      code: p.code,
+      name: p.name,
+      providerType: p.providerType,
+      model: p.model,
+      apiBaseUrl: p.apiBaseUrl || '',
+      apiKey: p.providerType === 'gemini' ? '' : p.hasApiKey ? p.apiKeyPreview || '••••' : '',
+      isActive: p.isActive,
+      isDefault: p.isDefault,
+      sortOrder: String(p.sortOrder ?? 10),
+    });
+  };
+
+  const openAddAiProviderModal = (preset?: {
+    code: string;
+    name: string;
+    providerType: AiProviderType;
+    model: string;
+    apiBaseUrl: string;
+  }) => {
+    setAiProviderModal({
+      isNew: true,
+      code: preset?.code || '',
+      name: preset?.name || '',
+      providerType: preset?.providerType || 'custom_openai',
+      model: preset?.model || 'gpt-4o-mini',
+      apiBaseUrl: preset?.apiBaseUrl || 'https://api.openai.com/v1',
+      apiKey: '',
+      isActive: true,
+      isDefault: false,
+      sortOrder: String(aiProviders.length + 1),
+    });
+  };
+
+  const handleSaveAiProviderModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!aiProviderModal) return;
+    setSavingAiProvider(true);
+    setErrorMsg(null);
+    try {
+      await apiFetch('/api/admin/ai-providers', {
+        method: 'PUT',
+        body: JSON.stringify({
+          code: aiProviderModal.code,
+          name: aiProviderModal.name,
+          providerType: aiProviderModal.providerType,
+          model: aiProviderModal.model,
+          apiBaseUrl: aiProviderModal.apiBaseUrl,
+          apiKey: aiProviderModal.providerType === 'gemini' ? undefined : aiProviderModal.apiKey,
+          isActive: aiProviderModal.isActive,
+          isDefault: aiProviderModal.isDefault,
+          sortOrder: Number(aiProviderModal.sortOrder) || 10,
+        }),
+      });
+      setFeedback(
+        lang === 'bn'
+          ? `${aiProviderModal.name} AI API কনফিগারেশন সংরক্ষণ হয়েছে।`
+          : `Saved ${aiProviderModal.name} AI provider settings.`
+      );
+      setAiProviderModal(null);
+      const aiRes = await apiFetch<{ aiProviders: AdminAiProvider[] }>('/api/admin/ai-providers');
+      setAiProviders(aiRes.aiProviders || []);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to save AI provider');
+    } finally {
+      setSavingAiProvider(false);
+    }
+  };
+
+  const handleToggleAiProviderActive = async (p: AdminAiProvider) => {
+    try {
+      await apiFetch('/api/admin/ai-providers', {
+        method: 'PUT',
+        body: JSON.stringify({
+          code: p.code,
+          name: p.name,
+          providerType: p.providerType,
+          model: p.model,
+          apiBaseUrl: p.apiBaseUrl,
+          isActive: !p.isActive,
+          isDefault: p.isDefault,
+          sortOrder: p.sortOrder,
+        }),
+      });
+      const aiRes = await apiFetch<{ aiProviders: AdminAiProvider[] }>('/api/admin/ai-providers');
+      setAiProviders(aiRes.aiProviders || []);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to update AI provider');
+    }
+  };
+
+  const handleSetDefaultAiProvider = async (p: AdminAiProvider) => {
+    try {
+      await apiFetch('/api/admin/ai-providers', {
+        method: 'PUT',
+        body: JSON.stringify({
+          code: p.code,
+          name: p.name,
+          providerType: p.providerType,
+          model: p.model,
+          apiBaseUrl: p.apiBaseUrl,
+          isActive: true,
+          isDefault: true,
+          sortOrder: p.sortOrder,
+        }),
+      });
+      setFeedback(`${p.name} set as default AI Help provider.`);
+      const aiRes = await apiFetch<{ aiProviders: AdminAiProvider[] }>('/api/admin/ai-providers');
+      setAiProviders(aiRes.aiProviders || []);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to set default AI provider');
+    }
+  };
+
+  const handleTestAiProvider = async (code: string) => {
+    setTestingAiCode(code);
+    try {
+      const res = await apiFetch<{ ok: boolean; message: string }>(
+        `/api/admin/ai-providers/${code}/test`,
+        { method: 'POST' }
+      );
+      setAiTestResults((prev) => ({ ...prev, [code]: res }));
+    } catch (err: unknown) {
+      setAiTestResults((prev) => ({
+        ...prev,
+        [code]: { ok: false, message: err instanceof Error ? err.message : 'AI test failed' },
+      }));
+    } finally {
+      setTestingAiCode(null);
+    }
+  };
+
+  const handleDeleteAiProvider = async (code: string) => {
+    try {
+      await apiFetch(`/api/admin/ai-providers/${code}`, { method: 'DELETE' });
+      setFeedback(`Removed custom AI provider "${code}".`);
+      const aiRes = await apiFetch<{ aiProviders: AdminAiProvider[] }>('/api/admin/ai-providers');
+      setAiProviders(aiRes.aiProviders || []);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to delete AI provider');
+    }
+  };
+
+  const handleSelectMessageThread = async (restId: number) => {
+    setSelectedMessageRestId(restId);
+    try {
+      await apiFetch('/api/messages/vendor-admin/read', {
+        method: 'PATCH',
+        body: JSON.stringify({ restaurantId: restId }),
+      });
+      await loadAdmin(true);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSendAdminReply = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedMessageRestId || !adminReplyText.trim()) return;
+    setSendingAdminReply(true);
+    try {
+      await apiFetch('/api/messages/vendor-admin', {
+        method: 'POST',
+        body: JSON.stringify({
+          restaurantId: selectedMessageRestId,
+          message: adminReplyText.trim(),
+        }),
+      });
+      setAdminReplyText('');
+      emitLocalRealtimeSignal('message:created', { restaurantId: selectedMessageRestId });
+      await loadAdmin(true);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to send reply');
+    } finally {
+      setSendingAdminReply(false);
+    }
+  };
+
   const openEditProductModal = (item: FoodItem) => {
     setProductModal({
       id: item.id,
@@ -1633,6 +1892,12 @@ export function AdminDashboard({
             labelBn: `অর্ডার ও ডিসপ্যাচ (${activeDeliveryOrders.length})`,
             labelEn: `Orders & Dispatch (${activeDeliveryOrders.length})`,
             icon: RotateCcw,
+          },
+          {
+            id: 'messages' as const,
+            labelBn: `রেস্টুরেন্ট মেসেজ (${messageThreads.reduce((s, t) => s + t.unreadForAdmin, 0)})`,
+            labelEn: `Vendor Messages (${messageThreads.reduce((s, t) => s + t.unreadForAdmin, 0)})`,
+            icon: MessageSquare,
           },
           { id: 'finance' as const, labelBn: 'কমিশন ও পেআউট', labelEn: 'Ledger & Payouts', icon: Wallet },
           { id: 'coupons' as const, labelBn: 'কুপন ম্যানেজমেন্ট', labelEn: 'Coupons', icon: Tag },
@@ -2912,6 +3177,151 @@ export function AdminDashboard({
                           >
                             <Trash2 className="w-3 h-3" />
                             <span>Remove</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* AI Help Multi-API Providers (Gemini, ChatGPT/OpenAI, Groq, DeepSeek, Claude & Custom) */}
+            <div className="lg:col-span-12 bg-white rounded-2xl border border-neutral-200 p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                    <Cpu className="w-4 h-4 text-[#E21B70]" />
+                    <span>
+                      {lang === 'bn'
+                        ? 'AI হেল্প API ইন্টিগ্রেশন (Gemini, ChatGPT, Groq, DeepSeek ও কাস্টম API)'
+                        : 'AI Help API Integrations (Gemini, ChatGPT / OpenAI, Groq, DeepSeek & Custom)'}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-neutral-500 mt-0.5">
+                    {lang === 'bn'
+                      ? 'বিল্ট-ইন Gemini ছাড়াও ChatGPT (OpenAI), Groq বা কাস্টম AI API কী যোগ করুন। চ্যাট উইজেট থেকে ইউজাররা মডেল সিলেক্ট করতে পারবে।'
+                      : 'Keep built-in Google Gemini or connect ChatGPT (OpenAI), Groq, DeepSeek, Claude, or custom OpenAI-compatible APIs. All keys remain server-side.'}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {AI_PROVIDER_PRESETS.map((preset) => (
+                    <button
+                      key={preset.code}
+                      type="button"
+                      onClick={() => openAddAiProviderModal(preset)}
+                      className="px-3 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-neutral-700"
+                    >
+                      + {preset.name.split(' ')[0]}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => openAddAiProviderModal()}
+                    className="px-3.5 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold inline-flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'নতুন AI API যোগ করুন' : 'Add Custom AI API'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+                {aiProviders.map((provider) => {
+                  const testRes = aiTestResults[provider.code];
+                  return (
+                    <div
+                      key={provider.code}
+                      className={`p-4 rounded-xl border space-y-2.5 ${
+                        provider.isActive
+                          ? 'border-neutral-200 bg-white'
+                          : 'border-neutral-200 bg-neutral-50 opacity-80'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <Bot className="w-3.5 h-3.5 text-[#E21B70] shrink-0" />
+                            <span className="font-bold text-sm text-[#2E3138] truncate">
+                              {provider.name}
+                            </span>
+                            {provider.isDefault && (
+                              <span className="px-1.5 py-0.5 rounded bg-[#FFF0F6] text-[#E21B70] text-[10px] font-bold uppercase">
+                                Default
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-neutral-600 mt-0.5 font-mono-nums truncate">
+                            {provider.providerType} · {provider.model}
+                          </p>
+                          <p className="text-[11px] text-neutral-500 mt-0.5">
+                            {provider.providerType === 'gemini'
+                              ? provider.isConfigured
+                                ? 'Server Env Key Ready'
+                                : 'Set GEMINI_API_KEY in Secrets'
+                              : provider.hasApiKey
+                              ? `API Key: ${provider.apiKeyPreview}`
+                              : 'No API key added yet'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleAiProviderActive(provider)}
+                          className={`px-2 py-1 rounded-lg text-[10px] font-bold shrink-0 ${
+                            provider.isActive
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-neutral-200 text-neutral-700'
+                          }`}
+                        >
+                          {provider.isActive ? 'ACTIVE' : 'OFF'}
+                        </button>
+                      </div>
+
+                      {testRes && (
+                        <p
+                          className={`text-[11px] px-2.5 py-1.5 rounded-lg border ${
+                            testRes.ok
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                              : 'bg-red-50 border-red-200 text-red-700'
+                          }`}
+                        >
+                          {testRes.message}
+                        </p>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => openEditAiProviderModal(provider)}
+                          className="px-2.5 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] font-semibold text-[#2E3138] inline-flex items-center gap-1"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          <span>{lang === 'bn' ? 'কনফিগার' : 'Configure'}</span>
+                        </button>
+                        {!provider.isDefault && (
+                          <button
+                            type="button"
+                            onClick={() => handleSetDefaultAiProvider(provider)}
+                            className="px-2.5 py-1.5 rounded-lg border border-neutral-200 hover:border-[#E21B70] font-semibold text-neutral-700"
+                          >
+                            Set Default
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={testingAiCode === provider.code}
+                          onClick={() => handleTestAiProvider(provider.code)}
+                          className="px-2.5 py-1.5 rounded-lg border border-neutral-200 hover:border-emerald-500 font-semibold text-neutral-700 disabled:opacity-50"
+                        >
+                          {testingAiCode === provider.code ? 'Testing...' : 'Test'}
+                        </button>
+                        {provider.code !== 'gemini' && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteAiProvider(provider.code)}
+                            className="px-2 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 font-semibold inline-flex items-center gap-1"
+                          >
+                            <Trash2 className="w-3 h-3" />
                           </button>
                         )}
                       </div>
@@ -4467,7 +4877,7 @@ export function AdminDashboard({
             ))}
           </div>
         </div>
-      ) : (
+      ) : tab === 'users' ? (
         <div className="space-y-5">
           {/* Admin & Super Admin Governance Policy */}
           <div className="bg-neutral-50 border border-neutral-200 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -4874,7 +5284,145 @@ export function AdminDashboard({
             </div>
           </div>
         </div>
-      )}
+      ) : tab === 'messages' ? (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 bg-white rounded-2xl border border-neutral-200 p-5 min-h-[520px]">
+          {/* Restaurant Thread List */}
+          <div className="lg:col-span-4 border-b lg:border-b-0 lg:border-r border-neutral-200 pb-4 lg:pb-0 lg:pr-4 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-bold text-[#2E3138] flex items-center gap-2">
+                <MessageSquare className="w-4 h-4 text-[#E21B70]" />
+                <span>
+                  {lang === 'bn' ? 'রেস্টুরেন্ট ইনবক্স' : 'Restaurant Owner Threads'}
+                </span>
+              </h2>
+              <button
+                type="button"
+                onClick={() => void loadAdmin(true)}
+                className="p-1.5 rounded-lg border border-neutral-200 text-neutral-600 hover:border-[#E21B70]"
+                title="Refresh messages"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="space-y-1.5 max-h-[440px] overflow-y-auto">
+              {messageThreads.map((t) => {
+                const isSelected = selectedMessageRestId === t.restaurantId;
+                return (
+                  <button
+                    key={t.restaurantId}
+                    type="button"
+                    onClick={() => void handleSelectMessageThread(t.restaurantId)}
+                    className={`w-full text-left p-3 rounded-xl border transition-colors ${
+                      isSelected
+                        ? 'bg-[#FFF0F6] border-[#E21B70]'
+                        : 'bg-[#FAFAFB] border-neutral-200 hover:border-neutral-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-[#2E3138] truncate">
+                        {t.restaurantName}
+                      </span>
+                      {t.unreadForAdmin > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-[#E21B70] text-white text-[10px] font-bold tabular-nums">
+                          {t.unreadForAdmin}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-neutral-500 truncate mt-1">
+                      {t.lastMessage || (lang === 'bn' ? 'এখনো কোনো মেসেজ নেই' : 'No messages yet')}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Active Conversation */}
+          <div className="lg:col-span-8 flex flex-col justify-between gap-3">
+            {selectedMessageRestId ? (
+              <>
+                <div className="flex items-center justify-between pb-3 border-b border-neutral-200">
+                  <div>
+                    <h3 className="text-sm font-bold text-[#2E3138]">
+                      {messageThreads.find((t) => t.restaurantId === selectedMessageRestId)
+                        ?.restaurantName || `Restaurant #${selectedMessageRestId}`}
+                    </h3>
+                    <p className="text-[11px] text-neutral-500">
+                      {lang === 'bn'
+                        ? 'রেস্টুরেন্ট ওনারের সাথে সরাসরি অ্যাডমিন যোগাযোগ'
+                        : 'Direct 2-way conversation with restaurant owner'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto space-y-2.5 max-h-[360px] p-2 bg-[#FAFAFB] rounded-xl border border-neutral-200">
+                  {vendorMessages.filter((m) => m.restaurantId === selectedMessageRestId)
+                    .length === 0 ? (
+                    <p className="text-xs text-neutral-500 text-center py-10">
+                      {lang === 'bn'
+                        ? 'এই রেস্টুরেন্টকে প্রথম মেসেজ পাঠান।'
+                        : 'Start a conversation with this restaurant owner.'}
+                    </p>
+                  ) : (
+                    vendorMessages
+                      .filter((m) => m.restaurantId === selectedMessageRestId)
+                      .map((m) => {
+                        const fromAdmin =
+                          m.senderRole === 'admin' || m.senderRole === 'super_admin';
+                        return (
+                          <div
+                            key={m.id}
+                            className={`flex ${fromAdmin ? 'justify-end' : 'justify-start'}`}
+                          >
+                            <div
+                              className={`max-w-[80%] rounded-xl px-3.5 py-2.5 text-xs ${
+                                fromAdmin
+                                  ? 'bg-[#2E3138] text-white'
+                                  : 'bg-white border border-neutral-200 text-[#2E3138]'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-3 text-[10px] opacity-75 mb-1">
+                                <span className="font-semibold">{m.senderName}</span>
+                                <span>{new Date(m.createdAt).toLocaleTimeString()}</span>
+                              </div>
+                              <p className="whitespace-pre-wrap leading-relaxed">{m.message}</p>
+                            </div>
+                          </div>
+                        );
+                      })
+                  )}
+                </div>
+
+                <form onSubmit={handleSendAdminReply} className="flex items-center gap-2 pt-1">
+                  <input
+                    type="text"
+                    value={adminReplyText}
+                    onChange={(e) => setAdminReplyText(e.target.value)}
+                    placeholder={
+                      lang === 'bn'
+                        ? 'রেস্টুরেন্ট মালিককে উত্তর লিখুন...'
+                        : 'Write a reply to the restaurant owner...'
+                    }
+                    className="flex-1 px-3.5 py-2.5 rounded-xl border border-neutral-200 text-xs focus:outline-none focus:border-[#E21B70]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={sendingAdminReply || !adminReplyText.trim()}
+                    className="px-4 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold inline-flex items-center gap-1.5 disabled:opacity-40"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'পাঠান' : 'Send'}</span>
+                  </button>
+                </form>
+              </>
+            ) : (
+              <p className="text-xs text-neutral-500 text-center py-12">
+                {lang === 'bn' ? 'একটি রেস্টুরেন্ট নির্বাচন করুন।' : 'Select a restaurant thread.'}
+              </p>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       {/* Upload / Edit Product Modal */}
       {productModal && (
@@ -5645,6 +6193,182 @@ export function AdminDashboard({
                 className="px-5 py-2 rounded-xl bg-[#E21B70] text-white text-xs font-semibold disabled:opacity-50"
               >
                 {savingGateway ? 'Saving...' : 'Save Gateway API'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* AI Provider API Configuration Modal */}
+      {aiProviderModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleSaveAiProviderModal}
+            className="bg-white rounded-2xl border border-neutral-200 max-w-lg w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-base text-[#2E3138]">
+                  {aiProviderModal.isNew
+                    ? lang === 'bn'
+                      ? 'নতুন AI API যুক্ত করুন (ChatGPT / Groq / Custom)'
+                      : 'Add AI Help Provider API'
+                    : `Configure ${aiProviderModal.name}`}
+                </h3>
+                <p className="text-[11px] text-neutral-500 mt-0.5">
+                  {aiProviderModal.providerType === 'gemini'
+                    ? 'Google Gemini uses the server GEMINI_API_KEY environment secret.'
+                    : 'External AI API keys are saved strictly server-side and never sent to browsers.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAiProviderModal(null)}
+                aria-label="Close AI provider modal"
+                className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">Provider Code</label>
+                <input
+                  required
+                  disabled={!aiProviderModal.isNew}
+                  value={aiProviderModal.code}
+                  onChange={(e) => setAiProviderModal({ ...aiProviderModal, code: e.target.value })}
+                  placeholder="e.g. chatgpt, groq, deepseek"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums disabled:bg-neutral-100"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">Provider Type</label>
+                <select
+                  disabled={aiProviderModal.code === 'gemini'}
+                  value={aiProviderModal.providerType}
+                  onChange={(e) => {
+                    const nextType = e.target.value as AiProviderType;
+                    const defaultUrls: Record<string, string> = {
+                      gemini: '',
+                      openai: 'https://api.openai.com/v1',
+                      groq: 'https://api.groq.com/openai/v1',
+                      deepseek: 'https://api.deepseek.com/v1',
+                      anthropic: 'https://api.anthropic.com',
+                      custom_openai: aiProviderModal.apiBaseUrl || 'https://api.openai.com/v1',
+                    };
+                    setAiProviderModal({
+                      ...aiProviderModal,
+                      providerType: nextType,
+                      apiBaseUrl: defaultUrls[nextType] ?? aiProviderModal.apiBaseUrl,
+                    });
+                  }}
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white disabled:bg-neutral-100"
+                >
+                  <option value="gemini">Google Gemini (Server Env)</option>
+                  <option value="openai">ChatGPT / OpenAI</option>
+                  <option value="groq">Groq Cloud (Llama)</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="anthropic">Anthropic Claude</option>
+                  <option value="custom_openai">Custom OpenAI-Compatible</option>
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">Display Name</label>
+                <input
+                  required
+                  value={aiProviderModal.name}
+                  onChange={(e) => setAiProviderModal({ ...aiProviderModal, name: e.target.value })}
+                  placeholder="e.g. ChatGPT (OpenAI)"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-neutral-700 mb-1">Model Name</label>
+                <input
+                  required
+                  value={aiProviderModal.model}
+                  onChange={(e) =>
+                    setAiProviderModal({ ...aiProviderModal, model: e.target.value })
+                  }
+                  placeholder="e.g. gpt-4o-mini or gemini-4-hydrogen"
+                  className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
+                />
+              </div>
+
+              {aiProviderModal.providerType !== 'gemini' && (
+                <>
+                  <div className="sm:col-span-2">
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      API Base URL (HTTPS)
+                    </label>
+                    <input
+                      required
+                      type="url"
+                      value={aiProviderModal.apiBaseUrl}
+                      onChange={(e) =>
+                        setAiProviderModal({ ...aiProviderModal, apiBaseUrl: e.target.value })
+                      }
+                      placeholder="https://api.openai.com/v1"
+                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      API Key (Secret)
+                    </label>
+                    <input
+                      type="password"
+                      value={aiProviderModal.apiKey}
+                      onChange={(e) =>
+                        setAiProviderModal({ ...aiProviderModal, apiKey: e.target.value })
+                      }
+                      placeholder="sk-... (leave •••• unchanged to keep current key)"
+                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-5 text-xs">
+              <label className="inline-flex items-center gap-2 font-semibold text-[#2E3138] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={aiProviderModal.isActive}
+                  onChange={(e) =>
+                    setAiProviderModal({ ...aiProviderModal, isActive: e.target.checked })
+                  }
+                />
+                <span>{lang === 'bn' ? 'AI Help উইজেটে চালু রাখুন' : 'Active in AI Help Widget'}</span>
+              </label>
+              <label className="inline-flex items-center gap-2 font-semibold text-[#2E3138] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={aiProviderModal.isDefault}
+                  onChange={(e) =>
+                    setAiProviderModal({ ...aiProviderModal, isDefault: e.target.checked })
+                  }
+                />
+                <span>{lang === 'bn' ? 'ডিফল্ট AI ইঞ্জিন' : 'Set as Default Engine'}</span>
+              </label>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setAiProviderModal(null)}
+                className="px-4 py-2 rounded-xl border border-neutral-200 text-xs font-semibold text-neutral-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={savingAiProvider}
+                className="px-5 py-2 rounded-xl bg-[#E21B70] text-white text-xs font-semibold disabled:opacity-50"
+              >
+                {savingAiProvider ? 'Saving...' : 'Save AI API'}
               </button>
             </div>
           </form>

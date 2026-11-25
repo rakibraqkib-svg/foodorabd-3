@@ -66,6 +66,11 @@ import {
   DEFAULT_ORDER_EMAIL_IMAGE_PATH,
   classifyEmailImageSrcForCid,
   extractEmailInlineCidPlan,
+  filterOrdersByRestaurantOwnership,
+  isValidExternalAiBaseUrl,
+  toPublicAiProviderView,
+  toAdminAiProviderView,
+  validateRiderJobPayload,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 import { BANGLADESH_AREAS, BANGLADESH_SEARCH_PLACES, DHAKA_DELIVERY_ZONES } from './i18n';
@@ -1254,5 +1259,105 @@ test('extractEmailInlineCidPlan converts local/preview image URLs and data URIs 
   assert.ok(alertCidPlan.html.includes('src="cid:foodora-img-1"'));
   assert.equal(classifyEmailImageSrcForCid('https://cdn.example.com/photo.jpg'), null);
 });
+
+test('filterOrdersByRestaurantOwnership strictly isolates restaurant owners while allowing admins', () => {
+  const sampleOrders = [
+    { id: 1, restaurantId: 10 },
+    { id: 2, restaurantId: 12 },
+    { id: 3, restaurantId: 15 },
+    { id: 4, restaurantId: 10 },
+  ];
+
+  const ownerFiltered = filterOrdersByRestaurantOwnership(sampleOrders, [10], false);
+  assert.deepEqual(
+    ownerFiltered.map((o) => o.id),
+    [1, 4]
+  );
+
+  const multiStoreOwner = filterOrdersByRestaurantOwnership(sampleOrders, [10, 15], false);
+  assert.deepEqual(
+    multiStoreOwner.map((o) => o.id),
+    [1, 3, 4]
+  );
+
+  const adminView = filterOrdersByRestaurantOwnership(sampleOrders, [10], true);
+  assert.equal(adminView.length, 4);
+});
+
+test('AI provider views mask secrets and SSRF validator blocks unsafe external AI base URLs', () => {
+  assert.equal(isValidExternalAiBaseUrl('https://api.openai.com/v1'), true);
+  assert.equal(isValidExternalAiBaseUrl('https://api.groq.com/openai/v1'), true);
+  assert.equal(isValidExternalAiBaseUrl('http://api.openai.com/v1'), false);
+  assert.equal(isValidExternalAiBaseUrl('https://localhost:8080/v1'), false);
+  assert.equal(isValidExternalAiBaseUrl('https://127.0.0.1/v1'), false);
+  assert.equal(isValidExternalAiBaseUrl('https://192.168.1.10/v1'), false);
+  assert.equal(isValidExternalAiBaseUrl('https://10.0.0.5/v1'), false);
+  assert.equal(isValidExternalAiBaseUrl('https://169.254.169.254/latest'), false);
+
+  const openaiRow = {
+    code: 'ChatGPT',
+    name: 'ChatGPT (OpenAI)',
+    providerType: 'openai',
+    model: 'gpt-4o-mini',
+    apiBaseUrl: 'https://api.openai.com/v1',
+    apiKey: 'sk-proj-supersecret-9876',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 2,
+  };
+
+  const pubView = toPublicAiProviderView(openaiRow, true);
+  assert.equal(pubView.code, 'chatgpt');
+  assert.equal(pubView.isConfigured, true);
+  assert.equal('apiKey' in pubView, false);
+
+  const adminView = toAdminAiProviderView(openaiRow, true);
+  assert.equal(adminView.hasApiKey, true);
+  assert.equal(adminView.apiKeyPreview, '••••9876');
+  assert.equal('apiKey' in adminView, false);
+
+  const geminiRow = {
+    code: 'gemini',
+    name: 'Google Gemini',
+    providerType: 'gemini',
+    model: 'gemini-4-hydrogen',
+    apiBaseUrl: '',
+    apiKey: '',
+    isActive: true,
+    isDefault: true,
+    sortOrder: 1,
+  };
+  const geminiAdmin = toAdminAiProviderView(geminiRow, true);
+  assert.equal(geminiAdmin.isConfigured, true);
+  assert.equal(geminiAdmin.hasApiKey, true);
+  assert.equal(geminiAdmin.apiKeyPreview, 'Server Env Configured');
+});
+
+test('validateRiderJobPayload validates restaurant job inputs and supports rider_assigned transitions', () => {
+  const badRest = validateRiderJobPayload({ restaurantId: 0, title: 'Rider', zone: 'Banani' });
+  assert.equal(badRest.valid, false);
+
+  const shortTitle = validateRiderJobPayload({ restaurantId: 5, title: 'Hi', zone: 'Banani' });
+  assert.equal(shortTitle.valid, false);
+
+  const valid = validateRiderJobPayload({
+    restaurantId: 5,
+    title: '  Evening Delivery Rider  ',
+    zone: 'Gulshan 2',
+    vacancies: 3,
+  });
+  assert.equal(valid.valid, true);
+  if (valid.valid) {
+    assert.equal(valid.data.restaurantId, 5);
+    assert.equal(valid.data.title, 'Evening Delivery Rider');
+    assert.equal(valid.data.titleBn, 'Evening Delivery Rider');
+    assert.equal(valid.data.vacancies, 3);
+  }
+
+  assert.equal(canTransitionOrderStatus('confirmed', 'rider_assigned'), true);
+  assert.equal(canTransitionOrderStatus('preparing', 'rider_assigned'), true);
+  assert.equal(canTransitionOrderStatus('rider_assigned', 'delivered'), true);
+});
+
 
 
