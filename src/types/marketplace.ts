@@ -214,6 +214,8 @@ export interface PayoutRecord {
 export interface RiderRecord {
   id: number;
   uid: string;
+  restaurantId?: number | null;
+  addedByUid?: string | null;
   fullName: string;
   phone: string;
   email: string;

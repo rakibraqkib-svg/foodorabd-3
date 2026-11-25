@@ -65,6 +65,8 @@ import {
   FOOD_CATEGORY_PRESET_OPTIONS,
   formatBdt,
   formatResolvedMapAddress,
+  normalizeAddonsList,
+  normalizeVariationsList,
 } from '../lib/marketplace-logic';
 import { DhakaMapPicker } from './DhakaMapPicker';
 import { SelectWithCustom } from './SelectWithCustom';
@@ -84,8 +86,12 @@ import type {
 interface VendorRiderOption {
   id: number;
   uid: string;
+  restaurantId?: number | null;
+  addedByUid?: string | null;
+  isOwnRider?: boolean;
   fullName: string;
   phone: string;
+  email?: string;
   vehicleType: string;
   zone: string;
   isAvailable: boolean;
@@ -173,6 +179,16 @@ export function VendorDashboard({
   const [showPosSyncPanel, setShowPosSyncPanel] = useState(false);
   const [targetStoreId, setTargetStoreId] = useState<number>(0);
 
+  // Direct Delivery Man (Add Rider) form state
+  const [dmName, setDmName] = useState('');
+  const [dmPhone, setDmPhone] = useState('');
+  const [dmEmail, setDmEmail] = useState('');
+  const [dmPassword, setDmPassword] = useState('');
+  const [dmVehicle, setDmVehicle] = useState('Motorbike');
+  const [dmZone, setDmZone] = useState(BANGLADESH_AREAS[0].name);
+  const [dmNid, setDmNid] = useState('');
+  const [addingDeliveryMan, setAddingDeliveryMan] = useState(false);
+
   // Rider Job form state
   const [jobTitle, setJobTitle] = useState('Delivery Rider (Full-Time)');
   const [jobTitleBn, setJobTitleBn] = useState('ডেলিভারি রাইডার (ফুল-টাইম)');
@@ -214,7 +230,7 @@ export function VendorDashboard({
   const [regCoverUrl, setRegCoverUrl] = useState('');
   const [submittingReg, setSubmittingReg] = useState(false);
 
-  // Add food item form
+  // Add food item form (with product variants & optional add-ons)
   const [newCategory, setNewCategory] = useState('Main Course');
   const [newName, setNewName] = useState('');
   const [newNameBn, setNewNameBn] = useState('');
@@ -222,6 +238,10 @@ export function VendorDashboard({
   const [newPrice, setNewPrice] = useState('350');
   const [newDiscountPrice, setNewDiscountPrice] = useState('');
   const [newImageUrl, setNewImageUrl] = useState('');
+  const [newVariations, setNewVariations] = useState<Array<{ name: string; priceDelta: number }>>([
+    { name: 'Regular', priceDelta: 0 },
+  ]);
+  const [newAddons, setNewAddons] = useState<Array<{ name: string; price: number }>>([]);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [addingItem, setAddingItem] = useState(false);
 
@@ -394,6 +414,7 @@ export function VendorDashboard({
             prev > 0 && storeList.some((r) => r.id === prev) ? prev : res.restaurant!.id
           );
           setJobZone((prev) => prev || res.restaurant!.area || BANGLADESH_AREAS[0].name);
+          setDmZone((prev) => prev || res.restaurant!.area || BANGLADESH_AREAS[0].name);
 
           if (!silent) {
             setEditFee(String(res.restaurant.deliveryFee));
@@ -688,6 +709,8 @@ export function VendorDashboard({
     if (!targetRest || !newName.trim()) return;
     setAddingItem(true);
     try {
+      const cleanedVars = normalizeVariationsList(newVariations, true);
+      const cleanedAddons = normalizeAddonsList(newAddons);
       await apiFetch('/api/vendor/menu', {
         method: 'POST',
         body: JSON.stringify({
@@ -699,6 +722,8 @@ export function VendorDashboard({
           imageUrl: newImageUrl.trim() || targetRest.coverUrl,
           price: Number(newPrice) || 250,
           discountPrice: newDiscountPrice ? Number(newDiscountPrice) : null,
+          variationsJson: cleanedVars,
+          addonsJson: cleanedAddons,
           isPopular: true,
         }),
       });
@@ -707,8 +732,15 @@ export function VendorDashboard({
       setNewDesc('');
       setNewDiscountPrice('');
       setNewImageUrl('');
+      setNewVariations([{ name: 'Regular', priceDelta: 0 }]);
+      setNewAddons([]);
       setShowAddProductPanel(false);
-      showNotice(lang === 'bn' ? 'নতুন খাবার মেনুতে যুক্ত হয়েছে।' : 'New menu item published.', true);
+      showNotice(
+        lang === 'bn'
+          ? 'নতুন খাবার ও ভ্যারিয়েন্ট মেনুতে যুক্ত হয়েছে।'
+          : 'New menu item & variants published.',
+        true
+      );
       await loadWorkspace(selectedRestaurantId);
       await onMenuMutated?.();
     } catch (err: unknown) {
@@ -723,6 +755,8 @@ export function VendorDashboard({
     if (!editingItem) return;
     setSavingEditItem(true);
     try {
+      const cleanedVars = normalizeVariationsList(editingItem.variationsJson, true);
+      const cleanedAddons = normalizeAddonsList(editingItem.addonsJson);
       await apiFetch(`/api/vendor/menu/${editingItem.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
@@ -733,6 +767,8 @@ export function VendorDashboard({
           imageUrl: editingItem.imageUrl,
           price: Number(editingItem.price),
           discountPrice: editingItem.discountPrice ? Number(editingItem.discountPrice) : null,
+          variationsJson: cleanedVars,
+          addonsJson: cleanedAddons,
           isPopular: editingItem.isPopular,
           inStock: editingItem.inStock,
           isAvailable: editingItem.isAvailable,
@@ -740,7 +776,9 @@ export function VendorDashboard({
       });
       setEditingItem(null);
       showNotice(
-        lang === 'bn' ? 'প্রোডাক্ট ও স্টক আপডেট হয়েছে।' : 'Product details & stock updated.',
+        lang === 'bn'
+          ? 'প্রোডাক্ট, ভ্যারিয়েন্ট ও স্টক আপডেট হয়েছে।'
+          : 'Product details, variants & stock updated.',
         true
       );
       await loadWorkspace(selectedRestaurantId);
@@ -874,6 +912,82 @@ export function VendorDashboard({
       await loadWorkspace(selectedRestaurantId, true);
     } catch (err: unknown) {
       showNotice(err instanceof Error ? err.message : 'Failed to delete rider job', false);
+    }
+  };
+
+  const handleAddDeliveryMan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetRest = activeStoreForActions;
+    if (!targetRest) return;
+    setAddingDeliveryMan(true);
+    try {
+      const res = await apiFetch<{ rider: VendorRiderOption }>('/api/vendor/riders', {
+        method: 'POST',
+        body: JSON.stringify({
+          restaurantId: targetRest.id,
+          fullName: dmName.trim(),
+          phone: dmPhone.trim(),
+          email: dmEmail.trim(),
+          password: dmPassword.trim() || undefined,
+          vehicleType: dmVehicle,
+          zone: dmZone.trim() || targetRest.area,
+          nidNumber: dmNid.trim(),
+        }),
+      });
+      setDmName('');
+      setDmPhone('');
+      setDmEmail('');
+      setDmPassword('');
+      setDmNid('');
+      setAvailableRiders((prev) => [
+        res.rider,
+        ...prev.filter((r) => r.uid !== res.rider.uid),
+      ]);
+      showNotice(
+        lang === 'bn'
+          ? `ডেলিভারি ম্যান "${res.rider.fullName}" যোগ হয়েছে! এখনই অর্ডারে অ্যাসাইন করতে পারবেন।`
+          : `Delivery man "${res.rider.fullName}" added & ready for order dispatch!`,
+        true
+      );
+    } catch (err: unknown) {
+      showNotice(err instanceof Error ? err.message : 'Failed to add delivery man', false);
+    } finally {
+      setAddingDeliveryMan(false);
+    }
+  };
+
+  const handleToggleOwnRiderAvailability = async (rider: VendorRiderOption) => {
+    try {
+      const res = await apiFetch<{ rider: VendorRiderOption }>(`/api/vendor/riders/${rider.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isAvailable: !rider.isAvailable }),
+      });
+      setAvailableRiders((prev) =>
+        prev.map((r) => (r.id === rider.id ? { ...r, isAvailable: res.rider.isAvailable } : r))
+      );
+      showNotice(
+        lang === 'bn'
+          ? `${rider.fullName}: ${res.rider.isAvailable ? 'অনলাইন' : 'অফলাইন'} করা হয়েছে।`
+          : `${rider.fullName} is now ${res.rider.isAvailable ? 'Online' : 'Offline'}.`,
+        true
+      );
+    } catch (err: unknown) {
+      showNotice(err instanceof Error ? err.message : 'Could not update delivery man status', false);
+    }
+  };
+
+  const handleRemoveOwnRider = async (rider: VendorRiderOption) => {
+    try {
+      await apiFetch(`/api/vendor/riders/${rider.id}`, { method: 'DELETE' });
+      setAvailableRiders((prev) => prev.filter((r) => r.id !== rider.id));
+      showNotice(
+        lang === 'bn'
+          ? `ডেলিভারি ম্যান "${rider.fullName}" তালিকা থেকে সরানো হয়েছে।`
+          : `Removed delivery man "${rider.fullName}".`,
+        true
+      );
+    } catch (err: unknown) {
+      showNotice(err instanceof Error ? err.message : 'Failed to remove delivery man', false);
     }
   };
 
@@ -1197,8 +1311,8 @@ export function VendorDashboard({
     },
     {
       id: 'riders',
-      labelBn: 'রাইডার জব ও নিয়োগ',
-      labelEn: 'Rider Jobs & Hiring',
+      labelBn: 'ডেলিভারি ম্যান ও রাইডার জব',
+      labelEn: 'Delivery Men & Rider Jobs',
       icon: Briefcase,
       badge: pendingRiderAppsCount > 0 ? pendingRiderAppsCount : undefined,
       badgeTone: 'pink',
@@ -2274,6 +2388,7 @@ export function VendorDashboard({
                                       </option>
                                       {availableRiders.map((r) => (
                                         <option key={r.uid} value={r.uid}>
+                                          {r.isOwnRider ? '★ [Own] ' : ''}
                                           {r.isAvailable ? '● ' : '○ '}
                                           {r.fullName} ({r.zone}
                                           {r.distanceKm !== null ? ` · ${r.distanceKm}km` : ''})
@@ -2591,6 +2706,175 @@ export function VendorDashboard({
                         </div>
                       </div>
 
+                      {/* Product Variants (Size / Portion) & Optional Add-ons Builder */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-neutral-100">
+                        <div className="p-3.5 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-bold text-[#2E3138]">
+                              {lang === 'bn'
+                                ? 'প্রোডাক্ট ভ্যারিয়েন্ট (সাইজ / পরিমাণ)'
+                                : 'Product Variants (Size / Portion)'}
+                            </p>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setNewVariations([
+                                    { name: 'Half', priceDelta: 0 },
+                                    { name: 'Regular', priceDelta: 80 },
+                                    { name: 'Full', priceDelta: 180 },
+                                  ])
+                                }
+                                className="px-2 py-1 rounded-md border border-neutral-200 bg-white text-[10px] font-semibold text-neutral-700 hover:border-[#E21B70]"
+                              >
+                                {lang === 'bn' ? 'প্রিসেট' : 'Half/Reg/Full'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setNewVariations((prev) => [
+                                    ...prev,
+                                    { name: '', priceDelta: 0 },
+                                  ])
+                                }
+                                className="px-2 py-1 rounded-md bg-[#E21B70] text-white text-[10px] font-semibold"
+                              >
+                                + {lang === 'bn' ? 'ভ্যারিয়েন্ট' : 'Add Variant'}
+                              </button>
+                            </div>
+                          </div>
+                          <div className="space-y-1.5">
+                            {newVariations.map((v, idx) => (
+                              <div key={idx} className="flex items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={v.name}
+                                  onChange={(e) =>
+                                    setNewVariations((prev) =>
+                                      prev.map((row, i) =>
+                                        i === idx ? { ...row, name: e.target.value } : row
+                                      )
+                                    )
+                                  }
+                                  placeholder="e.g. Regular, Large, 1:1"
+                                  aria-label={`New variant name ${idx + 1}`}
+                                  className="flex-1 min-w-0 px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white"
+                                />
+                                <input
+                                  type="number"
+                                  value={v.priceDelta}
+                                  onChange={(e) =>
+                                    setNewVariations((prev) =>
+                                      prev.map((row, i) =>
+                                        i === idx
+                                          ? { ...row, priceDelta: Number(e.target.value) || 0 }
+                                          : row
+                                      )
+                                    )
+                                  }
+                                  placeholder="+৳"
+                                  aria-label={`New variant price adjustment ${idx + 1}`}
+                                  className="w-24 px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white tabular-nums"
+                                />
+                                <button
+                                  type="button"
+                                  aria-label={`Remove variant ${idx + 1}`}
+                                  onClick={() =>
+                                    setNewVariations((prev) =>
+                                      prev.length > 1
+                                        ? prev.filter((_, i) => i !== idx)
+                                        : [{ name: 'Regular', priceDelta: 0 }]
+                                    )
+                                  }
+                                  className="p-1.5 rounded-lg text-neutral-400 hover:text-red-600"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                          <p className="text-[10px] text-neutral-500">
+                            {lang === 'bn'
+                              ? 'মূল দামের সাথে +/- টাকা যোগ হবে (যেমন: 0 = বেস দাম, 120 = +৳১২০)।'
+                              : 'Price delta added to base price (e.g. 0 = base price, 120 = +৳120).'}
+                          </p>
+                        </div>
+
+                        <div className="p-3.5 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-bold text-[#2E3138]">
+                              {lang === 'bn'
+                                ? 'ঐচ্ছিক অ্যাড-অন / টপিংস'
+                                : 'Optional Add-ons / Extras'}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setNewAddons((prev) => [...prev, { name: '', price: 50 }])
+                              }
+                              className="px-2 py-1 rounded-md border border-neutral-200 bg-white hover:border-[#E21B70] text-[10px] font-semibold text-[#E21B70]"
+                            >
+                              + {lang === 'bn' ? 'অ্যাড-অন' : 'Add Extra'}
+                            </button>
+                          </div>
+                          {newAddons.length === 0 ? (
+                            <p className="text-[11px] text-neutral-500">
+                              {lang === 'bn'
+                                ? 'অতিরিক্ত চিজ, বোরহানি বা সালাদ যোগ করতে "+ অ্যাড-অন" চাপুন।'
+                                : 'Optional extras like Extra Cheese, Borhani, or Egg (+৳).'}
+                            </p>
+                          ) : (
+                            <div className="space-y-1.5">
+                              {newAddons.map((addon, idx) => (
+                                <div key={idx} className="flex items-center gap-2">
+                                  <input
+                                    type="text"
+                                    value={addon.name}
+                                    onChange={(e) =>
+                                      setNewAddons((prev) =>
+                                        prev.map((row, i) =>
+                                          i === idx ? { ...row, name: e.target.value } : row
+                                        )
+                                      )
+                                    }
+                                    placeholder="e.g. Extra Cheese"
+                                    aria-label={`New add-on name ${idx + 1}`}
+                                    className="flex-1 min-w-0 px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white"
+                                  />
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    value={addon.price}
+                                    onChange={(e) =>
+                                      setNewAddons((prev) =>
+                                        prev.map((row, i) =>
+                                          i === idx
+                                            ? { ...row, price: Math.max(0, Number(e.target.value) || 0) }
+                                            : row
+                                        )
+                                      )
+                                    }
+                                    placeholder="৳"
+                                    aria-label={`New add-on price ${idx + 1}`}
+                                    className="w-24 px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white tabular-nums"
+                                  />
+                                  <button
+                                    type="button"
+                                    aria-label={`Remove add-on ${idx + 1}`}
+                                    onClick={() =>
+                                      setNewAddons((prev) => prev.filter((_, i) => i !== idx))
+                                    }
+                                    className="p-1.5 rounded-lg text-neutral-400 hover:text-red-600"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <input
                           value={newDesc}
@@ -2812,6 +3096,16 @@ export function VendorDashboard({
                                     </span>
                                   )}
                                 </p>
+                                {(item.variationsJson?.length > 0 || item.addonsJson?.length > 0) && (
+                                  <p className="text-[11px] text-neutral-500 mt-0.5 truncate">
+                                    {item.variationsJson?.length > 0 &&
+                                      `${item.variationsJson.length} variant(s): ${item.variationsJson
+                                        .map((v) => v.name)
+                                        .join(', ')}`}
+                                    {item.addonsJson?.length > 0 &&
+                                      ` · ${item.addonsJson.length} add-on(s)`}
+                                  </p>
+                                )}
                               </div>
                             </div>
 
@@ -2869,7 +3163,18 @@ export function VendorDashboard({
 
                               <button
                                 type="button"
-                                onClick={() => setEditingItem({ ...item })}
+                                onClick={() =>
+                                  setEditingItem({
+                                    ...item,
+                                    variationsJson:
+                                      item.variationsJson && item.variationsJson.length > 0
+                                        ? item.variationsJson.map((v) => ({ ...v }))
+                                        : [{ name: 'Regular', priceDelta: 0 }],
+                                    addonsJson: item.addonsJson
+                                      ? item.addonsJson.map((a) => ({ ...a }))
+                                      : [],
+                                  })
+                                }
                                 aria-label={`Edit ${item.name}`}
                                 className="px-2.5 py-1.5 rounded-lg border border-neutral-200 text-xs font-semibold text-neutral-700 hover:border-[#E21B70] inline-flex items-center gap-1"
                               >
@@ -2894,161 +3199,380 @@ export function VendorDashboard({
                 </div>
               )}
 
-              {/* ---------------- TAB 3: RIDER JOBS & HIRING ---------------- */}
+              {/* ---------------- TAB 3: DELIVERY MEN & RIDER JOBS ---------------- */}
               {tab === 'riders' && (
                 <div className="space-y-5">
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-                    {/* Post a Rider Job Form */}
-                    <form
-                      onSubmit={handlePostRiderJob}
-                      className="lg:col-span-5 bg-white rounded-2xl border border-neutral-200 p-5 space-y-3 h-fit"
-                    >
-                      <h2 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
-                        <Briefcase className="w-4 h-4 text-[#E21B70]" />
-                        <span>
+                    {/* Left Column: Direct Add Delivery Man + Post a Rider Job */}
+                    <div className="lg:col-span-5 space-y-5">
+                      <form
+                        onSubmit={handleAddDeliveryMan}
+                        className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3"
+                      >
+                        <h2 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                          <Truck className="w-4 h-4 text-[#E21B70]" />
+                          <span>
+                            {lang === 'bn'
+                              ? 'সরাসরি নিজস্ব ডেলিভারি ম্যান যোগ করুন'
+                              : 'Add Delivery Man (Own Rider)'}
+                          </span>
+                        </h2>
+                        <p className="text-xs text-neutral-500">
                           {lang === 'bn'
-                            ? 'নতুন রাইডার জব পোস্ট করুন'
-                            : 'Post a Restaurant Rider Job'}
-                        </span>
-                      </h2>
-                      <p className="text-xs text-neutral-500">
-                        {lang === 'bn'
-                          ? 'পোস্ট করলে রাইডার পোর্টালে সবাই আপনার রেস্টুরেন্টের জব দেখতে ও আবেদন করতে পারবে।'
-                          : 'Published rider openings appear immediately on the Rider Portal for applicants.'}
-                      </p>
+                            ? 'আপনার রেস্টুরেন্টের নিজস্ব ডেলিভারি ম্যান যোগ করলে সাথে সাথেই অর্ডার ডিসপ্যাচে পাওয়া যাবে।'
+                            : 'Register your store delivery person directly for instant order dispatch.'}
+                        </p>
 
-                      <div>
-                        <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                          {lang === 'bn' ? 'পদের নাম (ইংরেজি)' : 'Job Title (EN)'}
-                        </label>
-                        <input
-                          required
-                          value={jobTitle}
-                          onChange={(e) => setJobTitle(e.target.value)}
-                          placeholder="e.g. Delivery Rider (Evening Shift)"
-                          className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
-                        />
-                      </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          <div>
+                            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                              {lang === 'bn' ? 'পুরো নাম' : 'Full Name'}
+                            </label>
+                            <input
+                              required
+                              value={dmName}
+                              onChange={(e) => setDmName(e.target.value)}
+                              placeholder="e.g. Arif Hasan"
+                              className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                              {lang === 'bn' ? 'মোবাইল নম্বর' : 'Mobile Number'}
+                            </label>
+                            <input
+                              required
+                              value={dmPhone}
+                              onChange={(e) => setDmPhone(e.target.value)}
+                              placeholder="017XXXXXXXX"
+                              className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                              {lang === 'bn' ? 'ইমেইল (লগইনের জন্য)' : 'Email Address'}
+                            </label>
+                            <input
+                              required
+                              type="email"
+                              value={dmEmail}
+                              onChange={(e) => setDmEmail(e.target.value)}
+                              placeholder="rider@restaurant.bd"
+                              className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                              {lang === 'bn' ? 'পাসওয়ার্ড (ঐচ্ছিক)' : 'Rider Login Password'}
+                            </label>
+                            <input
+                              type="password"
+                              value={dmPassword}
+                              onChange={(e) => setDmPassword(e.target.value)}
+                              placeholder="Min 6 chars (optional)"
+                              className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                              {lang === 'bn' ? 'এলাকা / জোন' : 'Working Zone'}
+                            </label>
+                            <SelectWithCustom
+                              required
+                              lang={lang}
+                              value={dmZone}
+                              onChange={setDmZone}
+                              storageKey="bd_areas"
+                              ariaLabel="Delivery man working zone"
+                              customOptionLabel={lang === 'bn' ? '+ কাস্টম জোন...' : '+ Custom Zone...'}
+                              presets={getBangladeshAreaSelectPresets(lang)}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                              {lang === 'bn' ? 'যানবাহন' : 'Vehicle Type'}
+                            </label>
+                            <select
+                              value={dmVehicle}
+                              onChange={(e) => setDmVehicle(e.target.value)}
+                              aria-label="Delivery man vehicle type"
+                              className="w-full px-2.5 py-2 text-xs border border-neutral-200 rounded-lg bg-white"
+                            >
+                              <option value="Motorbike">Motorbike</option>
+                              <option value="Bicycle">Bicycle</option>
+                              <option value="E-Bike">E-Bike / Scooter</option>
+                              <option value="On Foot">On Foot</option>
+                            </select>
+                          </div>
+                        </div>
 
-                      <div>
-                        <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                          {lang === 'bn' ? 'পদের নাম (বাংলা)' : 'Job Title (BN)'}
-                        </label>
-                        <input
-                          value={jobTitleBn}
-                          onChange={(e) => setJobTitleBn(e.target.value)}
-                          placeholder="যেমন: ডেলিভারি রাইডার"
-                          className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
-                        />
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2.5">
                         <div>
                           <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                            {lang === 'bn' ? 'এলাকা / জোন' : 'Delivery Zone'}
-                          </label>
-                          <SelectWithCustom
-                            required
-                            lang={lang}
-                            value={jobZone}
-                            onChange={setJobZone}
-                            storageKey="bd_areas"
-                            ariaLabel="Rider job delivery zone"
-                            customOptionLabel={lang === 'bn' ? '+ কাস্টম জোন...' : '+ Custom Zone...'}
-                            presets={getBangladeshAreaSelectPresets(lang)}
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                            {lang === 'bn' ? 'যানবাহন' : 'Vehicle Type'}
-                          </label>
-                          <select
-                            value={jobVehicle}
-                            onChange={(e) => setJobVehicle(e.target.value)}
-                            className="w-full px-2.5 py-2 text-xs border border-neutral-200 rounded-lg bg-white"
-                          >
-                            <option value="Motorbike">Motorbike</option>
-                            <option value="Bicycle">Bicycle</option>
-                            <option value="E-Bike">E-Bike / Scooter</option>
-                            <option value="Any">Any Vehicle</option>
-                          </select>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-3 gap-2.5">
-                        <div className="col-span-2">
-                          <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                            {lang === 'bn' ? 'বেতন / আয়' : 'Salary / Pay Range'}
+                            {lang === 'bn' ? 'এনআইডি নম্বর (ঐচ্ছিক)' : 'NID Number (Optional)'}
                           </label>
                           <input
-                            required
-                            value={jobSalary}
-                            onChange={(e) => setJobSalary(e.target.value)}
+                            value={dmNid}
+                            onChange={(e) => setDmNid(e.target.value)}
+                            placeholder="e.g. 1995269123456"
                             className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
                           />
                         </div>
+
+                        <button
+                          type="submit"
+                          disabled={addingDeliveryMan}
+                          className="w-full py-2.5 rounded-xl bg-[#2E3138] hover:bg-black text-white text-xs font-semibold disabled:opacity-50"
+                        >
+                          {addingDeliveryMan
+                            ? lang === 'bn'
+                              ? 'যোগ হচ্ছে...'
+                              : 'Adding Delivery Man...'
+                            : lang === 'bn'
+                            ? 'ডেলিভারি ম্যান যোগ করুন'
+                            : 'Add Delivery Man to Fleet'}
+                        </button>
+                      </form>
+
+                      {/* Post a Rider Job Form */}
+                      <form
+                        onSubmit={handlePostRiderJob}
+                        className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3 h-fit"
+                      >
+                        <h2 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                          <Briefcase className="w-4 h-4 text-[#E21B70]" />
+                          <span>
+                            {lang === 'bn'
+                              ? 'নতুন রাইডার জব পোস্ট করুন'
+                              : 'Post a Restaurant Rider Job'}
+                          </span>
+                        </h2>
+                        <p className="text-xs text-neutral-500">
+                          {lang === 'bn'
+                            ? 'পোস্ট করলে রাইডার পোর্টালে সবাই আপনার রেস্টুরেন্টের জব দেখতে ও আবেদন করতে পারবে।'
+                            : 'Published rider openings appear immediately on the Rider Portal for applicants.'}
+                        </p>
+
                         <div>
                           <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                            {lang === 'bn' ? 'পদ সংখ্যা' : 'Vacancies'}
+                            {lang === 'bn' ? 'পদের নাম (ইংরেজি)' : 'Job Title (EN)'}
                           </label>
                           <input
                             required
-                            type="number"
-                            min="1"
-                            max="50"
-                            value={jobVacancies}
-                            onChange={(e) => setJobVacancies(e.target.value)}
-                            className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg tabular-nums"
+                            value={jobTitle}
+                            onChange={(e) => setJobTitle(e.target.value)}
+                            placeholder="e.g. Delivery Rider (Evening Shift)"
+                            className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
                           />
                         </div>
-                      </div>
 
-                      <div>
-                        <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                          {lang === 'bn' ? 'ডিউটি সময়' : 'Shift Hours'}
-                        </label>
-                        <input
-                          required
-                          value={jobShift}
-                          onChange={(e) => setJobShift(e.target.value)}
-                          className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
-                        />
-                      </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                            {lang === 'bn' ? 'পদের নাম (বাংলা)' : 'Job Title (BN)'}
+                          </label>
+                          <input
+                            value={jobTitleBn}
+                            onChange={(e) => setJobTitleBn(e.target.value)}
+                            placeholder="যেমন: ডেলিভারি রাইডার"
+                            className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                          />
+                        </div>
 
-                      <div>
-                        <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                          {lang === 'bn' ? 'শর্তাবলি ও বিবরণ' : 'Requirements / Notes'}
-                        </label>
-                        <textarea
-                          rows={2}
-                          value={jobDescription}
-                          onChange={(e) => setJobDescription(e.target.value)}
-                          placeholder={
-                            lang === 'bn'
-                              ? 'স্মার্টফোন ও এনআইডি থাকতে হবে, ফুয়েল বোনাস...'
-                              : 'Valid license / NID required, per-order bonus included...'
-                          }
-                          className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
-                        />
-                      </div>
+                        <div className="grid grid-cols-2 gap-2.5">
+                          <div>
+                            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                              {lang === 'bn' ? 'এলাকা / জোন' : 'Delivery Zone'}
+                            </label>
+                            <SelectWithCustom
+                              required
+                              lang={lang}
+                              value={jobZone}
+                              onChange={setJobZone}
+                              storageKey="bd_areas"
+                              ariaLabel="Rider job delivery zone"
+                              customOptionLabel={lang === 'bn' ? '+ কাস্টম জোন...' : '+ Custom Zone...'}
+                              presets={getBangladeshAreaSelectPresets(lang)}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                              {lang === 'bn' ? 'যানবাহন' : 'Vehicle Type'}
+                            </label>
+                            <select
+                              value={jobVehicle}
+                              onChange={(e) => setJobVehicle(e.target.value)}
+                              className="w-full px-2.5 py-2 text-xs border border-neutral-200 rounded-lg bg-white"
+                            >
+                              <option value="Motorbike">Motorbike</option>
+                              <option value="Bicycle">Bicycle</option>
+                              <option value="E-Bike">E-Bike / Scooter</option>
+                              <option value="Any">Any Vehicle</option>
+                            </select>
+                          </div>
+                        </div>
 
-                      <button
-                        type="submit"
-                        disabled={postingJob}
-                        className="w-full py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold disabled:opacity-50"
-                      >
-                        {postingJob
-                          ? lang === 'bn'
-                            ? 'পোস্ট হচ্ছে...'
-                            : 'Publishing...'
-                          : lang === 'bn'
-                          ? 'রাইডার জব পোস্ট করুন'
-                          : 'Publish Rider Job'}
-                      </button>
-                    </form>
+                        <div className="grid grid-cols-3 gap-2.5">
+                          <div className="col-span-2">
+                            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                              {lang === 'bn' ? 'বেতন / আয়' : 'Salary / Pay Range'}
+                            </label>
+                            <input
+                              required
+                              value={jobSalary}
+                              onChange={(e) => setJobSalary(e.target.value)}
+                              className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                              {lang === 'bn' ? 'পদ সংখ্যা' : 'Vacancies'}
+                            </label>
+                            <input
+                              required
+                              type="number"
+                              min="1"
+                              max="50"
+                              value={jobVacancies}
+                              onChange={(e) => setJobVacancies(e.target.value)}
+                              className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg tabular-nums"
+                            />
+                          </div>
+                        </div>
 
-                    {/* Right Column: Active Jobs + Rider Applicants */}
+                        <div>
+                          <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                            {lang === 'bn' ? 'ডিউটি সময়' : 'Shift Hours'}
+                          </label>
+                          <input
+                            required
+                            value={jobShift}
+                            onChange={(e) => setJobShift(e.target.value)}
+                            className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                            {lang === 'bn' ? 'শর্তাবলি ও বিবরণ' : 'Requirements / Notes'}
+                          </label>
+                          <textarea
+                            rows={2}
+                            value={jobDescription}
+                            onChange={(e) => setJobDescription(e.target.value)}
+                            placeholder={
+                              lang === 'bn'
+                                ? 'স্মার্টফোন ও এনআইডি থাকতে হবে, ফুয়েল বোনাস...'
+                                : 'Valid license / NID required, per-order bonus included...'
+                            }
+                            className="w-full px-3 py-2 text-xs border border-neutral-200 rounded-lg"
+                          />
+                        </div>
+
+                        <button
+                          type="submit"
+                          disabled={postingJob}
+                          className="w-full py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold disabled:opacity-50"
+                        >
+                          {postingJob
+                            ? lang === 'bn'
+                              ? 'পোস্ট হচ্ছে...'
+                              : 'Publishing...'
+                            : lang === 'bn'
+                            ? 'রাইডার জব পোস্ট করুন'
+                            : 'Publish Rider Job'}
+                        </button>
+                      </form>
+                    </div>
+
+                    {/* Right Column: Own & Approved Riders + Active Jobs + Rider Applicants */}
                     <div className="lg:col-span-7 space-y-4">
+                      {/* Own Added Delivery Men & Approved Riders */}
+                      <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
+                            <Users className="w-4 h-4 text-[#E21B70]" />
+                            <span>
+                              {lang === 'bn'
+                                ? 'আপনার ডেলিভারি ম্যান ও অনুমোদিত রাইডার'
+                                : 'Your Delivery Men & Approved Dispatch Riders'}
+                            </span>
+                          </h3>
+                          <span className="text-xs text-neutral-500 tabular-nums">
+                            {availableRiders.filter((r) => r.isOwnRider).length} own ·{' '}
+                            {availableRiders.length} total
+                          </span>
+                        </div>
+                        {availableRiders.length === 0 ? (
+                          <p className="text-xs text-neutral-500">
+                            {lang === 'bn'
+                              ? 'এখনো কোনো অনুমোদিত রাইডার পাওয়া যায়নি।'
+                              : 'No approved riders found yet.'}
+                          </p>
+                        ) : (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            {availableRiders.map((r) => (
+                              <div
+                                key={r.uid}
+                                className={`p-3 rounded-xl border flex items-center justify-between gap-2 text-xs ${
+                                  r.isOwnRider
+                                    ? 'border-[#E21B70]/35 bg-[#FFF0F6]/40'
+                                    : 'border-neutral-200'
+                                }`}
+                              >
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <p className="font-bold text-[#2E3138] truncate">{r.fullName}</p>
+                                    {r.isOwnRider && (
+                                      <span className="px-1.5 py-0.5 rounded bg-[#E21B70] text-white text-[9px] font-bold uppercase">
+                                        {lang === 'bn' ? 'নিজস্ব' : 'Own'}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-neutral-500 tabular-nums truncate">
+                                    {r.phone} · {r.zone} · {r.vehicleType}
+                                    {r.distanceKm !== null ? ` · ${r.distanceKm} km` : ''}
+                                  </p>
+                                </div>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {r.isOwnRider ? (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleOwnRiderAvailability(r)}
+                                        className={`px-2 py-1 rounded font-bold text-[10px] border ${
+                                          r.isAvailable
+                                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                            : 'bg-neutral-100 text-neutral-600 border-neutral-200'
+                                        }`}
+                                      >
+                                        {r.isAvailable ? 'Online' : 'Offline'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRemoveOwnRider(r)}
+                                        aria-label={`Remove delivery man ${r.fullName}`}
+                                        className="p-1 rounded text-neutral-400 hover:text-red-600 hover:bg-red-50"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <span
+                                      className={`px-2 py-0.5 rounded font-bold text-[10px] ${
+                                        r.isAvailable
+                                          ? 'bg-emerald-50 text-emerald-700'
+                                          : 'bg-neutral-100 text-neutral-500'
+                                      }`}
+                                    >
+                                      {r.isAvailable ? 'Online' : 'Offline'}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
                       {/* Rider Applications */}
                       <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
                         <div className="flex items-center justify-between">
@@ -3191,51 +3715,6 @@ export function VendorDashboard({
                                     <Trash2 className="w-4 h-4" />
                                   </button>
                                 </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Approved Available Riders Nearby */}
-                      <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
-                        <h3 className="font-bold text-sm text-[#2E3138] flex items-center gap-2">
-                          <Users className="w-4 h-4 text-[#E21B70]" />
-                          <span>
-                            {lang === 'bn'
-                              ? 'অর্ডার ডিসপ্যাচের জন্য অনুমোদিত রাইডার'
-                              : 'Approved Riders Available for Dispatch'}
-                          </span>
-                        </h3>
-                        {availableRiders.length === 0 ? (
-                          <p className="text-xs text-neutral-500">
-                            {lang === 'bn'
-                              ? 'এখনো কোনো অনুমোদিত রাইডার পাওয়া যায়নি।'
-                              : 'No approved riders found yet.'}
-                          </p>
-                        ) : (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                            {availableRiders.slice(0, 8).map((r) => (
-                              <div
-                                key={r.uid}
-                                className="p-3 rounded-xl border border-neutral-200 flex items-center justify-between text-xs"
-                              >
-                                <div>
-                                  <p className="font-bold text-[#2E3138]">{r.fullName}</p>
-                                  <p className="text-neutral-500 tabular-nums">
-                                    {r.zone} · {r.vehicleType}
-                                    {r.distanceKm !== null ? ` · ${r.distanceKm} km` : ''}
-                                  </p>
-                                </div>
-                                <span
-                                  className={`px-2 py-0.5 rounded font-bold text-[10px] ${
-                                    r.isAvailable
-                                      ? 'bg-emerald-50 text-emerald-700'
-                                      : 'bg-neutral-100 text-neutral-500'
-                                  }`}
-                                >
-                                  {r.isAvailable ? 'Online' : 'Offline'}
-                                </span>
                               </div>
                             ))}
                           </div>
@@ -4205,6 +4684,164 @@ export function VendorDashboard({
                       className="flex-1 min-w-0 px-3 py-2 text-xs border border-neutral-200 rounded-lg"
                     />
                   </div>
+                </div>
+
+                {/* Product Variants (Size / Portion) & Add-ons inside Edit Modal */}
+                <div className="space-y-3 p-3.5 rounded-xl bg-neutral-50 border border-neutral-200">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-[#2E3138]">
+                      {lang === 'bn'
+                        ? 'প্রোডাক্ট ভ্যারিয়েন্ট (সাইজ / পরিমাণ)'
+                        : 'Product Variants (Size / Portion)'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditingItem({
+                          ...editingItem,
+                          variationsJson: [
+                            ...(editingItem.variationsJson || []),
+                            { name: '', priceDelta: 0 },
+                          ],
+                        })
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-[#E21B70] text-white text-[10px] font-semibold"
+                    >
+                      + {lang === 'bn' ? 'ভ্যারিয়েন্ট' : 'Add Variant'}
+                    </button>
+                  </div>
+                  <div className="space-y-1.5">
+                    {(editingItem.variationsJson || []).map((v, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={v.name}
+                          onChange={(e) =>
+                            setEditingItem({
+                              ...editingItem,
+                              variationsJson: editingItem.variationsJson.map((row, i) =>
+                                i === idx ? { ...row, name: e.target.value } : row
+                              ),
+                            })
+                          }
+                          placeholder="e.g. Half, Regular, Large"
+                          aria-label={`Edit variant name ${idx + 1}`}
+                          className="flex-1 min-w-0 px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white"
+                        />
+                        <input
+                          type="number"
+                          value={v.priceDelta}
+                          onChange={(e) =>
+                            setEditingItem({
+                              ...editingItem,
+                              variationsJson: editingItem.variationsJson.map((row, i) =>
+                                i === idx
+                                  ? { ...row, priceDelta: Number(e.target.value) || 0 }
+                                  : row
+                              ),
+                            })
+                          }
+                          placeholder="+৳"
+                          aria-label={`Edit variant price adjustment ${idx + 1}`}
+                          className="w-24 px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white tabular-nums"
+                        />
+                        <button
+                          type="button"
+                          aria-label={`Delete edit variant ${idx + 1}`}
+                          onClick={() =>
+                            setEditingItem({
+                              ...editingItem,
+                              variationsJson:
+                                editingItem.variationsJson.length > 1
+                                  ? editingItem.variationsJson.filter((_, i) => i !== idx)
+                                  : [{ name: 'Regular', priceDelta: 0 }],
+                            })
+                          }
+                          className="p-1.5 rounded-lg text-neutral-400 hover:text-red-600"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 pt-2 border-t border-neutral-200">
+                    <span className="text-xs font-bold text-[#2E3138]">
+                      {lang === 'bn' ? 'অতিরিক্ত অ্যাড-অন' : 'Optional Add-ons'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditingItem({
+                          ...editingItem,
+                          addonsJson: [
+                            ...(editingItem.addonsJson || []),
+                            { name: '', price: 50 },
+                          ],
+                        })
+                      }
+                      className="px-2.5 py-1 rounded-lg border border-neutral-200 bg-white text-[#E21B70] text-[10px] font-semibold"
+                    >
+                      + {lang === 'bn' ? 'অ্যাড-অন' : 'Add Extra'}
+                    </button>
+                  </div>
+                  {(editingItem.addonsJson || []).length > 0 && (
+                    <div className="space-y-1.5">
+                      {editingItem.addonsJson.map((addon, idx) => (
+                        <div key={idx} className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={addon.name}
+                            onChange={(e) =>
+                              setEditingItem({
+                                ...editingItem,
+                                addonsJson: editingItem.addonsJson.map((row, i) =>
+                                  i === idx ? { ...row, name: e.target.value } : row
+                                ),
+                              })
+                            }
+                            placeholder="e.g. Borhani, Extra Cheese"
+                            aria-label={`Edit add-on name ${idx + 1}`}
+                            className="flex-1 min-w-0 px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white"
+                          />
+                          <input
+                            type="number"
+                            min="0"
+                            value={addon.price}
+                            onChange={(e) =>
+                              setEditingItem({
+                                ...editingItem,
+                                addonsJson: editingItem.addonsJson.map((row, i) =>
+                                  i === idx
+                                    ? {
+                                        ...row,
+                                        price: Math.max(0, Number(e.target.value) || 0),
+                                      }
+                                    : row
+                                ),
+                              })
+                            }
+                            placeholder="৳"
+                            aria-label={`Edit add-on price ${idx + 1}`}
+                            className="w-24 px-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg bg-white tabular-nums"
+                          />
+                          <button
+                            type="button"
+                            aria-label={`Delete edit add-on ${idx + 1}`}
+                            onClick={() =>
+                              setEditingItem({
+                                ...editingItem,
+                                addonsJson: editingItem.addonsJson.filter((_, i) => i !== idx),
+                              })
+                            }
+                            className="p-1.5 rounded-lg text-neutral-400 hover:text-red-600"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <div>

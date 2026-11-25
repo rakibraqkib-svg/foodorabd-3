@@ -69,6 +69,13 @@ async function runCreateTablesIfMissing(): Promise<void> {
         ADD COLUMN IF NOT EXISTS tracking_token TEXT NOT NULL DEFAULT '';
       `);
     }
+    if (existingSet.has('riders')) {
+      await db.execute(sql`
+        ALTER TABLE riders
+        ADD COLUMN IF NOT EXISTS restaurant_id INTEGER,
+        ADD COLUMN IF NOT EXISTS added_by_uid TEXT NOT NULL DEFAULT '';
+      `);
+    }
   } catch (err: any) {
     const code = err?.code || err?.cause?.code;
     if (code === '42501') {
@@ -370,6 +377,8 @@ async function createMissingTables(existingSet: Set<string>): Promise<void> {
       CREATE TABLE IF NOT EXISTS riders (
         id SERIAL PRIMARY KEY,
         uid TEXT NOT NULL UNIQUE,
+        restaurant_id INTEGER,
+        added_by_uid TEXT DEFAULT '',
         full_name TEXT NOT NULL,
         phone TEXT NOT NULL,
         email TEXT NOT NULL,

@@ -93,6 +93,9 @@ import {
   toPublicPaymentGatewayView,
   validateBroadcastNotification,
   validateRiderJobPayload,
+  normalizeVariationsList,
+  normalizeAddonsList,
+  validateVendorAddRiderPayload,
 } from './src/lib/marketplace-logic.ts';
 import { mergeStorefrontConfig } from './src/lib/storefront-config.ts';
 import { getDeliveryProvider } from './src/services/delivery.ts';
@@ -238,6 +241,32 @@ app.get('/sitemap.xml', async (req, res) => {
   }
 });
 
+app.get(/^\/(google[a-zA-Z0-9_-]+\.html)$/, async (req, res, next) => {
+  const filename = req.params[0] || '';
+  if (!filename) return next();
+  try {
+    const settings = hasDatabaseConfig() ? await getPlatformSettingsRow() : null;
+    const sc = mergeStorefrontConfig(settings?.storefrontConfig);
+    const configuredToken = (
+      sc.googleSiteVerification ||
+      process.env.GOOGLE_SITE_VERIFICATION ||
+      ''
+    ).trim();
+    const expectedFilename = configuredToken.endsWith('.html')
+      ? configuredToken
+      : configuredToken.startsWith('google')
+      ? `${configuredToken}.html`
+      : '';
+    if (configuredToken && (filename === expectedFilename || configuredToken === filename)) {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(`google-site-verification: ${filename}`);
+    }
+  } catch {
+    // fall through
+  }
+  return res.status(404).send('Google Search Console verification file not configured.');
+});
+
 // ---------- Public & Health Routes ----------
 
 app.get('/api/health', async (_req, res) => {
@@ -273,6 +302,10 @@ app.get('/api/public-config', async (_req, res) => {
     );
     const emailTransport = await getEmailTransportStatus();
     const sc = mergeStorefrontConfig(settings?.storefrontConfig);
+    if (!sc.googleSiteVerification && process.env.GOOGLE_SITE_VERIFICATION) {
+      sc.googleSiteVerification = process.env.GOOGLE_SITE_VERIFICATION.trim();
+    }
+    const settingsWithVerification = settings ? { ...settings, storefrontConfig: sc } : settings;
     const pinnedId = Number(sc.featuredActiveOrderId);
     const activeRow =
       sc.showActiveDeliveryBar === false
@@ -285,7 +318,7 @@ app.get('/api/public-config', async (_req, res) => {
       gateways: getGatewayAvailability(),
       paymentGateways: paymentGatewaysList,
       emailTransport,
-      settings,
+      settings: settingsWithVerification,
       featuredActiveOrder: activeRow
         ? {
             orderId: activeRow.id,
@@ -2418,6 +2451,12 @@ app.post(
       price: z.number().int().positive(),
       discountPrice: z.number().int().positive().nullable().optional(),
       isPopular: z.boolean().default(false),
+      variationsJson: z
+        .array(z.object({ name: z.string(), priceDelta: z.number() }))
+        .optional(),
+      addonsJson: z
+        .array(z.object({ name: z.string(), price: z.number() }))
+        .optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Invalid food item details' });
@@ -2434,6 +2473,9 @@ app.post(
         return res.status(403).json({ error: 'Forbidden: Not owner of this restaurant' });
       }
 
+      const variationsJson = normalizeVariationsList(parsed.data.variationsJson, true);
+      const addonsJson = normalizeAddonsList(parsed.data.addonsJson);
+
       const inserted = await db
         .insert(foodItems)
         .values({
@@ -2445,8 +2487,8 @@ app.post(
           imageUrl: parsed.data.imageUrl || restRows[0].coverUrl,
           price: parsed.data.price,
           discountPrice: parsed.data.discountPrice ?? null,
-          variationsJson: [{ name: 'Regular', priceDelta: 0 }],
-          addonsJson: [],
+          variationsJson,
+          addonsJson,
           isPopular: parsed.data.isPopular,
         })
         .returning();
@@ -2478,6 +2520,12 @@ app.patch(
       isVisibleOnStorefront: z.boolean().optional(),
       price: z.number().int().positive().max(100000).optional(),
       discountPrice: z.number().int().positive().max(100000).nullable().optional(),
+      variationsJson: z
+        .array(z.object({ name: z.string(), priceDelta: z.number() }))
+        .optional(),
+      addonsJson: z
+        .array(z.object({ name: z.string(), price: z.number() }))
+        .optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -2499,6 +2547,15 @@ app.patch(
       }
 
       const d = parsed.data;
+      const nextVariations =
+        d.variationsJson !== undefined
+          ? normalizeVariationsList(d.variationsJson, true)
+          : itemRows[0].variationsJson;
+      const nextAddons =
+        d.addonsJson !== undefined
+          ? normalizeAddonsList(d.addonsJson)
+          : itemRows[0].addonsJson;
+
       const updated = await db
         .update(foodItems)
         .set({
@@ -2513,6 +2570,8 @@ app.patch(
           isVisibleOnStorefront: d.isVisibleOnStorefront ?? itemRows[0].isVisibleOnStorefront,
           price: d.price ?? itemRows[0].price,
           discountPrice: d.discountPrice === undefined ? itemRows[0].discountPrice : d.discountPrice,
+          variationsJson: nextVariations,
+          addonsJson: nextAddons,
           updatedAt: new Date(),
         })
         .where(eq(foodItems.id, itemId))
@@ -3160,7 +3219,7 @@ app.patch(
   }
 );
 
-// Vendor Dispatch: list available approved riders (sorted by availability & distance to restaurant)
+// Vendor Dispatch: list available approved riders (prioritizing restaurant's own riders, then availability & distance)
 app.get(
   '/api/vendor/riders',
   requireAuth,
@@ -3183,12 +3242,23 @@ app.get(
         targetRest = restRows[0];
       }
 
+      const ownedStores = isAdmin
+        ? []
+        : await db
+            .select({ id: restaurants.id })
+            .from(restaurants)
+            .where(eq(restaurants.ownerUid, req.user!.uid));
+      const ownedSet = new Set(ownedStores.map((s) => s.id));
+
       const riderRows = await db
         .select({
           id: riders.id,
           uid: riders.uid,
+          restaurantId: riders.restaurantId,
+          addedByUid: riders.addedByUid,
           fullName: riders.fullName,
           phone: riders.phone,
+          email: riders.email,
           vehicleType: riders.vehicleType,
           zone: riders.zone,
           isAvailable: riders.isAvailable,
@@ -3201,16 +3271,25 @@ app.get(
         .where(eq(riders.status, 'approved'));
 
       const enriched = riderRows
-        .map((r) => ({
-          ...r,
-          distanceKm: targetRest
-            ? Math.round(
-                haversineDistanceKm(r.currentLat, r.currentLng, targetRest.lat, targetRest.lng) *
-                  100
-              ) / 100
-            : null,
-        }))
+        .map((r) => {
+          const isOwnRider = Boolean(
+            (targetRest && r.restaurantId === targetRest.id) ||
+              (r.restaurantId && ownedSet.has(r.restaurantId)) ||
+              r.addedByUid === req.user!.uid
+          );
+          return {
+            ...r,
+            isOwnRider,
+            distanceKm: targetRest
+              ? Math.round(
+                  haversineDistanceKm(r.currentLat, r.currentLng, targetRest.lat, targetRest.lng) *
+                    100
+                ) / 100
+              : null,
+          };
+        })
         .sort((a, b) => {
+          if (a.isOwnRider !== b.isOwnRider) return a.isOwnRider ? -1 : 1;
           if (a.isAvailable !== b.isAvailable) return a.isAvailable ? -1 : 1;
           if (a.distanceKm !== null && b.distanceKm !== null) {
             return a.distanceKm - b.distanceKm;
@@ -3221,6 +3300,233 @@ app.get(
       res.json({ riders: enriched });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to load riders' });
+    }
+  }
+);
+
+// Vendor Direct Delivery Man: restaurant owner directly adds a delivery man to their store fleet
+app.post(
+  '/api/vendor/riders',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const check = validateVendorAddRiderPayload(req.body || {});
+    if (check.valid === false) {
+      return res.status(400).json({ error: check.reason });
+    }
+    const { restaurantId, fullName, phone, email, password, vehicleType, zone, nidNumber } =
+      check.data;
+
+    try {
+      const restRows = await db
+        .select()
+        .from(restaurants)
+        .where(eq(restaurants.id, restaurantId))
+        .limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: 'Restaurant not found' });
+      const rest = restRows[0];
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      if (!isAdmin && rest.ownerUid !== req.user!.uid) {
+        return res.status(403).json({ error: 'Forbidden: Not owner of this restaurant' });
+      }
+
+      const existingUsers = await db
+        .select()
+        .from(users)
+        .where(sql`lower(${users.email}) = ${email}`)
+        .limit(1);
+      if (
+        existingUsers.length > 0 &&
+        (existingUsers[0].role === 'admin' || existingUsers[0].role === 'super_admin')
+      ) {
+        return res.status(409).json({
+          error: 'This email belongs to an admin account and cannot be registered as a rider.',
+        });
+      }
+
+      const riderUid = existingUsers[0]?.uid || `rdr-${crypto.randomBytes(6).toString('hex')}`;
+
+      if (existingUsers.length === 0) {
+        await db.insert(users).values({
+          uid: riderUid,
+          email,
+          fullName,
+          phone,
+          role: 'rider',
+        });
+      } else if (existingUsers[0].role === 'customer') {
+        await db
+          .update(users)
+          .set({ role: 'rider', fullName, phone, updatedAt: new Date() })
+          .where(eq(users.uid, existingUsers[0].uid));
+      }
+
+      if (password) {
+        await db
+          .insert(localCredentials)
+          .values({
+            email,
+            uid: riderUid,
+            passwordHash: hashPasswordScrypt(password),
+          })
+          .onConflictDoUpdate({
+            target: localCredentials.email,
+            set: { passwordHash: hashPasswordScrypt(password) },
+          });
+      }
+
+      const upserted = await db
+        .insert(riders)
+        .values({
+          uid: riderUid,
+          restaurantId: rest.id,
+          addedByUid: req.user!.uid,
+          fullName,
+          phone,
+          email,
+          vehicleType,
+          nidNumber,
+          zone,
+          isAvailable: true,
+          status: 'approved',
+          currentLat: rest.lat,
+          currentLng: rest.lng,
+          locationUpdatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: riders.uid,
+          set: {
+            restaurantId: rest.id,
+            addedByUid: req.user!.uid,
+            fullName,
+            phone,
+            email,
+            vehicleType,
+            nidNumber: nidNumber || undefined,
+            zone,
+            isAvailable: true,
+            status: 'approved',
+            locationUpdatedAt: new Date(),
+          },
+        })
+        .returning();
+
+      await db.insert(auditLogs).values({
+        actorUid: req.user!.uid,
+        action: 'vendor_added_rider',
+        targetType: 'rider',
+        targetId: String(upserted[0].id),
+        details: JSON.stringify({ restaurantId: rest.id, fullName, email, vehicleType }),
+      });
+
+      broadcastNotificationEvent({
+        recipientUid: riderUid,
+        roleTarget: 'rider',
+        title: `Added as Rider · ${rest.name}`,
+        message: `${rest.name} added you as a delivery rider for ${zone}.`,
+        type: 'system',
+      });
+
+      res.status(201).json({
+        rider: {
+          ...upserted[0],
+          isOwnRider: true,
+          distanceKm: 0,
+        },
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to add delivery man' });
+    }
+  }
+);
+
+app.patch(
+  '/api/vendor/riders/:id',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const riderId = Number(req.params.id);
+    if (!Number.isInteger(riderId)) return res.status(400).json({ error: 'Invalid rider ID' });
+    const schema = z.object({
+      isAvailable: z.boolean().optional(),
+      fullName: z.string().trim().min(2).max(100).optional(),
+      phone: z.string().trim().min(6).max(30).optional(),
+      vehicleType: z.string().trim().min(2).max(60).optional(),
+      zone: z.string().trim().min(2).max(120).optional(),
+    });
+    const parsed = schema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid rider update payload' });
+
+    try {
+      const existing = await db.select().from(riders).where(eq(riders.id, riderId)).limit(1);
+      if (existing.length === 0) return res.status(404).json({ error: 'Rider not found' });
+      const row = existing[0];
+
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      let ownsRest = row.addedByUid === req.user!.uid;
+      if (!ownsRest && row.restaurantId) {
+        const restRows = await db
+          .select({ ownerUid: restaurants.ownerUid })
+          .from(restaurants)
+          .where(eq(restaurants.id, row.restaurantId))
+          .limit(1);
+        ownsRest = restRows[0]?.ownerUid === req.user!.uid;
+      }
+      if (!isAdmin && !ownsRest) {
+        return res.status(403).json({
+          error: 'Only riders added to your own restaurant can be modified here.',
+        });
+      }
+
+      const d = parsed.data;
+      const updated = await db
+        .update(riders)
+        .set({
+          isAvailable: d.isAvailable ?? row.isAvailable,
+          fullName: d.fullName ?? row.fullName,
+          phone: d.phone ?? row.phone,
+          vehicleType: d.vehicleType ?? row.vehicleType,
+          zone: d.zone ?? row.zone,
+        })
+        .where(eq(riders.id, riderId))
+        .returning();
+      res.json({ rider: { ...updated[0], isOwnRider: true } });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to update rider' });
+    }
+  }
+);
+
+app.delete(
+  '/api/vendor/riders/:id',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const riderId = Number(req.params.id);
+    if (!Number.isInteger(riderId)) return res.status(400).json({ error: 'Invalid rider ID' });
+    try {
+      const existing = await db.select().from(riders).where(eq(riders.id, riderId)).limit(1);
+      if (existing.length === 0) return res.status(404).json({ error: 'Rider not found' });
+      const row = existing[0];
+
+      const isAdmin = req.user!.role === 'super_admin' || req.user!.role === 'admin';
+      let ownsRest = row.addedByUid === req.user!.uid;
+      if (!ownsRest && row.restaurantId) {
+        const restRows = await db
+          .select({ ownerUid: restaurants.ownerUid })
+          .from(restaurants)
+          .where(eq(restaurants.id, row.restaurantId))
+          .limit(1);
+        ownsRest = restRows[0]?.ownerUid === req.user!.uid;
+      }
+      if (!isAdmin && !ownsRest) {
+        return res.status(403).json({ error: 'Forbidden: Rider does not belong to your restaurant' });
+      }
+
+      await db.delete(riders).where(eq(riders.id, riderId));
+      res.json({ deleted: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to remove rider' });
     }
   }
 );
@@ -3802,6 +4108,8 @@ app.patch(
           .insert(riders)
           .values({
             uid: riderUid,
+            restaurantId: appRow.restaurantId,
+            addedByUid: req.user!.uid,
             fullName: appRow.fullName,
             phone: appRow.phone,
             email: emailLower,
@@ -3816,6 +4124,8 @@ app.patch(
           .onConflictDoUpdate({
             target: riders.uid,
             set: {
+              restaurantId: appRow.restaurantId,
+              addedByUid: req.user!.uid,
               fullName: appRow.fullName,
               phone: appRow.phone,
               vehicleType: appRow.vehicleType,
@@ -6152,6 +6462,47 @@ app.get(
 );
 
 app.get(
+  '/api/admin/seo-check',
+  requireAuth,
+  requireRole(['admin', 'super_admin']),
+  async (req, res) => {
+    try {
+      const origin = getRequestOrigin(req);
+      const [settings, approved] = await Promise.all([
+        getPlatformSettingsRow(),
+        getApprovedRestaurants(),
+      ]);
+      const sc = mergeStorefrontConfig(settings?.storefrontConfig);
+      const verificationToken = (
+        sc.googleSiteVerification ||
+        process.env.GOOGLE_SITE_VERIFICATION ||
+        ''
+      ).trim();
+      const sitemapXml = buildSitemapXml(
+        origin,
+        approved.map((r) => ({ slug: r.slug, updatedAt: r.updatedAt }))
+      );
+      const robotsTxt = buildRobotsTxt(origin);
+      res.json({
+        ok: true,
+        origin,
+        sitemapUrl: `${origin}/sitemap.xml`,
+        robotsUrl: `${origin}/robots.txt`,
+        indexedUrls: approved.length + 1,
+        googleVerificationConfigured: Boolean(verificationToken),
+        verificationPreview: verificationToken
+          ? `${verificationToken.slice(0, 6)}...`
+          : '',
+        sitemapBytes: sitemapXml.length,
+        robotsOk: robotsTxt.includes('Sitemap:'),
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'SEO verification check failed' });
+    }
+  }
+);
+
+app.get(
   '/api/admin/email-settings',
   requireAuth,
   requireRole(['admin', 'super_admin']),
@@ -7153,8 +7504,31 @@ async function startServer() {
     const distPath = path.resolve(PROJECT_ROOT, 'dist');
     if (fs.existsSync(distPath)) {
       app.use(express.static(distPath));
-      app.get('*', (_req, res) => {
-        res.sendFile(path.join(distPath, 'index.html'));
+      app.get('*', async (_req, res) => {
+        const indexPath = path.join(distPath, 'index.html');
+        try {
+          let html = fs.readFileSync(indexPath, 'utf8');
+          const settings = hasDatabaseConfig()
+            ? await getPlatformSettingsRow().catch(() => null)
+            : null;
+          const sc = mergeStorefrontConfig(settings?.storefrontConfig);
+          const token = (
+            sc.googleSiteVerification ||
+            process.env.GOOGLE_SITE_VERIFICATION ||
+            ''
+          ).trim();
+          if (token && !html.includes('name="google-site-verification"')) {
+            const safeToken = token.replace(/["<>]/g, '');
+            html = html.replace(
+              '</head>',
+              `  <meta name="google-site-verification" content="${safeToken}" />\n  </head>`
+            );
+          }
+          res.setHeader('Content-Type', 'text/html; charset=utf-8');
+          return res.send(html);
+        } catch {
+          return res.sendFile(indexPath);
+        }
       });
     }
   }

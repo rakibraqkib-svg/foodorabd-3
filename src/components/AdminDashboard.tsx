@@ -302,6 +302,16 @@ export function AdminDashboard({
   const [storefrontForm, setStorefrontForm] = useState<StorefrontConfig>(DEFAULT_STOREFRONT_CONFIG);
   const [savingFrontend, setSavingFrontend] = useState(false);
   const [savingActiveBarToggle, setSavingActiveBarToggle] = useState(false);
+  const [checkingSeo, setCheckingSeo] = useState(false);
+  const [seoCheckResult, setSeoCheckResult] = useState<{
+    ok: boolean;
+    sitemapUrl: string;
+    robotsUrl: string;
+    indexedUrls: number;
+    googleVerificationConfigured: boolean;
+    robotsOk: boolean;
+  } | null>(null);
+  const [copiedSitemap, setCopiedSitemap] = useState(false);
 
   // Order & Dispatch Filter
   const [orderFilter, setOrderFilter] = useState<'all' | 'active' | 'closed'>('all');
@@ -3927,13 +3937,73 @@ export function AdminDashboard({
                   </div>
                 </div>
 
-                {/* Live Google Search Snippet Preview */}
-                <div className="p-3.5 rounded-xl bg-neutral-50 border border-neutral-200 space-y-1">
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">
-                    Google Search Result Preview
-                  </p>
+                {/* Live Google Search Snippet Preview + Search Console Submission Helper */}
+                <div className="p-3.5 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">
+                      Google Search Result Preview
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setCheckingSeo(true);
+                          try {
+                            const res = await apiFetch<{
+                              ok: boolean;
+                              sitemapUrl: string;
+                              robotsUrl: string;
+                              indexedUrls: number;
+                              googleVerificationConfigured: boolean;
+                              robotsOk: boolean;
+                            }>('/api/admin/seo-check');
+                            setSeoCheckResult(res);
+                          } catch (err) {
+                            setErrorMsg(
+                              err instanceof Error ? err.message : 'SEO check failed'
+                            );
+                          } finally {
+                            setCheckingSeo(false);
+                          }
+                        }}
+                        disabled={checkingSeo}
+                        className="px-2.5 py-1 rounded-lg bg-white border border-neutral-200 text-[11px] font-semibold text-[#2E3138] hover:border-[#E21B70] disabled:opacity-50"
+                      >
+                        {checkingSeo ? 'Checking...' : 'Verify Sitemap & Robots'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const sitemapUrl = `${
+                            typeof window !== 'undefined'
+                              ? window.location.origin
+                              : 'https://foodorabd-3-nine.vercel.app'
+                          }/sitemap.xml`;
+                          navigator.clipboard?.writeText(sitemapUrl);
+                          setCopiedSitemap(true);
+                          setTimeout(() => setCopiedSitemap(false), 1800);
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-white border border-neutral-200 text-[11px] font-semibold text-[#2E3138] hover:border-[#E21B70] inline-flex items-center gap-1"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>{copiedSitemap ? 'Copied!' : 'Copy Sitemap URL'}</span>
+                      </button>
+                      <a
+                        href="https://search.google.com/search-console/welcome"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-2.5 py-1 rounded-lg bg-[#E21B70] text-white text-[11px] font-semibold inline-flex items-center gap-1 hover:bg-[#C4135E]"
+                      >
+                        <span>Open Google Search Console</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                  </div>
                   <p className="text-[11px] text-emerald-700 truncate">
-                    {typeof window !== 'undefined' ? window.location.origin : 'https://foodorabd.com'}/
+                    {typeof window !== 'undefined'
+                      ? window.location.origin
+                      : 'https://foodorabd-3-nine.vercel.app'}
+                    /
                   </p>
                   <p className="text-sm font-semibold text-[#1a0dab] truncate">
                     {lang === 'bn' ? storefrontForm.seoTitleBn : storefrontForm.seoTitleEn}
@@ -3941,6 +4011,23 @@ export function AdminDashboard({
                   <p className="text-xs text-neutral-600 line-clamp-2">
                     {lang === 'bn' ? storefrontForm.seoDescriptionBn : storefrontForm.seoDescriptionEn}
                   </p>
+                  {seoCheckResult && (
+                    <div className="pt-2 border-t border-neutral-200 flex flex-wrap items-center gap-3 text-[11px] text-neutral-700">
+                      <span className="inline-flex items-center gap-1 font-semibold text-emerald-700">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        Sitemap Live ({seoCheckResult.indexedUrls} URLs)
+                      </span>
+                      <span>·</span>
+                      <span>Robots.txt: {seoCheckResult.robotsOk ? 'Valid' : 'Missing'}</span>
+                      <span>·</span>
+                      <span>
+                        Verification Tag:{' '}
+                        {seoCheckResult.googleVerificationConfigured
+                          ? 'Configured'
+                          : 'Paste token above & Save'}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

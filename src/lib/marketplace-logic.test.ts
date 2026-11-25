@@ -71,6 +71,9 @@ import {
   toPublicAiProviderView,
   toAdminAiProviderView,
   validateRiderJobPayload,
+  normalizeVariationsList,
+  normalizeAddonsList,
+  validateVendorAddRiderPayload,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 import { BANGLADESH_AREAS, BANGLADESH_SEARCH_PLACES, DHAKA_DELIVERY_ZONES } from './i18n';
@@ -1358,6 +1361,78 @@ test('validateRiderJobPayload validates restaurant job inputs and supports rider
   assert.equal(canTransitionOrderStatus('preparing', 'rider_assigned'), true);
   assert.equal(canTransitionOrderStatus('rider_assigned', 'delivered'), true);
 });
+
+test('normalizeVariationsList & normalizeAddonsList clean duplicates, prices, and defaults', () => {
+  assert.deepEqual(normalizeVariationsList([]), [{ name: 'Regular', priceDelta: 0 }]);
+  assert.deepEqual(normalizeVariationsList([], false), []);
+
+  const vars = normalizeVariationsList([
+    { name: '  Half ', priceDelta: -80.4 },
+    { name: 'half', priceDelta: 10 },
+    { name: 'Full Platter', priceDelta: 180 },
+    { name: '', priceDelta: 50 },
+  ]);
+  assert.deepEqual(vars, [
+    { name: 'Half', priceDelta: -80 },
+    { name: 'Full Platter', priceDelta: 180 },
+  ]);
+
+  const addons = normalizeAddonsList([
+    { name: ' Extra Cheese ', price: 65 },
+    { name: 'extra cheese', price: 99 },
+    { name: 'Free Sauce', price: -20 },
+  ]);
+  assert.deepEqual(addons, [
+    { name: 'Extra Cheese', price: 65 },
+    { name: 'Free Sauce', price: 0 },
+  ]);
+});
+
+test('validateVendorAddRiderPayload validates phone, email, optional password, and store ownership input', () => {
+  const badStore = validateVendorAddRiderPayload({
+    restaurantId: 0,
+    fullName: 'Arif',
+    phone: '01712345678',
+    email: 'arif@bd.com',
+  });
+  assert.equal(badStore.valid, false);
+
+  const badPhone = validateVendorAddRiderPayload({
+    restaurantId: 1,
+    fullName: 'Arif Hasan',
+    phone: '12345',
+    email: 'arif@bd.com',
+  });
+  assert.equal(badPhone.valid, false);
+
+  const shortPass = validateVendorAddRiderPayload({
+    restaurantId: 1,
+    fullName: 'Arif Hasan',
+    phone: '01712345678',
+    email: 'arif@bd.com',
+    password: '123',
+  });
+  assert.equal(shortPass.valid, false);
+
+  const ok = validateVendorAddRiderPayload({
+    restaurantId: 2,
+    fullName: '  Arif Hasan ',
+    phone: '01712345678',
+    email: 'ARIF@restaurant.bd',
+    password: 'secret123',
+    vehicleType: 'Motorbike',
+    zone: 'Banani',
+  });
+  assert.equal(ok.valid, true);
+  if (ok.valid) {
+    assert.equal(ok.data.restaurantId, 2);
+    assert.equal(ok.data.fullName, 'Arif Hasan');
+    assert.equal(ok.data.email, 'arif@restaurant.bd');
+    assert.equal(ok.data.phone, '+8801712345678');
+    assert.equal(ok.data.password, 'secret123');
+  }
+});
+
 
 
 

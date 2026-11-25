@@ -3045,4 +3045,140 @@ export function filterOrdersByRestaurantOwnership<T extends { restaurantId: numb
   return allOrders.filter((o) => ownedSet.has(o.restaurantId));
 }
 
+export interface ProductVariationOption {
+  name: string;
+  priceDelta: number;
+}
+
+export interface ProductAddonOption {
+  name: string;
+  price: number;
+}
+
+export function normalizeVariationsList(
+  raw: unknown,
+  fallbackRegular = true
+): ProductVariationOption[] {
+  if (!Array.isArray(raw)) {
+    return fallbackRegular ? [{ name: 'Regular', priceDelta: 0 }] : [];
+  }
+  const seen = new Set<string>();
+  const out: ProductVariationOption[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const rec = entry as { name?: unknown; priceDelta?: unknown };
+    const name = typeof rec.name === 'string' ? rec.name.trim().slice(0, 80) : '';
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const numDelta = Number(rec.priceDelta ?? 0);
+    const priceDelta = Number.isFinite(numDelta)
+      ? Math.max(-50000, Math.min(50000, Math.round(numDelta)))
+      : 0;
+    out.push({ name, priceDelta });
+  }
+  if (out.length === 0 && fallbackRegular) {
+    return [{ name: 'Regular', priceDelta: 0 }];
+  }
+  return out;
+}
+
+export function normalizeAddonsList(raw: unknown): ProductAddonOption[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: ProductAddonOption[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const rec = entry as { name?: unknown; price?: unknown };
+    const name = typeof rec.name === 'string' ? rec.name.trim().slice(0, 80) : '';
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const numPrice = Number(rec.price ?? 0);
+    const price = Number.isFinite(numPrice)
+      ? Math.max(0, Math.min(50000, Math.round(numPrice)))
+      : 0;
+    out.push({ name, price });
+  }
+  return out;
+}
+
+export function validateVendorAddRiderPayload(input: {
+  restaurantId?: unknown;
+  fullName?: unknown;
+  phone?: unknown;
+  email?: unknown;
+  password?: unknown;
+  vehicleType?: unknown;
+  zone?: unknown;
+  nidNumber?: unknown;
+}):
+  | {
+      valid: true;
+      data: {
+        restaurantId: number;
+        fullName: string;
+        phone: string;
+        email: string;
+        password?: string;
+        vehicleType: string;
+        zone: string;
+        nidNumber: string;
+      };
+    }
+  | { valid: false; reason: string } {
+  const restaurantId = Number(input.restaurantId);
+  if (!Number.isInteger(restaurantId) || restaurantId <= 0) {
+    return { valid: false, reason: 'Please select a valid restaurant store.' };
+  }
+  const fullName = typeof input.fullName === 'string' ? input.fullName.trim() : '';
+  if (fullName.length < 2 || fullName.length > 100) {
+    return { valid: false, reason: 'Delivery man full name must be at least 2 characters.' };
+  }
+  const rawPhone = typeof input.phone === 'string' ? input.phone.trim() : '';
+  const digits = rawPhone.replace(/[\s\-()]/g, '');
+  let normalizedPhone = '';
+  if (/^\+?8801[3-9]\d{8}$/.test(digits)) {
+    normalizedPhone = digits.startsWith('+') ? digits : `+${digits}`;
+  } else if (/^01[3-9]\d{8}$/.test(digits)) {
+    normalizedPhone = `+88${digits}`;
+  } else {
+    return { valid: false, reason: 'Please enter a valid Bangladesh mobile number (e.g. 017XXXXXXXX).' };
+  }
+  const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : '';
+  if (!email || !email.includes('@') || email.length < 5) {
+    return { valid: false, reason: 'Please provide a valid email address for the delivery man.' };
+  }
+  const password = typeof input.password === 'string' ? input.password : '';
+  if (password.trim().length > 0 && password.trim().length < 6) {
+    return { valid: false, reason: 'Login password must be at least 6 characters (or leave blank).' };
+  }
+  const vehicleType =
+    typeof input.vehicleType === 'string' && input.vehicleType.trim().length >= 2
+      ? input.vehicleType.trim().slice(0, 60)
+      : 'Motorbike';
+  const zone =
+    typeof input.zone === 'string' && input.zone.trim().length >= 2
+      ? input.zone.trim().slice(0, 120)
+      : 'Gulshan 2';
+  const nidNumber = typeof input.nidNumber === 'string' ? input.nidNumber.trim().slice(0, 50) : '';
+
+  return {
+    valid: true,
+    data: {
+      restaurantId,
+      fullName,
+      phone: normalizedPhone,
+      email,
+      ...(password.trim() ? { password: password.trim() } : {}),
+      vehicleType,
+      zone,
+      nidNumber,
+    },
+  };
+}
+
+
 

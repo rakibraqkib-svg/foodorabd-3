@@ -278,6 +278,8 @@ export const restaurantPayouts = pgTable('restaurant_payouts', {
 export const riders = pgTable('riders', {
   id: serial('id').primaryKey(),
   uid: text('uid').notNull().unique(),
+  restaurantId: integer('restaurant_id'),
+  addedByUid: text('added_by_uid').default(''),
   fullName: text('full_name').notNull(),
   phone: text('phone').notNull(),
   email: text('email').notNull(),
