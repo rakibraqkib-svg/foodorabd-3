@@ -230,6 +230,23 @@ export function VendorDashboard({
   const [regCoverUrl, setRegCoverUrl] = useState('');
   const [submittingReg, setSubmittingReg] = useState(false);
 
+  // Add Branch modal state (1 restaurant per owner, unlimited branches)
+  const [showAddBranchModal, setShowAddBranchModal] = useState(false);
+  const [branchName, setBranchName] = useState('');
+  const [branchNameBn, setBranchNameBn] = useState('');
+  const [branchArea, setBranchArea] = useState(BANGLADESH_AREAS[1]?.name || BANGLADESH_AREAS[0].name);
+  const [branchAddress, setBranchAddress] = useState('');
+  const [branchCoords, setBranchCoords] = useState({
+    lat: BANGLADESH_AREAS[1]?.lat || BANGLADESH_AREAS[0].lat,
+    lng: BANGLADESH_AREAS[1]?.lng || BANGLADESH_AREAS[0].lng,
+  });
+  const [branchPhone, setBranchPhone] = useState('+8801712345678');
+  const [branchDeliveryFee, setBranchDeliveryFee] = useState('49');
+  const [branchMinOrder, setBranchMinOrder] = useState('150');
+  const [branchDeliveryMode, setBranchDeliveryMode] = useState<DeliveryMode>('platform');
+  const [branchCopyMenu, setBranchCopyMenu] = useState(true);
+  const [creatingBranch, setCreatingBranch] = useState(false);
+
   // Add food item form (with product variants & optional add-ons)
   const [newCategory, setNewCategory] = useState('Main Course');
   const [newName, setNewName] = useState('');
@@ -462,9 +479,36 @@ export function VendorDashboard({
     [canAccessVendorApi, selectedRestaurantId, lang, showNotice]
   );
 
+  const isSuperAdmin = user.role === 'super_admin' || user.role === 'admin';
+  const primaryOwnedRestaurant = useMemo(
+    () => allRestaurants.find((r) => ownRestaurantIds.includes(r.id)) || restaurant,
+    [allRestaurants, ownRestaurantIds, restaurant]
+  );
+
+  const openAddBranchModal = useCallback(() => {
+    const base = primaryOwnedRestaurant || restaurant;
+    const defaultArea = BANGLADESH_AREAS[1] || BANGLADESH_AREAS[0];
+    setBranchName('');
+    setBranchNameBn('');
+    setBranchArea(defaultArea.name);
+    setBranchAddress('');
+    setBranchCoords({ lat: defaultArea.lat, lng: defaultArea.lng });
+    setBranchPhone(base?.phone || '+8801712345678');
+    setBranchDeliveryFee(String(base?.deliveryFee ?? 49));
+    setBranchMinOrder(String(base?.minOrder ?? 150));
+    setBranchDeliveryMode(base?.deliveryMode || 'platform');
+    setBranchCopyMenu(true);
+    setShowAddBranchModal(true);
+  }, [primaryOwnedRestaurant, restaurant]);
+
   useEffect(() => {
+    if (initialOnboarding && !isSuperAdmin && ownRestaurantIds.length >= 1) {
+      setShowOnboarding(false);
+      openAddBranchModal();
+      return;
+    }
     setShowOnboarding(initialOnboarding);
-  }, [initialOnboarding]);
+  }, [initialOnboarding, isSuperAdmin, ownRestaurantIds.length, openAddBranchModal]);
 
   useEffect(() => {
     if (initialRestaurantId && initialRestaurantId !== selectedRestaurantId) {
@@ -610,6 +654,51 @@ export function VendorDashboard({
       showNotice(err instanceof Error ? err.message : 'Registration failed', false);
     } finally {
       setSubmittingReg(false);
+    }
+  };
+
+  const handleCreateBranch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!branchName.trim() || !branchAddress.trim()) return;
+    setCreatingBranch(true);
+    setFeedback(null);
+    try {
+      const targetPrimary = primaryOwnedRestaurant || restaurant;
+      const res = await apiFetch<{ branch: Restaurant; copiedItemsCount: number }>(
+        '/api/vendor/branches',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            primaryRestaurantId: targetPrimary?.id,
+            branchName: branchName.trim(),
+            branchNameBn: branchNameBn.trim(),
+            area: branchArea.trim(),
+            address: branchAddress.trim(),
+            lat: branchCoords.lat,
+            lng: branchCoords.lng,
+            phone: branchPhone.trim(),
+            deliveryFee: Math.max(0, Number(branchDeliveryFee) || 49),
+            minOrder: Math.max(50, Number(branchMinOrder) || 150),
+            deliveryMode: branchDeliveryMode,
+            copyMenu: branchCopyMenu,
+          }),
+        }
+      );
+      setShowAddBranchModal(false);
+      setRestaurant(res.branch);
+      setSelectedRestaurantId(res.branch.id);
+      if (onMenuMutated) await onMenuMutated();
+      showNotice(
+        lang === 'bn'
+          ? `নতুন শাখা "${res.branch.name}" যুক্ত হয়েছে (${res.copiedItemsCount}টি মেনু আইটেম কপি করা হয়েছে)।`
+          : `New branch "${res.branch.name}" added (${res.copiedItemsCount} menu items copied).`,
+        true
+      );
+      await loadWorkspace(res.branch.id);
+    } catch (err: unknown) {
+      showNotice(err instanceof Error ? err.message : 'Could not add branch', false);
+    } finally {
+      setCreatingBranch(false);
     }
   };
 
@@ -1416,13 +1505,17 @@ export function VendorDashboard({
             <select
               value={selectedRestaurantId ?? restaurant.id}
               onChange={(e) => setSelectedRestaurantId(Number(e.target.value))}
-              aria-label="Switch Restaurant Store"
+              aria-label="Switch Restaurant Branch"
               className="px-3 py-1.5 rounded-lg border border-neutral-200 bg-neutral-50 text-xs font-semibold text-[#2E3138] max-w-[230px]"
             >
               <option value={-1}>
-                {lang === 'bn'
-                  ? `সকল স্টোর (${allRestaurants.length})`
-                  : `All My Stores (${allRestaurants.length})`}
+                {isSuperAdmin
+                  ? lang === 'bn'
+                    ? `সকল স্টোর (${allRestaurants.length})`
+                    : `All My Stores (${allRestaurants.length})`
+                  : lang === 'bn'
+                  ? `সকল শাখা (${allRestaurants.length})`
+                  : `All My Branches (${allRestaurants.length})`}
               </option>
               {allRestaurants.map((r) => (
                 <option key={r.id} value={r.id}>
@@ -1502,6 +1595,17 @@ export function VendorDashboard({
           </button>
 
           {restaurant && (
+            <button
+              type="button"
+              onClick={openAddBranchModal}
+              className="px-3 py-1.5 rounded-lg bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold inline-flex items-center gap-1"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>{lang === 'bn' ? 'শাখা যোগ করুন' : 'Add Branch'}</span>
+            </button>
+          )}
+
+          {restaurant && isSuperAdmin && (
             <button
               type="button"
               onClick={() => {
@@ -4285,15 +4389,79 @@ export function VendorDashboard({
 
               {/* ---------------- TAB 7: STORE SETTINGS ---------------- */}
               {tab === 'settings' && (
-                <form
-                  onSubmit={handleSaveSettings}
-                  className="bg-white rounded-2xl border border-neutral-200 p-6 max-w-2xl space-y-4"
-                >
-                  <h2 className="font-bold text-base text-[#2E3138]">
-                    {lang === 'bn'
-                      ? 'লোগো, ব্র্যান্ডিং ও ডেলিভারি সেটিংস'
-                      : 'Restaurant Branding, Logo & Delivery Settings'}
-                  </h2>
+                <div className="space-y-5 max-w-2xl">
+                  <div className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h3 className="font-bold text-sm text-[#2E3138]">
+                          {lang === 'bn'
+                            ? `রেস্টুরেন্ট শাখা সমূহ (${allRestaurants.length})`
+                            : `Restaurant Branches (${allRestaurants.length})`}
+                        </h3>
+                        <p className="text-[11px] text-neutral-500">
+                          {lang === 'bn'
+                            ? 'একজন মালিক ১টি রেস্টুরেন্ট খুলতে পারবেন এবং তার অধীনে যেকোনো এলাকায় নতুন শাখা যোগ করতে পারবেন।'
+                            : '1 restaurant per owner account — expand across Bangladesh by adding new branches under your restaurant.'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={openAddBranchModal}
+                        className="px-3 py-1.5 rounded-lg bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold inline-flex items-center gap-1"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{lang === 'bn' ? 'নতুন শাখা যোগ' : 'Add Branch'}</span>
+                      </button>
+                    </div>
+
+                    <div className="divide-y divide-neutral-100 border-t border-neutral-100">
+                      {allRestaurants.map((b) => (
+                        <div
+                          key={b.id}
+                          className="py-2.5 flex items-center justify-between gap-3 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <p className="font-bold text-[#2E3138] truncate">
+                              {lang === 'bn' ? b.nameBn : b.name}
+                            </p>
+                            <p className="text-[11px] text-neutral-500 truncate">
+                              {b.area} · {b.address}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                                b.status === 'approved'
+                                  ? 'bg-emerald-50 text-emerald-700'
+                                  : 'bg-amber-50 text-amber-700'
+                              }`}
+                            >
+                              {b.status}
+                            </span>
+                            {restaurant?.id !== b.id && (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedRestaurantId(b.id)}
+                                className="px-2.5 py-1 rounded-lg border border-neutral-200 hover:border-[#E21B70] text-[11px] font-semibold"
+                              >
+                                {lang === 'bn' ? 'দেখুন' : 'Switch'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <form
+                    onSubmit={handleSaveSettings}
+                    className="bg-white rounded-2xl border border-neutral-200 p-6 space-y-4"
+                  >
+                    <h2 className="font-bold text-base text-[#2E3138]">
+                      {lang === 'bn'
+                        ? 'লোগো, ব্র্যান্ডিং ও ডেলিভারি সেটিংস'
+                        : 'Restaurant Branding, Logo & Delivery Settings'}
+                    </h2>
 
                   <div className="grid grid-cols-1 gap-4 p-4 rounded-xl bg-[#FAFAFB] border border-neutral-200">
                     <div className="space-y-1.5 text-xs">
@@ -4518,7 +4686,8 @@ export function VendorDashboard({
                       ? 'সেটিংস ও লোগো সংরক্ষণ করুন'
                       : 'Save Settings & Branding'}
                   </button>
-                </form>
+                  </form>
+                </div>
               )}
             </main>
           </div>
@@ -4878,6 +5047,250 @@ export function VendorDashboard({
                       : lang === 'bn'
                       ? 'পরিবর্তন সংরক্ষণ'
                       : 'Save Changes'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* Add New Restaurant Branch Modal */}
+          {showAddBranchModal && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Add restaurant branch"
+              className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 overflow-y-auto"
+            >
+              <form
+                onSubmit={handleCreateBranch}
+                className="bg-white rounded-2xl max-w-xl w-full p-6 space-y-4 shadow-2xl my-8"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-[#E21B70]">
+                      {lang === 'bn'
+                        ? 'মাল্টি-ব্রাঞ্চ এক্সপানশন'
+                        : 'Multi-Branch Expansion'}
+                    </p>
+                    <h3 className="font-bold text-lg text-[#2E3138]">
+                      {lang === 'bn' ? 'নতুন শাখা যোগ করুন' : 'Add New Restaurant Branch'}
+                    </h3>
+                    {(primaryOwnedRestaurant || restaurant) && (
+                      <p className="text-xs text-neutral-500 mt-0.5">
+                        {lang === 'bn' ? 'মূল রেস্টুরেন্ট:' : 'Primary Restaurant:'}{' '}
+                        <span className="font-bold text-[#2E3138]">
+                          {(primaryOwnedRestaurant || restaurant)!.name}
+                        </span>
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddBranchModal(false)}
+                    aria-label="Close add branch modal"
+                    className="p-1.5 rounded-lg text-neutral-400 hover:bg-neutral-100"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label
+                      htmlFor="branch-name-en"
+                      className="block font-semibold text-neutral-700 mb-1"
+                    >
+                      {lang === 'bn' ? 'শাখার নাম (English)' : 'Branch Name (English)'} *
+                    </label>
+                    <input
+                      id="branch-name-en"
+                      required
+                      value={branchName}
+                      onChange={(e) => setBranchName(e.target.value)}
+                      placeholder="e.g. Banani Branch"
+                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="branch-name-bn"
+                      className="block font-semibold text-neutral-700 mb-1"
+                    >
+                      {lang === 'bn' ? 'শাখার নাম (বাংলা, ঐচ্ছিক)' : 'Branch Name (Bangla, Optional)'}
+                    </label>
+                    <input
+                      id="branch-name-bn"
+                      value={branchNameBn}
+                      onChange={(e) => setBranchNameBn(e.target.value)}
+                      placeholder="যেমন: বনানী শাখা"
+                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      {lang === 'bn' ? 'শাখার শহর / এলাকা' : 'Branch City / Area'} *
+                    </label>
+                    <SelectWithCustom
+                      required
+                      lang={lang}
+                      value={branchArea}
+                      onChange={setBranchArea}
+                      storageKey="bd_areas"
+                      ariaLabel="Branch area"
+                      placeholder="Select or enter branch area"
+                      presets={getBangladeshAreaSelectPresets(lang)}
+                      onSelectPreset={(val) => {
+                        const found = BANGLADESH_AREAS.find((a) => a.name === val);
+                        if (found) {
+                          setBranchCoords({ lat: found.lat, lng: found.lng });
+                          if (!branchName.trim()) setBranchName(`${found.name} Branch`);
+                        }
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="branch-phone"
+                      className="block font-semibold text-neutral-700 mb-1"
+                    >
+                      {lang === 'bn' ? 'শাখার ফোন নম্বর' : 'Branch Phone'} *
+                    </label>
+                    <input
+                      id="branch-phone"
+                      required
+                      value={branchPhone}
+                      onChange={(e) => setBranchPhone(e.target.value)}
+                      placeholder="+880 1711-000000"
+                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="text-xs">
+                  <label
+                    htmlFor="branch-address"
+                    className="block font-semibold text-neutral-700 mb-1"
+                  >
+                    {lang === 'bn' ? 'শাখার সম্পূর্ণ ঠিকানা' : 'Branch Street Address'} *
+                  </label>
+                  <input
+                    id="branch-address"
+                    required
+                    value={branchAddress}
+                    onChange={(e) => setBranchAddress(e.target.value)}
+                    placeholder={`Road, House, ${branchArea}, Bangladesh`}
+                    className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
+                  />
+                </div>
+
+                <div>
+                  <DhakaMapPicker
+                    mapsApiKey={mapsApiKey}
+                    lang={lang}
+                    center={branchCoords}
+                    markerLabel={branchName || branchArea}
+                    pinType="vendor"
+                    restaurantName={branchName || (primaryOwnedRestaurant || restaurant)?.name}
+                    interactive
+                    heightClass="h-[180px]"
+                    onSelectLocation={(loc) => {
+                      setBranchCoords({ lat: loc.lat, lng: loc.lng });
+                      if (loc.areaName && loc.areaName !== 'Current GPS') {
+                        setBranchArea(loc.areaName);
+                      }
+                      const formatted = formatResolvedMapAddress({
+                        displayName: loc.displayName,
+                        areaName: loc.areaName,
+                        lat: loc.lat,
+                        lng: loc.lng,
+                      });
+                      if (formatted && !branchAddress.trim()) {
+                        setBranchAddress(formatted);
+                      }
+                    }}
+                  />
+                </div>
+
+                <div className="grid grid-cols-3 gap-3 text-xs">
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      {lang === 'bn' ? 'ডেলিভারি ফি (৳)' : 'Delivery Fee (৳)'}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={300}
+                      value={branchDeliveryFee}
+                      onChange={(e) => setBranchDeliveryFee(e.target.value)}
+                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      {lang === 'bn' ? 'মিনিমাম অর্ডার' : 'Min Order (৳)'}
+                    </label>
+                    <input
+                      type="number"
+                      min={50}
+                      max={5000}
+                      value={branchMinOrder}
+                      onChange={(e) => setBranchMinOrder(e.target.value)}
+                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      {lang === 'bn' ? 'ডেলিভারি' : 'Delivery Mode'}
+                    </label>
+                    <select
+                      value={branchDeliveryMode}
+                      onChange={(e) => setBranchDeliveryMode(e.target.value as DeliveryMode)}
+                      className="w-full px-2.5 py-2 text-xs border border-neutral-200 rounded-lg bg-white"
+                    >
+                      <option value="platform">Foodora Rider</option>
+                      <option value="third_party">Pathao Courier</option>
+                      <option value="restaurant">Own Fleet</option>
+                    </select>
+                  </div>
+                </div>
+
+                <label className="flex items-center gap-2.5 p-3 rounded-xl bg-[#FAFAFB] border border-neutral-200 cursor-pointer text-xs">
+                  <input
+                    type="checkbox"
+                    checked={branchCopyMenu}
+                    onChange={(e) => setBranchCopyMenu(e.target.checked)}
+                    className="w-4 h-4 accent-[#E21B70] rounded"
+                  />
+                  <span className="font-semibold text-[#2E3138]">
+                    {lang === 'bn'
+                      ? 'মূল রেস্টুরেন্টের বর্তমান মেনু আইটেমগুলো এই শাখায় কপি করুন'
+                      : 'Copy existing menu items from main restaurant to this branch'}
+                  </span>
+                </label>
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddBranchModal(false)}
+                    className="px-4 py-2 rounded-xl border border-neutral-200 text-xs font-semibold text-neutral-700"
+                  >
+                    {lang === 'bn' ? 'বাতিল' : 'Cancel'}
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={creatingBranch}
+                    className="px-5 py-2 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold disabled:opacity-50"
+                  >
+                    {creatingBranch
+                      ? lang === 'bn'
+                        ? 'শাখা তৈরি হচ্ছে...'
+                        : 'Adding Branch...'
+                      : lang === 'bn'
+                      ? 'শাখা তৈরি করুন'
+                      : 'Create Branch'}
                   </button>
                 </div>
               </form>

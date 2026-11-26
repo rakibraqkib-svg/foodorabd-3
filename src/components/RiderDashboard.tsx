@@ -4,19 +4,29 @@ import {
   Bell,
   Bike,
   Briefcase,
+  Calendar,
+  Camera,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clock,
-  ExternalLink,
+  Frown,
   History,
+  Languages,
   LocateFixed,
+  Mail,
   MapPin,
+  MessageSquare,
   Navigation,
-  PackageCheck,
   Phone,
   Radio,
   RefreshCw,
   Search,
+  ShieldCheck,
+  Smile,
   Store,
+  Trash2,
+  User,
   Wallet,
   X,
 } from 'lucide-react';
@@ -25,8 +35,14 @@ import { BANGLADESH_AREAS, DHAKA_DELIVERY_ZONES, getBangladeshAreaSelectPresets 
 import {
   advanceRiderAlongRoute,
   calculateLiveRiderEta,
+  calculateRiderLegEtaMin,
+  calculateRiderProfileStats,
   detectOrderBatchChanges,
   formatBdt,
+  formatRiderShortOrderCode,
+  isBicycleVehicleType,
+  resolveRiderCashCollectAmount,
+  sanitizeRiderProfileUpdate,
   VEHICLE_TYPE_PRESET_OPTIONS,
 } from '../lib/marketplace-logic';
 import { emitLocalRealtimeSignal, playOrderAlertChime, useRealtimeEvents } from '../lib/realtime';
@@ -44,18 +60,7 @@ interface RiderDashboardProps {
   onBack: () => void;
 }
 
-type RiderHubTab = 'dispatch' | 'map' | 'earnings' | 'jobs';
-
-const DELIVERY_STEPS: Array<{
-  key: 'rider_assigned' | 'picked_up' | 'on_the_way' | 'delivered';
-  en: string;
-  bn: string;
-}> = [
-  { key: 'rider_assigned', en: 'Assigned', bn: 'গৃহীত' },
-  { key: 'picked_up', en: 'Picked Up', bn: 'পিকআপ' },
-  { key: 'on_the_way', en: 'On The Way', bn: 'পথে আছেন' },
-  { key: 'delivered', en: 'Delivered', bn: 'সম্পন্ন' },
-];
+type RiderHubTab = 'dispatch' | 'map' | 'earnings' | 'jobs' | 'profile';
 
 export function RiderDashboard({
   user,
@@ -81,6 +86,38 @@ export function RiderDashboard({
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [acceptingOrderId, setAcceptingOrderId] = useState<number | null>(null);
   const [updatingOrderId, setUpdatingOrderId] = useState<number | null>(null);
+
+  // Screenshot-matched Rider Sheet Interactive State
+  const [focusedActiveOrderId, setFocusedActiveOrderId] = useState<number | null>(null);
+  const [previewOfferMode, setPreviewOfferMode] = useState(false);
+  const [declinedOfferIds, setDeclinedOfferIds] = useState<number[]>([]);
+  const [focusedOfferIdx, setFocusedOfferIdx] = useState(0);
+  const [itemsExpanded, setItemsExpanded] = useState(true);
+  const [pickupRatingByOrder, setPickupRatingByOrder] = useState<Record<number, 'good' | 'bad'>>({});
+  const [pickupConfirmOrder, setPickupConfirmOrder] = useState<OrderRecord | null>(null);
+  const [translateSheet, setTranslateSheet] = useState(false);
+  const [editingCashOrderId, setEditingCashOrderId] = useState<number | null>(null);
+  const [editedCashInput, setEditedCashInput] = useState('');
+  const [cashCollectOverrideByOrder, setCashCollectOverrideByOrder] = useState<Record<number, number>>({});
+  const [proofPhotoByOrder, setProofPhotoByOrder] = useState<Record<number, string>>({});
+  const [uploadingProofOrderId, setUploadingProofOrderId] = useState<number | null>(null);
+  const [proofUploadError, setProofUploadError] = useState<string | null>(null);
+  const proofFileInputRef = useRef<HTMLInputElement | null>(null);
+  const riderSheetRef = useRef<HTMLDivElement | null>(null);
+
+  // Rider Profile editor state
+  const [profileFullName, setProfileFullName] = useState('');
+  const [profilePhone, setProfilePhone] = useState('');
+  const [profileVehicleType, setProfileVehicleType] = useState('Motorbike');
+  const [profileZone, setProfileZone] = useState(BANGLADESH_AREAS[0].name);
+  const [profileNidNumber, setProfileNidNumber] = useState('');
+  const [profileIsAvailable, setProfileIsAvailable] = useState(true);
+  const [profileAvatarUrl, setProfileAvatarUrl] = useState('');
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [profileSaveError, setProfileSaveError] = useState<string | null>(null);
+  const [profileSaveSuccess, setProfileSaveSuccess] = useState<string | null>(null);
+  const profileAvatarInputRef = useRef<HTMLInputElement | null>(null);
 
   // Live GPS & availability state
   const [sharingGps, setSharingGps] = useState(false);
@@ -224,6 +261,26 @@ export function RiderDashboard({
     assignedSnapshotRef.current = null;
     setLiveDeliveryAlert(null);
   }, [user?.uid]);
+
+  useEffect(() => {
+    if (!rider) return;
+    setProfileFullName(rider.fullName || '');
+    setProfilePhone(rider.phone || '');
+    setProfileVehicleType(rider.vehicleType || 'Motorbike');
+    setProfileZone(rider.zone || BANGLADESH_AREAS[0].name);
+    setProfileNidNumber(rider.nidNumber || '');
+    setProfileIsAvailable(Boolean(rider.isAvailable));
+    setProfileAvatarUrl(rider.avatarUrl || '');
+  }, [
+    rider?.id,
+    rider?.fullName,
+    rider?.phone,
+    rider?.vehicleType,
+    rider?.zone,
+    rider?.nidNumber,
+    rider?.isAvailable,
+    rider?.avatarUrl,
+  ]);
 
   useEffect(() => {
     loadWorkspace(false);
@@ -401,10 +458,11 @@ export function RiderDashboard({
     try {
       await apiFetch(`/api/rider/orders/${orderId}/accept`, { method: 'POST' });
       emitLocalRealtimeSignal('order:updated', { orderId, status: 'rider_assigned' });
+      setFocusedActiveOrderId(orderId);
       setActionSuccess(
         lang === 'bn'
-          ? 'ডেলিভারি অর্ডার গ্রহণ করা হয়েছে! রেস্টুরেন্ট থেকে পিকআপ করুন।'
-          : 'Delivery job accepted! Head to the restaurant for pickup.'
+          ? 'অর্ডার গ্রহণ করা হয়েছে! রেস্টুরেন্টে গিয়ে পিকআপ কনফার্ম করুন।'
+          : 'Order accepted! Head to the vendor for pickup.'
       );
       await loadWorkspace(true);
     } catch (err: unknown) {
@@ -416,7 +474,13 @@ export function RiderDashboard({
 
   const handleUpdateStatus = async (
     orderId: number,
-    status: 'picked_up' | 'on_the_way' | 'delivered'
+    status: 'picked_up' | 'on_the_way' | 'delivered',
+    extra?: {
+      pickupRating?: 'good' | 'bad';
+      proofPhotoUrl?: string;
+      collectedCashAmount?: number;
+      note?: string;
+    }
   ) => {
     setUpdatingOrderId(orderId);
     setActionError(null);
@@ -424,27 +488,226 @@ export function RiderDashboard({
     try {
       await apiFetch(`/api/rider/orders/${orderId}/status`, {
         method: 'PATCH',
-        body: JSON.stringify({ status }),
+        body: JSON.stringify({ status, ...(extra || {}) }),
       });
       emitLocalRealtimeSignal('order:updated', { orderId, status });
       const label =
         status === 'picked_up'
           ? lang === 'bn'
-            ? 'পিকআপ সম্পন্ন হিসেবে আপডেট হয়েছে।'
-            : 'Marked as Picked Up from restaurant.'
+            ? 'পিকআপ কনফার্ম হয়েছে! এবার কাস্টমারের কাছে ড্রপ-অফ করুন।'
+            : 'Pickup confirmed! Head to customer for drop-off.'
           : status === 'on_the_way'
           ? lang === 'bn'
             ? 'কাস্টমারের পথে যাত্রা শুরু হয়েছে।'
             : 'Marked as On The Way to customer.'
           : lang === 'bn'
-          ? 'ডেলিভারি সফলভাবে সম্পন্ন হয়েছে!'
-          : 'Delivery completed! Earnings credited.';
+          ? 'ড্রপ-অফ সম্পন্ন হয়েছে! আয় যুক্ত হয়েছে।'
+          : 'Drop-off confirmed! Earnings credited.';
       setActionSuccess(label);
+      if (status === 'delivered') {
+        setFocusedActiveOrderId(null);
+      }
       await loadWorkspace(true);
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : 'Failed to update delivery status');
     } finally {
       setUpdatingOrderId(null);
+    }
+  };
+
+  const handleUploadProofPhoto = async (orderId: number, file: File) => {
+    setUploadingProofOrderId(orderId);
+    setActionError(null);
+    setProofUploadError(null);
+    try {
+      const rawDataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Could not read photo file.'));
+        reader.readAsDataURL(file);
+      });
+
+      // Automatically compress/resize large phone camera JPGs so uploads never exceed Vercel/server limits
+      let uploadDataUrl = rawDataUrl;
+      if (rawDataUrl.startsWith('data:image/') || file.size > 350_000) {
+        try {
+          uploadDataUrl = await new Promise<string>((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+              const maxDim = 1280;
+              const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+              if (scale >= 1 && rawDataUrl.length <= 450_000 && /^data:image\/(jpeg|jpg|png|webp);base64,/i.test(rawDataUrl)) {
+                resolve(rawDataUrl);
+                return;
+              }
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.max(1, Math.round((img.width || 800) * scale));
+              canvas.height = Math.max(1, Math.round((img.height || 800) * scale));
+              const ctx = canvas.getContext('2d');
+              if (!ctx) {
+                resolve(rawDataUrl);
+                return;
+              }
+              ctx.fillStyle = '#FFFFFF';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              const compressed = canvas.toDataURL('image/jpeg', 0.82);
+              resolve(compressed.startsWith('data:image/') ? compressed : rawDataUrl);
+            };
+            img.onerror = () => resolve(rawDataUrl);
+            img.src = rawDataUrl;
+          });
+        } catch {
+          uploadDataUrl = rawDataUrl;
+        }
+      }
+
+      const res = await apiFetch<{ imageUrl: string }>('/api/upload-image', {
+        method: 'POST',
+        body: JSON.stringify({
+          dataUrl: uploadDataUrl,
+          filename: file.name || `dropoff-proof-${orderId}.jpg`,
+        }),
+      });
+      setProofPhotoByOrder((prev) => ({ ...prev, [orderId]: res.imageUrl }));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Photo upload failed';
+      setProofUploadError(msg);
+      setActionError(msg);
+    } finally {
+      setUploadingProofOrderId(null);
+    }
+  };
+
+  const compressImageFileToDataUrl = async (file: File): Promise<string> => {
+    const rawDataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Could not read photo file.'));
+      reader.readAsDataURL(file);
+    });
+
+    if (!rawDataUrl.startsWith('data:image/') && file.size <= 350_000) {
+      return rawDataUrl;
+    }
+
+    try {
+      return await new Promise<string>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const maxDim = 1280;
+          const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+          if (
+            scale >= 1 &&
+            rawDataUrl.length <= 450_000 &&
+            /^data:image\/(jpeg|jpg|png|webp);base64,/i.test(rawDataUrl)
+          ) {
+            resolve(rawDataUrl);
+            return;
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round((img.width || 800) * scale));
+          canvas.height = Math.max(1, Math.round((img.height || 800) * scale));
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(rawDataUrl);
+            return;
+          }
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const compressed = canvas.toDataURL('image/jpeg', 0.82);
+          resolve(compressed.startsWith('data:image/') ? compressed : rawDataUrl);
+        };
+        img.onerror = () => resolve(rawDataUrl);
+        img.src = rawDataUrl;
+      });
+    } catch {
+      return rawDataUrl;
+    }
+  };
+
+  const handleUploadProfileAvatar = async (file: File) => {
+    setUploadingAvatar(true);
+    setProfileSaveError(null);
+    setProfileSaveSuccess(null);
+    try {
+      const uploadDataUrl = await compressImageFileToDataUrl(file);
+      const uploaded = await apiFetch<{ imageUrl: string }>('/api/upload-image', {
+        method: 'POST',
+        body: JSON.stringify({
+          dataUrl: uploadDataUrl,
+          filename: file.name || 'rider-avatar.jpg',
+        }),
+      });
+      setProfileAvatarUrl(uploaded.imageUrl);
+
+      if (rider) {
+        const check = sanitizeRiderProfileUpdate({
+          fullName: profileFullName || rider.fullName,
+          phone: profilePhone || rider.phone,
+          vehicleType: profileVehicleType || rider.vehicleType,
+          zone: profileZone || rider.zone,
+          nidNumber: profileNidNumber,
+          isAvailable: profileIsAvailable,
+          avatarUrl: uploaded.imageUrl,
+        });
+        if (check.valid) {
+          const saved = await apiFetch<{ rider: RiderRecord }>('/api/rider/profile', {
+            method: 'PATCH',
+            body: JSON.stringify(check.data),
+          });
+          setRider(saved.rider);
+          await onRefreshUser();
+          setProfileSaveSuccess(
+            lang === 'bn'
+              ? 'প্রোফাইল ছবি আপডেট ও সংরক্ষণ হয়েছে!'
+              : 'Profile photo updated and saved!'
+          );
+        }
+      }
+    } catch (err: unknown) {
+      setProfileSaveError(err instanceof Error ? err.message : 'Profile photo upload failed');
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
+
+  const handleSaveRiderProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setProfileSaveError(null);
+    setProfileSaveSuccess(null);
+    const check = sanitizeRiderProfileUpdate({
+      fullName: profileFullName,
+      phone: profilePhone,
+      vehicleType: profileVehicleType,
+      zone: profileZone,
+      nidNumber: profileNidNumber,
+      isAvailable: profileIsAvailable,
+      avatarUrl: profileAvatarUrl,
+    });
+    if (!check.valid) {
+      setProfileSaveError(check.error);
+      return;
+    }
+
+    setSavingProfile(true);
+    try {
+      const res = await apiFetch<{ rider: RiderRecord }>('/api/rider/profile', {
+        method: 'PATCH',
+        body: JSON.stringify(check.data),
+      });
+      setRider(res.rider);
+      await onRefreshUser();
+      setProfileSaveSuccess(
+        lang === 'bn'
+          ? 'রাইডার প্রোফাইল সফলভাবে আপডেট হয়েছে!'
+          : 'Rider profile updated successfully!'
+      );
+    } catch (err: unknown) {
+      setProfileSaveError(err instanceof Error ? err.message : 'Could not update rider profile');
+    } finally {
+      setSavingProfile(false);
     }
   };
 
@@ -468,16 +731,16 @@ export function RiderDashboard({
 
   const activeDeliveries = useMemo(
     () =>
-      assignedOrders.filter((o) =>
-        ['rider_assigned', 'picked_up', 'on_the_way'].includes(o.status)
+      assignedOrders.filter(
+        (o) => !['delivered', 'cancelled'].includes(o.status)
       ),
     [assignedOrders]
   );
 
   const pastDeliveries = useMemo(
     () =>
-      assignedOrders.filter(
-        (o) => !['rider_assigned', 'picked_up', 'on_the_way'].includes(o.status)
+      assignedOrders.filter((o) =>
+        ['delivered', 'cancelled'].includes(o.status)
       ),
     [assignedOrders]
   );
@@ -715,15 +978,34 @@ export function RiderDashboard({
 
             <div>
               <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                {lang === 'bn' ? 'জাতীয় পরিচয়পত্র (NID) নম্বর' : 'NID Number'}
+                {isBicycleVehicleType(vehicleType)
+                  ? lang === 'bn'
+                    ? 'জাতীয় পরিচয়পত্র (NID) নম্বর (ঐচ্ছিক)'
+                    : 'NID Number (Optional)'
+                  : lang === 'bn'
+                  ? 'জাতীয় পরিচয়পত্র (NID) / ড্রাইভিং লাইসেন্স নম্বর'
+                  : 'NID / Driving License Number'}
               </label>
               <input
-                required
+                required={!isBicycleVehicleType(vehicleType)}
                 value={nidNumber}
                 onChange={(e) => setNidNumber(e.target.value)}
-                placeholder="10, 13, or 17 digit NID"
+                placeholder={
+                  isBicycleVehicleType(vehicleType)
+                    ? lang === 'bn'
+                      ? 'সাইকেলের জন্য ড্রাইভিং লাইসেন্সের দরকার নেই (NID ঐচ্ছিক)'
+                      : 'No driving license needed for Bicycle (NID optional)'
+                    : '10, 13, or 17 digit NID or License No.'
+                }
                 className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
               />
+              {isBicycleVehicleType(vehicleType) && (
+                <p className="text-[11px] text-emerald-700 mt-1">
+                  {lang === 'bn'
+                    ? 'সাইকেল রাইডারদের জন্য ড্রাইভিং লাইসেন্স লাগবে না।'
+                    : 'Bicycle selected — no driving license required.'}
+                </p>
+              )}
             </div>
 
             <div>
@@ -827,13 +1109,40 @@ export function RiderDashboard({
           {/* Rider Hub Identity & Instant Duty Switch Header */}
           <div className="bg-white rounded-2xl border border-neutral-200 p-5 flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-3.5">
-              <div className="w-12 h-12 rounded-xl bg-[#FFF0F6] text-[#E21B70] flex items-center justify-center shrink-0">
-                <Bike className="w-6 h-6" />
-              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('profile')}
+                aria-label="Open rider profile"
+                className="w-12 h-12 rounded-xl bg-[#FFF0F6] text-[#E21B70] flex items-center justify-center shrink-0 overflow-hidden border border-[#E21B70]/20 hover:border-[#E21B70] transition-colors"
+              >
+                {rider?.avatarUrl ? (
+                  <img
+                    src={rider.avatarUrl}
+                    alt={rider.fullName}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <Bike className="w-6 h-6" />
+                )}
+              </button>
               <div>
-                <h1 className="text-xl font-bold text-[#2E3138]">
-                  {rider?.fullName || user?.fullName || (lang === 'bn' ? 'রাইডার হাব' : 'Rider Hub')}
-                </h1>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="text-xl font-bold text-[#2E3138]">
+                    {rider?.fullName || user?.fullName || (lang === 'bn' ? 'রাইডার হাব' : 'Rider Hub')}
+                  </h1>
+                  {rider && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-semibold">
+                      <ShieldCheck className="w-3 h-3" />
+                      <span>
+                        {rider.status === 'approved'
+                          ? lang === 'bn'
+                            ? 'ভেরিফায়েড'
+                            : 'Verified'
+                          : rider.status}
+                      </span>
+                    </span>
+                  )}
+                </div>
                 <div className="flex flex-wrap items-center gap-1.5 text-xs text-neutral-500 mt-0.5">
                   <span
                     className={`font-semibold ${
@@ -852,6 +1161,12 @@ export function RiderDashboard({
                   <span>{rider?.vehicleType || 'Motorbike'}</span>
                   <span aria-hidden="true">·</span>
                   <span>{rider?.zone || 'Bangladesh'}</span>
+                  {rider?.phone && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-mono tabular-nums">{rider.phone}</span>
+                    </>
+                  )}
                   <span aria-hidden="true">·</span>
                   <span className="font-mono tabular-nums">
                     {riderCoords.lat.toFixed(4)}, {riderCoords.lng.toFixed(4)}
@@ -916,6 +1231,20 @@ export function RiderDashboard({
                     : 'Start Live GPS'}
                 </span>
               </button>
+              {rider && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('profile')}
+                  className={`px-3.5 py-2.5 rounded-xl text-xs font-semibold border transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                    activeTab === 'profile'
+                      ? 'bg-[#E21B70] text-white border-[#E21B70]'
+                      : 'bg-white text-[#2E3138] border-neutral-200 hover:border-[#E21B70]'
+                  }`}
+                >
+                  <User className="w-3.5 h-3.5" />
+                  <span>{lang === 'bn' ? 'প্রোফাইল' : 'Profile'}</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -1012,398 +1341,1040 @@ export function RiderDashboard({
                 {lang === 'bn' ? 'রাইডার জব বোর্ড' : 'Rider Jobs'} ({riderJobs.length})
               </span>
             </button>
+            {rider && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('profile')}
+                className={`px-3.5 py-2 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+                  activeTab === 'profile'
+                    ? 'bg-white text-[#2E3138] shadow-xs'
+                    : 'text-neutral-600 hover:text-[#2E3138]'
+                }`}
+              >
+                <User className="w-3.5 h-3.5 text-[#E21B70]" />
+                <span>{lang === 'bn' ? 'রাইডার প্রোফাইল' : 'Rider Profile'}</span>
+              </button>
+            )}
           </div>
 
-          {/* ---------------- TAB 1: ACTIVE DELIVERY & DISPATCH QUEUE ---------------- */}
-          {activeTab === 'dispatch' && (
-            <div className="space-y-6">
-              {/* Active Delivery Section */}
-              <section className="space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <h2 className="text-base font-bold text-[#2E3138] flex items-center gap-2">
-                    <PackageCheck className="w-4 h-4 text-[#E21B70]" />
-                    <span>
-                      {lang === 'bn'
-                        ? `চলমান ডেলিভারি টাস্ক (${activeDeliveries.length})`
-                        : `Active Delivery Tasks (${activeDeliveries.length})`}
-                    </span>
-                  </h2>
-                </div>
+          {/* ---------------- TAB 1: DELIVERY WORKSPACE (MAP + BOTTOM SHEET LIKE REFERENCE) ---------------- */}
+          {activeTab === 'dispatch' && (() => {
+            const sheetBn = translateSheet ? lang !== 'bn' : lang === 'bn';
+            const queuedOffersPool = filteredAvailableOrders.filter(
+              (o) => !declinedOfferIds.includes(o.id)
+            );
+            const activeOfferList =
+              queuedOffersPool.length > 0 ? queuedOffersPool : filteredAvailableOrders;
+            const currentOffer =
+              activeOfferList.length > 0
+                ? activeOfferList[focusedOfferIdx % activeOfferList.length]
+                : null;
+            const focusedActive =
+              activeDeliveries.find((o) => o.id === focusedActiveOrderId) ||
+              activeDeliveries[0] ||
+              null;
 
-                {activeDeliveries.length === 0 ? (
-                  <div className="bg-white rounded-2xl border border-neutral-200 p-6 flex flex-wrap items-center justify-between gap-4">
-                    <div>
-                      <p className="text-sm font-semibold text-[#2E3138]">
-                        {lang === 'bn'
-                          ? 'এই মুহূর্তে কোনো সক্রিয় ডেলিভারি চলমান নেই'
-                          : 'No active delivery assigned right now'}
-                      </p>
-                      <p className="text-xs text-neutral-500 mt-0.5">
-                        {lang === 'bn'
-                          ? 'নিচের উন্মুক্ত অর্ডার তালিকা থেকে যেকোনো একটি ডেলিভারি গ্রহণ করুন।'
-                          : 'Accept a waiting order from the Open Dispatch Queue below to begin.'}
-                      </p>
-                    </div>
-                    {rider && !rider.isAvailable && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          persistRiderLocation({
-                            lat: rider.currentLat,
-                            lng: rider.currentLng,
-                            isAvailable: true,
-                          })
-                        }
-                        className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 whitespace-nowrap"
-                      >
-                        {lang === 'bn' ? 'এখনই অনলাইন হোন' : 'Go Online Now'}
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    {activeDeliveries.map((ord) => {
-                      const stepIdx = DELIVERY_STEPS.findIndex((s) => s.key === ord.status);
-                      const etaInfo = calculateLiveRiderEta(
-                        riderCoords.lat,
-                        riderCoords.lng,
-                        ord.deliveryLat,
-                        ord.deliveryLng,
-                        ord.status
-                      );
-                      const isPickupPhase = ord.status === 'rider_assigned';
-                      const pickupMapsUrl =
-                        typeof ord.restaurantLat === 'number' && typeof ord.restaurantLng === 'number'
-                          ? `https://www.google.com/maps/dir/?api=1&destination=${ord.restaurantLat},${ord.restaurantLng}`
-                          : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ord.restaurantName)}`;
-                      const dropoffMapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${ord.deliveryLat},${ord.deliveryLng}`;
-                      const isBusy = updatingOrderId === ord.id;
+            // Display active order if assigned (unless previewing an incoming queue offer), otherwise show Offer screen
+            const sheetMode: 'active' | 'offer' | 'empty' =
+              focusedActive && !(previewOfferMode && currentOffer)
+                ? 'active'
+                : currentOffer
+                ? 'offer'
+                : 'empty';
+            const displayOrder = sheetMode === 'active' ? focusedActive : currentOffer;
 
-                      return (
-                        <div
-                          key={ord.id}
-                          className="bg-white rounded-2xl border border-neutral-200 p-5 space-y-4"
-                        >
-                          {/* Top Row: Order ID + Payout/Payment + Live ETA */}
-                          <div className="flex flex-wrap items-start justify-between gap-3 pb-3 border-b border-neutral-100">
-                            <div>
-                              <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500 font-mono tabular-nums">
-                                <span className="font-bold text-[#2E3138]">{ord.orderNumber}</span>
-                                <span aria-hidden="true">·</span>
-                                <span>
-                                  {etaInfo.remainingKm.toFixed(2)} km · ~{etaInfo.etaMinutes} min ETA
-                                </span>
-                              </div>
-                              <h3 className="text-base font-bold text-[#2E3138] mt-1">
-                                {ord.restaurantName} → {ord.deliveryArea}
-                              </h3>
-                            </div>
+            const vendorCoords =
+              displayOrder &&
+              typeof displayOrder.restaurantLat === 'number' &&
+              typeof displayOrder.restaurantLng === 'number'
+                ? { lat: displayOrder.restaurantLat, lng: displayOrder.restaurantLng }
+                : riderCoords;
 
-                            <div className="text-right tabular-nums">
-                              <p
-                                className={`text-xs font-bold ${
-                                  ord.paymentMethod === 'cod' ? 'text-amber-700' : 'text-emerald-700'
-                                }`}
-                              >
-                                {ord.paymentMethod === 'cod'
-                                  ? lang === 'bn'
-                                    ? `ক্যাশ সংগ্রহ: ${formatBdt(ord.totalAmount, lang)}`
-                                    : `Collect Cash (COD): ${formatBdt(ord.totalAmount, lang)}`
-                                  : lang === 'bn'
-                                  ? `প্রিপেইড (${ord.paymentMethod.toUpperCase()})`
-                                  : `Prepaid (${ord.paymentMethod.toUpperCase()})`}
-                              </p>
-                              <p className="text-xs text-neutral-500 mt-0.5">
-                                {lang === 'bn' ? 'রাইডার ফি:' : 'Delivery Fee:'}{' '}
-                                <span className="font-semibold text-[#E21B70]">
-                                  +{formatBdt(Math.max(40, ord.deliveryFee), lang)}
-                                </span>
-                              </p>
-                            </div>
-                          </div>
+            const customerCoords = displayOrder
+              ? { lat: displayOrder.deliveryLat, lng: displayOrder.deliveryLng }
+              : riderCoords;
 
-                          {/* Visual 4-Step Delivery Progress */}
-                          <div className="grid grid-cols-4 gap-2">
-                            {DELIVERY_STEPS.map((step, idx) => {
-                              const done = stepIdx >= idx;
-                              return (
-                                <div key={step.key} className="space-y-1">
-                                  <div
-                                    className={`h-1.5 rounded-full transition-colors ${
-                                      done ? 'bg-[#E21B70]' : 'bg-neutral-200'
-                                    }`}
-                                  />
-                                  <p
-                                    className={`text-[11px] font-semibold truncate ${
-                                      done ? 'text-[#2E3138]' : 'text-neutral-400'
-                                    }`}
-                                  >
-                                    {idx + 1}. {lang === 'bn' ? step.bn : step.en}
-                                  </p>
-                                </div>
-                              );
-                            })}
-                          </div>
+            const isDropoffStage =
+              sheetMode === 'active' &&
+              (displayOrder?.status === 'picked_up' || displayOrder?.status === 'on_the_way');
+            const isPickupStage =
+              sheetMode === 'active' &&
+              Boolean(displayOrder) &&
+              !isDropoffStage &&
+              !['delivered', 'cancelled'].includes(displayOrder!.status);
 
-                          {/* Pickup & Dropoff Side-by-Side Guide */}
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
-                            <div
-                              className={`p-3.5 rounded-xl border ${
-                                isPickupPhase
-                                  ? 'border-[#E21B70]/40 bg-[#FFF8FB]'
-                                  : 'border-neutral-200 bg-[#FAFAFB]'
-                              }`}
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[11px] font-semibold text-neutral-500 flex items-center gap-1.5">
-                                  <Store className="w-3.5 h-3.5 text-[#E21B70]" />
-                                  {lang === 'bn' ? 'পিকআপ (রেস্টুরেন্ট)' : '1. Pickup (Restaurant)'}
-                                </span>
-                                <a
-                                  href={pickupMapsUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-[11px] font-semibold text-[#E21B70] hover:underline inline-flex items-center gap-1"
-                                >
-                                  <span>{lang === 'bn' ? 'গুগল ম্যাপ' : 'Navigate'}</span>
-                                  <ExternalLink className="w-3 h-3" />
-                                </a>
-                              </div>
-                              <p className="text-sm font-bold text-[#2E3138] mt-1">
-                                {ord.restaurantName}
-                              </p>
-                              <p className="text-xs text-neutral-600 mt-0.5">
-                                {(ord.itemsSnapshotJson || [])
-                                  .map((it) => `${it.quantity}× ${it.name}`)
-                                  .join(', ')}
-                              </p>
-                            </div>
+            const pickupEtaMin = displayOrder
+              ? calculateRiderLegEtaMin(
+                  riderCoords.lat,
+                  riderCoords.lng,
+                  vendorCoords.lat,
+                  vendorCoords.lng,
+                  2
+                )
+              : 5;
+            const dropoffEtaMin = displayOrder
+              ? calculateRiderLegEtaMin(
+                  isPickupStage ? vendorCoords.lat : riderCoords.lat,
+                  isPickupStage ? vendorCoords.lng : riderCoords.lng,
+                  customerCoords.lat,
+                  customerCoords.lng,
+                  2
+                )
+              : 18;
 
-                            <div
-                              className={`p-3.5 rounded-xl border ${
-                                !isPickupPhase
-                                  ? 'border-[#E21B70]/40 bg-[#FFF8FB]'
-                                  : 'border-neutral-200 bg-[#FAFAFB]'
-                              }`}
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[11px] font-semibold text-neutral-500 flex items-center gap-1.5">
-                                  <MapPin className="w-3.5 h-3.5 text-[#E21B70]" />
-                                  {lang === 'bn' ? 'ডেলিভারি (কাস্টমার)' : '2. Dropoff (Customer)'}
-                                </span>
-                                <div className="flex items-center gap-2.5">
-                                  {ord.customerPhone && (
-                                    <a
-                                      href={`tel:${ord.customerPhone}`}
-                                      className="text-[11px] font-semibold text-emerald-700 hover:underline inline-flex items-center gap-1"
-                                    >
-                                      <Phone className="w-3 h-3" />
-                                      <span>{lang === 'bn' ? 'কল করুন' : 'Call'}</span>
-                                    </a>
-                                  )}
-                                  <a
-                                    href={dropoffMapsUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="text-[11px] font-semibold text-[#E21B70] hover:underline inline-flex items-center gap-1"
-                                  >
-                                    <span>{lang === 'bn' ? 'গুগল ম্যাপ' : 'Navigate'}</span>
-                                    <ExternalLink className="w-3 h-3" />
-                                  </a>
-                                </div>
-                              </div>
-                              <p className="text-sm font-bold text-[#2E3138] mt-1">
-                                {ord.customerName} · {ord.customerPhone}
-                              </p>
-                              <p className="text-xs text-neutral-600 mt-0.5">
-                                {ord.deliveryArea} — {ord.deliveryAddress}
-                              </p>
-                              {ord.deliveryInstructions && (
-                                <p className="text-[11px] text-amber-800 mt-1">
-                                  Note: {ord.deliveryInstructions}
-                                </p>
-                              )}
-                            </div>
-                          </div>
+            const navigateUrl = displayOrder
+              ? isPickupStage
+                ? `https://www.google.com/maps/dir/?api=1&destination=${vendorCoords.lat},${vendorCoords.lng}`
+                : `https://www.google.com/maps/dir/?api=1&destination=${customerCoords.lat},${customerCoords.lng}`
+              : '';
 
-                          {/* Primary Step-Forward & Map Controls */}
-                          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              {rider && (
-                                <button
-                                  type="button"
-                                  disabled={syncingLoc}
-                                  onClick={() => handleMoveAlongOrderRoute(ord)}
-                                  className="px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 hover:bg-emerald-100 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap"
-                                >
-                                  <Navigation className="w-3.5 h-3.5" />
-                                  <span>{lang === 'bn' ? 'রুটে এগিয়ে যান' : 'Move Along Route'}</span>
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => onTrackOrder(ord.id)}
-                                className="px-3 py-2 rounded-xl border border-neutral-200 text-xs font-semibold text-[#2E3138] hover:border-[#E21B70] whitespace-nowrap"
-                              >
-                                {lang === 'bn' ? 'লাইভ রুট ম্যাপ' : 'Live Route Map'}
-                              </button>
-                            </div>
+            const shortCode = displayOrder
+              ? formatRiderShortOrderCode(displayOrder.orderNumber, displayOrder.id)
+              : '0000';
+            const itemsList = displayOrder?.itemsSnapshotJson || [];
+            const editedCash = displayOrder
+              ? cashCollectOverrideByOrder[displayOrder.id]
+              : undefined;
+            const cashInfo = displayOrder
+              ? resolveRiderCashCollectAmount(
+                  displayOrder.paymentMethod,
+                  displayOrder.totalAmount,
+                  editedCash
+                )
+              : null;
+            const uploadedProof = displayOrder ? proofPhotoByOrder[displayOrder.id] : undefined;
+            const pickupRating = displayOrder ? pickupRatingByOrder[displayOrder.id] : undefined;
 
-                            <div className="flex flex-wrap items-center gap-2">
-                              {ord.status === 'rider_assigned' && (
-                                <button
-                                  type="button"
-                                  disabled={isBusy}
-                                  onClick={() => handleUpdateStatus(ord.id, 'picked_up')}
-                                  className="px-4 py-2.5 rounded-xl bg-[#2E3138] hover:bg-black text-white text-xs font-semibold disabled:opacity-50 whitespace-nowrap"
-                                >
-                                  {isBusy
-                                    ? lang === 'bn'
-                                      ? 'আপডেট হচ্ছে...'
-                                      : 'Updating...'
-                                    : lang === 'bn'
-                                    ? 'রেস্টুরেন্ট থেকে পিকআপ সম্পন্ন'
-                                    : 'Mark Picked Up'}
-                                </button>
-                              )}
-                              {ord.status === 'picked_up' && (
-                                <button
-                                  type="button"
-                                  disabled={isBusy}
-                                  onClick={() => handleUpdateStatus(ord.id, 'on_the_way')}
-                                  className="px-4 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold disabled:opacity-50 whitespace-nowrap"
-                                >
-                                  {isBusy
-                                    ? lang === 'bn'
-                                      ? 'আপডেট হচ্ছে...'
-                                      : 'Updating...'
-                                    : lang === 'bn'
-                                    ? 'কাস্টমারের পথে রওনা দিন'
-                                    : 'Start Delivery (On The Way)'}
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                disabled={isBusy}
-                                onClick={() => handleUpdateStatus(ord.id, 'delivered')}
-                                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 whitespace-nowrap"
-                              >
-                                <CheckCircle2 className="w-4 h-4" />
-                                <span>
-                                  {isBusy
-                                    ? lang === 'bn'
-                                      ? 'সম্পন্ন হচ্ছে...'
-                                      : 'Completing...'
-                                    : lang === 'bn'
-                                    ? 'ডেলিভারি সম্পন্ন করুন'
-                                    : 'Complete & Mark Delivered'}
-                                </span>
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
-
-              {/* Available Platform Dispatch Queue */}
-              <section className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <h2 className="text-base font-bold text-[#2E3138] flex items-center gap-2">
-                    <Clock className="w-4 h-4 text-[#E21B70]" />
-                    <span>
-                      {lang === 'bn'
-                        ? `ডেলিভারির জন্য উন্মুক্ত অর্ডার (${filteredAvailableOrders.length})`
-                        : `Open Dispatch Queue (${filteredAvailableOrders.length})`}
-                    </span>
-                  </h2>
-                  <div className="relative w-full sm:w-72">
-                    <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                    <input
-                      value={queueSearch}
-                      onChange={(e) => setQueueSearch(e.target.value)}
-                      placeholder={
-                        lang === 'bn'
-                          ? 'রেস্টুরেন্ট, এলাকা বা অর্ডার খুঁজুন...'
-                          : 'Filter by restaurant, area, order #...'
+            return (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                {/* Main Reference Rider Map + Overlapping Bottom Sheet */}
+                <div
+                  ref={riderSheetRef}
+                  className="lg:col-span-7 xl:col-span-6 w-full max-w-[460px] mx-auto lg:max-w-none bg-white rounded-[24px] border border-neutral-200 shadow-lg overflow-hidden scroll-mt-24"
+                >
+                  {/* Top Interactive Route Map */}
+                  <div className="relative">
+                    <DhakaMapPicker
+                      mapsApiKey={mapsApiKey}
+                      lang={lang}
+                      center={
+                        sheetMode === 'offer' || isDropoffStage ? customerCoords : vendorCoords
                       }
-                      className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-neutral-200 rounded-lg"
+                      markerLabel={
+                        displayOrder
+                          ? sheetMode === 'offer' || isDropoffStage
+                            ? `${displayOrder.customerName} (${displayOrder.deliveryArea})`
+                            : displayOrder.restaurantName
+                          : rider?.fullName || 'Rider GPS'
+                      }
+                      pinType={isPickupStage ? 'vendor' : 'user'}
+                      userName={
+                        displayOrder
+                          ? isDropoffStage || sheetMode === 'offer'
+                            ? displayOrder.customerName
+                            : undefined
+                          : rider?.fullName
+                      }
+                      restaurantName={displayOrder?.restaurantName}
+                      secondaryPoint={
+                        displayOrder && (sheetMode === 'offer' || isPickupStage)
+                          ? {
+                              lat: vendorCoords.lat,
+                              lng: vendorCoords.lng,
+                              label: displayOrder.restaurantName,
+                            }
+                          : undefined
+                      }
+                      riderPoint={{
+                        lat: riderCoords.lat,
+                        lng: riderCoords.lng,
+                        label: rider?.fullName || 'You',
+                      }}
+                      riderTarget={isPickupStage ? vendorCoords : customerCoords}
+                      heightClass="h-[250px] sm:h-[280px] !rounded-none !border-0"
                     />
-                  </div>
-                </div>
 
-                {filteredAvailableOrders.length === 0 ? (
-                  <div className="bg-white rounded-2xl border border-neutral-200 p-6 text-sm text-neutral-500">
-                    {queueSearch.trim()
-                      ? lang === 'bn'
-                        ? 'আপনার সার্চের সাথে কোনো অর্ডার মেলেনি।'
-                        : 'No queued orders match your filter.'
-                      : lang === 'bn'
-                      ? 'এই মুহূর্তে কোনো নতুন পেন্ডিং ডেলিভারি নেই। অনলাইন থাকুন — অর্ডার আসলে অ্যালার্ট পাবেন।'
-                      : 'No unassigned Foodora Rider orders waiting right now. Stay online to receive instant alerts.'}
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {filteredAvailableOrders.map((ord) => {
-                      const eta = calculateLiveRiderEta(
-                        riderCoords.lat,
-                        riderCoords.lng,
-                        ord.deliveryLat,
-                        ord.deliveryLng,
-                        'ready'
-                      );
-                      const accepting = acceptingOrderId === ord.id;
-                      return (
-                        <div
-                          key={ord.id}
-                          className="bg-white rounded-2xl border border-neutral-200 p-4 flex flex-col justify-between gap-3"
+                    {/* Top Floating Map Actions (Refresh / Decline / Support) */}
+                    <div className="pointer-events-none absolute top-3 left-3 right-3 z-[450] flex items-center justify-between gap-2">
+                      {sheetMode === 'active' ? (
+                        <button
+                          type="button"
+                          onClick={() => void loadWorkspace(true)}
+                          aria-label="Refresh delivery state"
+                          className="pointer-events-auto w-10 h-10 rounded-full bg-white text-[#E21B70] shadow-md border border-neutral-200/70 flex items-center justify-center hover:bg-[#FFF0F6]"
                         >
-                          <div className="space-y-1.5">
-                            <div className="flex items-center justify-between text-xs text-neutral-500 font-mono tabular-nums">
-                              <span>
-                                {ord.orderNumber} · {eta.remainingKm.toFixed(1)} km
-                              </span>
-                              <span className="font-bold text-[#E21B70]">
-                                +{formatBdt(Math.max(40, ord.deliveryFee), lang)} fee
-                              </span>
-                            </div>
-                            <h3 className="font-bold text-sm text-[#2E3138]">{ord.restaurantName}</h3>
-                            <p className="text-xs text-neutral-600 flex items-start gap-1.5">
-                              <MapPin className="w-3.5 h-3.5 text-neutral-400 shrink-0 mt-0.5" />
-                              <span>
-                                {ord.deliveryArea} — {ord.deliveryAddress}
-                              </span>
-                            </p>
-                            <p className="text-[11px] text-neutral-500">
-                              {ord.paymentMethod === 'cod'
-                                ? `${lang === 'bn' ? 'ক্যাশ অন ডেলিভারি' : 'Cash on Delivery'} (${formatBdt(ord.totalAmount, lang)})`
-                                : `${lang === 'bn' ? 'প্রিপেইড' : 'Prepaid'} (${ord.paymentMethod.toUpperCase()})`}
-                            </p>
-                          </div>
+                          <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                        </button>
+                      ) : (
+                        <span className="pointer-events-auto px-3 py-1.5 rounded-full bg-white/95 text-[#2E3138] text-[11px] font-bold shadow-sm border border-neutral-200/80">
+                          {sheetBn ? 'নতুন ডেলিভারি অফার' : 'Incoming Delivery Offer'}
+                        </span>
+                      )}
+
+                      {sheetMode === 'offer' && displayOrder ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDeclinedOfferIds((prev) =>
+                              prev.includes(displayOrder.id) ? prev : [...prev, displayOrder.id]
+                            );
+                            setFocusedOfferIdx((i) => i + 1);
+                            if (focusedActive) setPreviewOfferMode(false);
+                          }}
+                          className="pointer-events-auto px-4 py-1.5 rounded-full bg-white text-[#E21B70] text-xs font-bold shadow-md border border-neutral-200/80 hover:bg-[#FFF0F6]"
+                        >
+                          {sheetBn ? 'বাতিল (Decline)' : 'Decline'}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('map')}
+                          aria-label="Open full rider GPS map"
+                          className="pointer-events-auto w-10 h-10 rounded-full bg-white text-[#E21B70] shadow-md border border-neutral-200/70 flex items-center justify-center hover:bg-[#FFF0F6]"
+                        >
+                          <MessageSquare className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Floating Pink Navigate Pill Button (on Active Pickup / Drop-off screens) */}
+                    {sheetMode === 'active' && displayOrder && (
+                      <div className="pointer-events-none absolute bottom-6 left-3 right-3 z-[450] flex items-center justify-between gap-2">
+                        <a
+                          href={navigateUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="pointer-events-auto px-4 py-2 rounded-full bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold shadow-lg inline-flex items-center gap-1.5"
+                        >
+                          <Navigation className="w-3.5 h-3.5" />
+                          <span>{sheetBn ? 'নেভিগেট' : 'Navigate'}</span>
+                        </a>
+                        {rider && (
                           <button
                             type="button"
-                            disabled={accepting}
-                            onClick={() => handleAcceptOrder(ord.id)}
-                            className="w-full py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-semibold disabled:opacity-50"
+                            disabled={syncingLoc}
+                            onClick={() => handleMoveAlongOrderRoute(displayOrder)}
+                            className="pointer-events-auto px-3 py-1.5 rounded-full bg-white/95 border border-neutral-200 text-[#2E3138] hover:border-[#E21B70] text-[11px] font-bold shadow-md inline-flex items-center gap-1"
                           >
-                            {accepting
-                              ? lang === 'bn'
+                            <LocateFixed className="w-3 h-3 text-[#E21B70]" />
+                            <span>{sheetBn ? 'রুটে এগোন' : 'Move Along Route'}</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Overlapping Rounded-Top White Bottom Sheet */}
+                  <div className="relative z-10 -mt-4 rounded-t-[24px] bg-white pt-2.5 px-5 pb-5 space-y-4 border-t border-neutral-100">
+                    <div className="w-10 h-1 rounded-full bg-neutral-300 mx-auto" />
+
+                    {/* -------- STATE 0: NO ACTIVE OR QUEUED ORDERS -------- */}
+                    {sheetMode === 'empty' && (
+                      <div className="py-8 text-center space-y-3">
+                        <div className="w-12 h-12 rounded-2xl bg-[#FFF0F6] text-[#E21B70] mx-auto flex items-center justify-center">
+                          <Bike className="w-6 h-6" />
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold text-[#2E3138]">
+                            {sheetBn
+                              ? 'নতুন ডেলিভারি অর্ডারের জন্য অপেক্ষা চলছে'
+                              : 'Waiting for incoming deliveries'}
+                          </h2>
+                          <p className="text-xs text-neutral-500 mt-1">
+                            {sheetBn
+                              ? 'অনলাইন থাকলে নতুন রেস্টুরেন্ট অর্ডার সাথে সাথে এখানে চলে আসবে।'
+                              : 'Stay Online — new orders will pop up right here with payout & route ETA.'}
+                          </p>
+                        </div>
+                        {rider && !rider.isAvailable && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              persistRiderLocation({
+                                lat: rider.currentLat,
+                                lng: rider.currentLng,
+                                isAvailable: true,
+                              })
+                            }
+                            className="px-5 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold"
+                          >
+                            {sheetBn ? 'এখনই অনলাইন হোন' : 'Go Online Now'}
+                          </button>
+                        )}
+                        {declinedOfferIds.length > 0 && availableOrders.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setDeclinedOfferIds([])}
+                            className="block mx-auto text-xs font-bold text-[#E21B70] hover:underline"
+                          >
+                            {sheetBn ? 'বাদ দেওয়া অর্ডার পুনরায় দেখুন' : 'Show declined offers again'}
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* -------- STATE 1: INCOMING OFFER SHEET (Screenshot_1 & Screenshot_11) -------- */}
+                    {sheetMode === 'offer' && displayOrder && (
+                      <div className="space-y-4">
+                        <div className="text-center pt-1 pb-2 border-b border-neutral-100">
+                          <p className="text-3xl font-extrabold text-[#16A34A] tabular-nums tracking-tight">
+                            {Math.max(40, displayOrder.deliveryFee).toFixed(2)} Tk
+                          </p>
+                          <p className="text-[11px] font-semibold text-neutral-500 mt-0.5">
+                            {displayOrder.orderNumber} ·{' '}
+                            {displayOrder.paymentMethod === 'cod'
+                              ? `COD (${displayOrder.totalAmount} Tk)`
+                              : `Paid Online`}
+                          </p>
+                        </div>
+
+                        <div className="space-y-3 text-xs">
+                          {/* Store Pickup Stop */}
+                          <div className="flex items-start gap-3">
+                            <div className="flex flex-col items-center shrink-0 pt-0.5">
+                              <div className="w-6 h-6 rounded-md bg-neutral-100 text-[#2E3138] flex items-center justify-center">
+                                <Store className="w-3.5 h-3.5" />
+                              </div>
+                              <div className="w-0.5 h-10 bg-neutral-300 my-1" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="font-bold text-sm text-[#2E3138] truncate">
+                                  {displayOrder.restaurantName}
+                                </p>
+                                <span className="font-semibold text-neutral-600 tabular-nums shrink-0">
+                                  {pickupEtaMin}min
+                                </span>
+                              </div>
+                              <p className="text-neutral-500 mt-0.5 leading-snug">
+                                {displayOrder.restaurantAddress || `${displayOrder.deliveryArea}, Dhaka`}
+                              </p>
+                              <p className="text-neutral-500 mt-0.5">
+                                Company: {displayOrder.restaurantName}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Customer Drop-off Stop */}
+                          <div className="flex items-start gap-3">
+                            <div className="w-6 h-6 rounded-full bg-neutral-100 text-[#2E3138] flex items-center justify-center shrink-0 mt-0.5">
+                              <User className="w-3.5 h-3.5" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="font-bold text-sm text-[#2E3138]">
+                                  {sheetBn ? 'ড্রপ-অফ' : 'Drop-off'}
+                                </p>
+                                <span className="font-semibold text-neutral-600 tabular-nums shrink-0">
+                                  {dropoffEtaMin}min
+                                </span>
+                              </div>
+                              <p className="text-neutral-500 mt-0.5 leading-snug">
+                                {displayOrder.deliveryArea} — {displayOrder.deliveryAddress}
+                              </p>
+                              <p className="text-neutral-500 mt-0.5">
+                                Customer: {displayOrder.customerName}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="pt-1 border-t-2 border-amber-500">
+                          <button
+                            type="button"
+                            disabled={acceptingOrderId === displayOrder.id}
+                            onClick={() => {
+                              setPreviewOfferMode(false);
+                              void handleAcceptOrder(displayOrder.id);
+                            }}
+                            className="w-full py-3.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-sm font-bold shadow-md disabled:opacity-50"
+                          >
+                            {acceptingOrderId === displayOrder.id
+                              ? sheetBn
                                 ? 'গ্রহণ করা হচ্ছে...'
-                                : 'Accepting...'
-                              : lang === 'bn'
-                              ? 'ডেলিভারি গ্রহণ করুন'
-                              : 'Accept Delivery Job'}
+                                : 'Accepting order...'
+                              : sheetBn
+                              ? 'অর্ডার গ্রহণ করুন'
+                              : 'Accept order'}
                           </button>
                         </div>
-                      );
-                    })}
+                      </div>
+                    )}
+
+                    {/* -------- STATE 2: GO TO VENDOR / PICKUP SHEET (Screenshots 2, 3, 4) -------- */}
+                    {isPickupStage && displayOrder && (
+                      <div className="space-y-4">
+                        {/* Vendor Header + Call Button */}
+                        <div className="flex items-start justify-between gap-3 pb-3 border-b border-neutral-100">
+                          <div className="min-w-0">
+                            <h2 className="text-lg font-bold text-[#2E3138] truncate">
+                              {displayOrder.restaurantName}
+                            </h2>
+                            <p className="text-xs font-semibold text-[#2E3138] mt-0.5">
+                              {sheetBn
+                                ? `ভেন্ডরের দিকে যান • ${pickupEtaMin} মিনিটে পৌঁছাবেন`
+                                : `Go to vendor • Arrive in ${pickupEtaMin} min`}
+                            </p>
+                            <p className="text-xs text-neutral-500 mt-0.5">
+                              {sheetBn ? '১টি অর্ডার পিকআপের জন্য' : '1 order for pickup'}
+                            </p>
+                          </div>
+                          <a
+                            href={`tel:${displayOrder.restaurantPhone || displayOrder.customerPhone}`}
+                            aria-label="Call restaurant vendor"
+                            className="w-10 h-10 rounded-full border border-neutral-200 text-[#E21B70] hover:bg-[#FFF0F6] flex items-center justify-center shrink-0"
+                          >
+                            <Phone className="w-4 h-4" />
+                          </a>
+                        </div>
+
+                        {/* Address */}
+                        <div className="flex items-start gap-2.5 text-xs text-neutral-600 pb-3 border-b border-neutral-100">
+                          <MapPin className="w-4 h-4 text-neutral-500 shrink-0 mt-0.5" />
+                          <div>
+                            <p>{displayOrder.restaurantAddress || `${displayOrder.deliveryArea}, Dhaka`}</p>
+                            <p className="text-neutral-500 mt-0.5">
+                              Company: {displayOrder.restaurantName}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Ready Status Pill & Order Code */}
+                        <div className="space-y-2">
+                          <span className="inline-block px-3 py-1 rounded-md bg-[#6B7280] text-white text-[11px] font-semibold">
+                            {sheetBn ? 'প্রায় ২ মিনিটে প্রস্তুত হবে' : 'Ready in around 2 min'}
+                          </span>
+                          <p className="text-2xl font-extrabold text-[#2E3138] tracking-tight tabular-nums">
+                            #{shortCode}
+                          </p>
+                          <p className="text-xs font-bold text-[#2E3138]">
+                            {displayOrder.orderNumber} (#{shortCode}) • {displayOrder.customerName}
+                          </p>
+
+                          <div className="flex items-center justify-between pt-1 text-xs">
+                            <span className="text-neutral-500">
+                              {sheetBn ? 'শিঘ্রই প্রস্তুত হবে' : 'Will be ready soon'}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setItemsExpanded((v) => !v)}
+                              className="font-bold text-[#E21B70] inline-flex items-center gap-1"
+                            >
+                              <span>
+                                {itemsList.length} {sheetBn ? 'আইটেম' : 'items'}
+                              </span>
+                              {itemsExpanded ? (
+                                <ChevronUp className="w-3.5 h-3.5" />
+                              ) : (
+                                <ChevronDown className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+
+                          {itemsExpanded && (
+                            <div className="divide-y divide-neutral-100 border-t border-neutral-100 pt-1">
+                              {itemsList.map((it, idx) => (
+                                <div
+                                  key={`${it.foodItemId}-${idx}`}
+                                  className="py-2 flex items-center justify-between gap-2 text-xs"
+                                >
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    <span className="font-bold text-[#2E3138] tabular-nums">
+                                      {it.quantity}
+                                    </span>
+                                    <span className="text-neutral-700 truncate">
+                                      {it.name}
+                                      {it.variation ? ` - ${it.variation}` : ''}
+                                    </span>
+                                  </div>
+                                  <span className="font-semibold text-neutral-600 tabular-nums shrink-0">
+                                    {it.lineTotal.toFixed(2)} Tk
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          <div className="flex items-center justify-between text-xs pt-1 text-neutral-600">
+                            <div>
+                              <p className="text-[11px] text-neutral-400">
+                                {sheetBn ? 'পেমেন্ট' : 'Payment'}
+                              </p>
+                              <p className="font-semibold text-[#2E3138]">
+                                {sheetBn ? 'ভেন্ডরকে পেমেন্ট নেই' : 'No payment at vendor'}
+                              </p>
+                            </div>
+                            <span className="text-neutral-500">
+                              {sheetBn ? 'ভেন্ডরকে পেমেন্ট নেই' : 'No payment at vendor'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* How is the pick up experience? Feedback Box (Screenshot_2 & Screenshot_3) */}
+                        <div className="rounded-xl border border-neutral-200 p-3.5 text-center space-y-2.5">
+                          <p className="text-xs font-semibold text-neutral-700">
+                            {sheetBn
+                              ? 'পিকআপ অভিজ্ঞতা কেমন ছিল?'
+                              : 'How is the pick up experience?'}
+                          </p>
+                          <div className="flex items-center justify-center gap-6">
+                            <button
+                              type="button"
+                              aria-label="Bad pickup experience"
+                              onClick={() =>
+                                setPickupRatingByOrder((prev) => ({
+                                  ...prev,
+                                  [displayOrder.id]: 'bad',
+                                }))
+                              }
+                              className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors ${
+                                pickupRating === 'bad'
+                                  ? 'bg-amber-100 text-amber-700 ring-2 ring-amber-400'
+                                  : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200'
+                              }`}
+                            >
+                              <Frown className="w-5 h-5" />
+                            </button>
+                            <button
+                              type="button"
+                              aria-label="Good pickup experience"
+                              onClick={() =>
+                                setPickupRatingByOrder((prev) => ({
+                                  ...prev,
+                                  [displayOrder.id]: 'good',
+                                }))
+                              }
+                              className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors ${
+                                pickupRating === 'good'
+                                  ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-500'
+                                  : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200'
+                              }`}
+                            >
+                              <Smile className="w-5 h-5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Primary Pink Confirm Pickup Button */}
+                        <button
+                          type="button"
+                          disabled={updatingOrderId === displayOrder.id}
+                          onClick={() => setPickupConfirmOrder(displayOrder)}
+                          className="w-full py-3.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-sm font-bold shadow-md disabled:opacity-50"
+                        >
+                          {updatingOrderId === displayOrder.id
+                            ? sheetBn
+                              ? 'কনফার্ম হচ্ছে...'
+                              : 'Confirming...'
+                            : sheetBn
+                            ? 'পিকআপ কনফার্ম করুন'
+                            : 'Confirm pickup'}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* -------- STATE 3: GO TO CUSTOMER / DROP-OFF SHEET (Screenshots 5, 6, 7) -------- */}
+                    {isDropoffStage && displayOrder && cashInfo && (
+                      <div className="space-y-4">
+                        {/* Customer Header + Call + Translate */}
+                        <div className="space-y-2 pb-3 border-b border-neutral-100">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <h2 className="text-lg font-bold text-[#2E3138] truncate">
+                                {displayOrder.customerName}
+                              </h2>
+                              <p className="text-xs font-semibold text-[#2E3138] mt-0.5">
+                                {sheetBn
+                                  ? `ড্রপ-অফ • ${dropoffEtaMin} মিনিটে পৌঁছাবেন`
+                                  : `Drop-off • Arrive in ${dropoffEtaMin} min`}
+                              </p>
+                              <p className="text-xs text-neutral-500 mt-0.5">
+                                #{shortCode} • {displayOrder.orderNumber}
+                              </p>
+                            </div>
+                            <a
+                              href={`tel:${displayOrder.customerPhone}`}
+                              aria-label="Call customer"
+                              className="w-10 h-10 rounded-full border border-neutral-200 text-[#E21B70] hover:bg-[#FFF0F6] flex items-center justify-center shrink-0"
+                            >
+                              <Phone className="w-4 h-4" />
+                            </a>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2 text-xs text-neutral-600">
+                            <p className="truncate">
+                              {displayOrder.deliveryArea} — {displayOrder.deliveryAddress}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => setTranslateSheet((v) => !v)}
+                              className="text-xs font-bold text-[#E21B70] inline-flex items-center gap-1 shrink-0 hover:underline"
+                            >
+                              <Languages className="w-3.5 h-3.5" />
+                              <span>{translateSheet ? 'Original' : 'Translate'}</span>
+                            </button>
+                          </div>
+                          {displayOrder.deliveryInstructions && (
+                            <p className="text-[11px] bg-amber-50 border border-amber-200 text-amber-800 px-2.5 py-1.5 rounded-lg">
+                              {sheetBn ? 'নির্দেশনা:' : 'Note:'} {displayOrder.deliveryInstructions}
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Order & Expandable Items */}
+                        <div className="space-y-2">
+                          <p className="text-2xl font-extrabold text-[#2E3138] tracking-tight tabular-nums">
+                            #{shortCode}
+                          </p>
+                          <div className="flex items-center justify-between gap-2 text-xs">
+                            <p className="font-bold text-[#2E3138] truncate">
+                              {displayOrder.orderNumber} (#{shortCode}) •{' '}
+                              {displayOrder.restaurantName}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => setItemsExpanded((v) => !v)}
+                              className="font-bold text-[#E21B70] inline-flex items-center gap-1 shrink-0"
+                            >
+                              <span>
+                                {itemsList.length} {sheetBn ? 'আইটেম' : 'items'}
+                              </span>
+                              {itemsExpanded ? (
+                                <ChevronUp className="w-3.5 h-3.5" />
+                              ) : (
+                                <ChevronDown className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+
+                          {itemsExpanded && (
+                            <div className="divide-y divide-neutral-100 border-t border-neutral-100 pt-1">
+                              {itemsList.map((it, idx) => (
+                                <div
+                                  key={`${it.foodItemId}-${idx}`}
+                                  className="py-2 flex items-center justify-between gap-2 text-xs"
+                                >
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    <span className="font-bold text-[#2E3138] tabular-nums">
+                                      {it.quantity}
+                                    </span>
+                                    <span className="text-neutral-700 truncate">
+                                      {it.name}
+                                      {it.variation ? ` - ${it.variation}` : ''}
+                                    </span>
+                                  </div>
+                                  <span className="font-semibold text-neutral-600 tabular-nums shrink-0">
+                                    {it.lineTotal.toFixed(2)} Tk
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Payment Summary: Paid online OR Collect cash + Edit */}
+                          <div className="pt-2 border-t border-neutral-100 space-y-2 text-xs">
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <p className="text-[11px] text-neutral-400">
+                                  {sheetBn ? 'পেমেন্ট' : 'Payment'}
+                                </p>
+                                <p className="font-semibold text-[#2E3138]">
+                                  {sheetBn ? cashInfo.statusLabelBn : cashInfo.statusLabelEn}
+                                </p>
+                              </div>
+                              <div className="text-right tabular-nums">
+                                <p className="font-bold text-[#2E3138]">
+                                  {cashInfo.isCod
+                                    ? `${cashInfo.amountToCollect.toFixed(2)} Tk`
+                                    : sheetBn
+                                    ? 'অনলাইনে পরিশোধিত'
+                                    : 'Paid online'}
+                                </p>
+                              </div>
+                            </div>
+
+                            {cashInfo.isCod && (
+                              <div className="pt-2 border-t border-neutral-100 space-y-1">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-bold text-[#2E3138]">
+                                    {sheetBn ? 'মোট পেমেন্ট' : 'Total payment'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (editingCashOrderId === displayOrder.id) {
+                                        setEditingCashOrderId(null);
+                                      } else {
+                                        setEditingCashOrderId(displayOrder.id);
+                                        setEditedCashInput(String(cashInfo.amountToCollect));
+                                      }
+                                    }}
+                                    className="font-bold text-[#E21B70] hover:underline"
+                                  >
+                                    {editingCashOrderId === displayOrder.id
+                                      ? sheetBn
+                                        ? 'বাতিল'
+                                        : 'Close'
+                                      : sheetBn
+                                      ? 'এডিট'
+                                      : 'Edit'}
+                                  </button>
+                                </div>
+
+                                {editingCashOrderId === displayOrder.id ? (
+                                  <div className="flex items-center gap-2 pt-1">
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      step="1"
+                                      value={editedCashInput}
+                                      onChange={(e) => setEditedCashInput(e.target.value)}
+                                      className="flex-1 px-3 py-1.5 rounded-lg border border-neutral-200 text-sm font-bold tabular-nums"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const val = Number(editedCashInput);
+                                        if (Number.isFinite(val) && val >= 0) {
+                                          setCashCollectOverrideByOrder((prev) => ({
+                                            ...prev,
+                                            [displayOrder.id]: val,
+                                          }));
+                                        }
+                                        setEditingCashOrderId(null);
+                                      }}
+                                      className="px-3 py-1.5 rounded-lg bg-[#E21B70] text-white text-xs font-bold"
+                                    >
+                                      Save
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <p className="text-xl font-extrabold text-[#2E3138] tabular-nums">
+                                    Tk {cashInfo.amountToCollect.toFixed(2)}
+                                  </p>
+                                )}
+
+                                <p className="text-[11px] text-neutral-500">
+                                  {sheetBn
+                                    ? 'কাস্টমারের কাছ থেকে ক্যাশ সংগ্রহ করুন'
+                                    : 'Collect cash from customer'}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Proof of drop-Off (Screenshots 5, 6, 7) */}
+                        <div className="pt-2 border-t border-neutral-100 space-y-2.5">
+                          <div>
+                            <h3 className="text-xs font-bold text-[#2E3138]">
+                              {sheetBn ? 'ড্রপ-অফ প্রমাণ (ছবি)' : 'Proof of drop-Off'}
+                            </h3>
+                            <p className="text-[11px] text-neutral-500 mt-0.5">
+                              {sheetBn
+                                ? 'ডেলিভারি সম্পন্নের প্রমাণ হিসেবে একটি ছবি যোগ করুন'
+                                : 'Add a photo as proof of drop-off'}
+                            </p>
+                          </div>
+
+                          <input
+                            ref={proofFileInputRef}
+                            type="file"
+                            accept="image/jpeg,image/jpg,image/png,image/webp,image/*,.jpg,.jpeg,.png,.webp"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              e.currentTarget.value = '';
+                              if (file && displayOrder) {
+                                void handleUploadProofPhoto(displayOrder.id, file);
+                              }
+                            }}
+                          />
+
+                          {proofUploadError && (
+                            <p role="alert" className="text-[11px] font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5">
+                              {proofUploadError}
+                            </p>
+                          )}
+
+                          {uploadedProof ? (
+                            <div className="relative w-24 h-24 rounded-xl overflow-hidden border border-neutral-200 shadow-xs">
+                              <img
+                                src={uploadedProof}
+                                alt="Proof of drop-off"
+                                className="w-full h-full object-cover"
+                              />
+                              <button
+                                type="button"
+                                aria-label="Remove proof of drop-off photo"
+                                onClick={() => {
+                                  setProofUploadError(null);
+                                  setProofPhotoByOrder((prev) => {
+                                    const next = { ...prev };
+                                    delete next[displayOrder.id];
+                                    return next;
+                                  });
+                                }}
+                                className="absolute inset-0 m-auto w-10 h-10 rounded-full bg-white/95 text-[#E21B70] shadow-md flex items-center justify-center hover:bg-white"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={uploadingProofOrderId === displayOrder.id}
+                              onClick={() => proofFileInputRef.current?.click()}
+                              className="w-full py-3 rounded-xl border border-[#E21B70]/40 bg-white hover:bg-[#FFF0F6]/60 text-[#E21B70] text-xs font-bold inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                            >
+                              <Camera className="w-4 h-4" />
+                              <span>
+                                {uploadingProofOrderId === displayOrder.id
+                                  ? sheetBn
+                                    ? 'ছবি আপলোড হচ্ছে...'
+                                    : 'Uploading photo...'
+                                  : sheetBn
+                                  ? 'ছবি যোগ করুন'
+                                  : 'Add photo'}
+                              </span>
+                            </button>
+                          )}
+
+                          {/* Primary Confirm Drop-off CTA */}
+                          <button
+                            type="button"
+                            disabled={updatingOrderId === displayOrder.id}
+                            onClick={() =>
+                              handleUpdateStatus(displayOrder.id, 'delivered', {
+                                pickupRating,
+                                proofPhotoUrl: uploadedProof,
+                                collectedCashAmount: cashInfo.isCod
+                                  ? cashInfo.amountToCollect
+                                  : undefined,
+                              })
+                            }
+                            className="w-full py-3.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-sm font-bold shadow-md disabled:opacity-50"
+                          >
+                            {updatingOrderId === displayOrder.id
+                              ? sheetBn
+                                ? 'সম্পন্ন হচ্ছে...'
+                                : 'Confirming drop-off...'
+                              : sheetBn
+                              ? 'ড্রপ-অফ কনফার্ম করুন'
+                              : 'Confirm drop-off'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Right Queue & Task Switcher Column (Desktop side panel / Below sheet on Mobile) */}
+                <div className="lg:col-span-5 xl:col-span-6 space-y-4">
+                  {/* Active Deliveries Quick Selector (when multiple deliveries exist) */}
+                  {activeDeliveries.length > 0 && (
+                    <section className="bg-white rounded-2xl border border-neutral-200 p-4 space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="text-sm font-bold text-[#2E3138]">
+                          {lang === 'bn'
+                            ? `চলমান ডেলিভারি (${activeDeliveries.length})`
+                            : `Active Assigned Tasks (${activeDeliveries.length})`}
+                        </h3>
+                        {focusedActive && (
+                          <button
+                            type="button"
+                            onClick={() => onTrackOrder(focusedActive.id)}
+                            className="text-xs font-bold text-[#E21B70] hover:underline"
+                          >
+                            {lang === 'bn' ? 'কাস্টমার ট্র্যাকিং দেখুন' : 'Full Tracking View'}
+                          </button>
+                        )}
+                      </div>
+                      <div className="space-y-2">
+                        {activeDeliveries.map((ord) => {
+                          const isSelected = focusedActive?.id === ord.id;
+                          return (
+                            <button
+                              key={ord.id}
+                              type="button"
+                              onClick={() => {
+                                setPreviewOfferMode(false);
+                                setFocusedActiveOrderId(ord.id);
+                                riderSheetRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                              }}
+                              className={`w-full text-left p-3 rounded-xl border transition-colors flex items-center justify-between gap-3 ${
+                                isSelected
+                                  ? 'border-[#E21B70] bg-[#FFF0F6]/50'
+                                  : 'border-neutral-200 hover:border-neutral-300'
+                              }`}
+                            >
+                              <div className="min-w-0">
+                                <p className="text-xs font-bold text-[#2E3138] truncate">
+                                  #{formatRiderShortOrderCode(ord.orderNumber, ord.id)} ·{' '}
+                                  {ord.restaurantName}
+                                </p>
+                                <p className="text-[11px] text-neutral-500 truncate">
+                                  {ord.customerName} · {ord.deliveryArea}
+                                </p>
+                              </div>
+                              <span className="px-2 py-0.5 rounded-md bg-neutral-100 text-[10px] font-bold uppercase text-[#2E3138] shrink-0">
+                                {ord.status.replace(/_/g, ' ')}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  )}
+
+                  {/* Open Dispatch Queue Cards */}
+                  <section className="bg-white rounded-2xl border border-neutral-200 p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="text-sm font-bold text-[#2E3138] flex items-center gap-1.5">
+                        <Clock className="w-4 h-4 text-[#E21B70]" />
+                        <span>
+                          {lang === 'bn'
+                            ? `উন্মুক্ত অর্ডার কিউ (${filteredAvailableOrders.length})`
+                            : `Open Dispatch Queue (${filteredAvailableOrders.length})`}
+                        </span>
+                      </h3>
+                      <div className="relative w-full sm:w-52">
+                        <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          value={queueSearch}
+                          onChange={(e) => setQueueSearch(e.target.value)}
+                          placeholder={
+                            lang === 'bn' ? 'অর্ডার বা এলাকা খুঁজুন...' : 'Filter orders...'
+                          }
+                          className="w-full pl-8 pr-2.5 py-1.5 text-xs border border-neutral-200 rounded-lg"
+                        />
+                      </div>
+                    </div>
+
+                    {filteredAvailableOrders.length === 0 ? (
+                      <p className="text-xs text-neutral-500 py-2">
+                        {lang === 'bn'
+                          ? 'এই মুহূর্তে কোনো নতুন ডেলিভারি অপেক্ষায় নেই।'
+                          : 'No unassigned Foodora Rider orders waiting right now.'}
+                      </p>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {filteredAvailableOrders.map((ord, idx) => {
+                          const eta = calculateLiveRiderEta(
+                            riderCoords.lat,
+                            riderCoords.lng,
+                            ord.deliveryLat,
+                            ord.deliveryLng,
+                            'ready'
+                          );
+                          const accepting = acceptingOrderId === ord.id;
+                          return (
+                            <div
+                              key={ord.id}
+                              className="p-3 rounded-xl border border-neutral-200 flex items-center justify-between gap-3"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 text-[11px] font-mono tabular-nums text-neutral-500">
+                                  <span className="font-bold text-[#2E3138]">
+                                    #{formatRiderShortOrderCode(ord.orderNumber, ord.id)}
+                                  </span>
+                                  <span>·</span>
+                                  <span className="font-bold text-[#16A34A]">
+                                    {Math.max(40, ord.deliveryFee).toFixed(2)} Tk
+                                  </span>
+                                  <span>·</span>
+                                  <span>{eta.remainingKm.toFixed(1)} km</span>
+                                </div>
+                                <p className="text-xs font-bold text-[#2E3138] truncate mt-0.5">
+                                  {ord.restaurantName} → {ord.deliveryArea}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setDeclinedOfferIds((prev) =>
+                                      prev.filter((id) => id !== ord.id)
+                                    );
+                                    setPreviewOfferMode(true);
+                                    setFocusedOfferIdx(idx);
+                                    riderSheetRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                  }}
+                                  className="px-2.5 py-1.5 rounded-lg border border-neutral-200 text-[11px] font-semibold text-neutral-700 hover:border-[#E21B70]"
+                                >
+                                  {lang === 'bn' ? 'দেখুন' : 'Preview'}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={accepting}
+                                  onClick={() => {
+                                    setPreviewOfferMode(false);
+                                    void handleAcceptOrder(ord.id);
+                                  }}
+                                  className="px-3 py-1.5 rounded-lg bg-[#E21B70] hover:bg-[#C4135E] text-white text-[11px] font-bold disabled:opacity-50"
+                                >
+                                  {accepting
+                                    ? '...'
+                                    : lang === 'bn'
+                                    ? 'গ্রহণ'
+                                    : 'Accept'}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+                </div>
+
+                {/* Confirm Pickup Modal (Matches Screenshot_4) */}
+                {pickupConfirmOrder && (
+                  <div
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Confirm order pickup"
+                    className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+                  >
+                    <div className="bg-white rounded-2xl max-w-xs w-full p-6 shadow-2xl space-y-4 text-center">
+                      <h3 className="text-base font-extrabold text-[#2E3138] leading-snug">
+                        {sheetBn
+                          ? `আপনি কি অর্ডার ${pickupConfirmOrder.orderNumber} (#${formatRiderShortOrderCode(
+                              pickupConfirmOrder.orderNumber,
+                              pickupConfirmOrder.id
+                            )}) পিকআপ কনফার্ম করছেন?`
+                          : `Do you confirm order ${pickupConfirmOrder.orderNumber} (#${formatRiderShortOrderCode(
+                              pickupConfirmOrder.orderNumber,
+                              pickupConfirmOrder.id
+                            )}) pickup?`}
+                      </h3>
+                      <button
+                        type="button"
+                        disabled={updatingOrderId === pickupConfirmOrder.id}
+                        onClick={async () => {
+                          const target = pickupConfirmOrder;
+                          setPickupConfirmOrder(null);
+                          await handleUpdateStatus(target.id, 'picked_up', {
+                            pickupRating: pickupRatingByOrder[target.id],
+                          });
+                        }}
+                        className="w-full py-3 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-sm font-bold shadow-md disabled:opacity-50"
+                      >
+                        {sheetBn ? 'পিকআপ কনফার্ম করুন' : 'Confirm pickup'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPickupConfirmOrder(null)}
+                        className="w-full py-2 text-sm font-bold text-[#E21B70] hover:underline"
+                      >
+                        {sheetBn ? 'এখন নয় (Skip)' : 'Skip'}
+                      </button>
+                    </div>
                   </div>
                 )}
-              </section>
-            </div>
-          )}
+              </div>
+            );
+          })()}
 
           {/* ---------------- TAB 2: LIVE GPS & ROUTE MAP ---------------- */}
           {activeTab === 'map' && rider && (
@@ -1733,6 +2704,416 @@ export function RiderDashboard({
               )}
             </section>
           )}
+
+          {/* ---------------- TAB 5: RIDER PROFILE ---------------- */}
+          {activeTab === 'profile' && rider && (() => {
+            const stats = calculateRiderProfileStats(rider, assignedOrders);
+            const joinedDate = rider.createdAt
+              ? new Date(rider.createdAt).toLocaleDateString()
+              : null;
+
+            return (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                {/* Left Column: Identity Card & Rider Performance Summary */}
+                <section className="lg:col-span-5 bg-white rounded-2xl border border-neutral-200 p-5 space-y-5">
+                  <div className="flex items-start gap-4">
+                    <div className="relative w-20 h-20 rounded-2xl bg-[#FFF0F6] border border-[#E21B70]/25 overflow-hidden flex items-center justify-center shrink-0">
+                      {profileAvatarUrl ? (
+                        <img
+                          src={profileAvatarUrl}
+                          alt={profileFullName || rider.fullName}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <Bike className="w-9 h-9 text-[#E21B70]" />
+                      )}
+                    </div>
+
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h2 className="text-lg font-extrabold text-[#2E3138] truncate">
+                          {rider.fullName}
+                        </h2>
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-semibold">
+                          <ShieldCheck className="w-3 h-3" />
+                          <span>
+                            {rider.status === 'approved'
+                              ? lang === 'bn'
+                                ? 'অনুমোদিত'
+                                : 'Approved'
+                              : rider.status}
+                          </span>
+                        </span>
+                      </div>
+                      <p className="text-xs text-neutral-500 font-mono">
+                        {lang === 'bn' ? 'রাইডার আইডি:' : 'Rider ID:'} RDR-#{rider.id}
+                      </p>
+                      <p className="text-xs text-neutral-600 flex items-center gap-1.5 truncate">
+                        <Mail className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
+                        <span className="truncate">{rider.email}</span>
+                      </p>
+                      {joinedDate && (
+                        <p className="text-[11px] text-neutral-500 flex items-center gap-1.5">
+                          <Calendar className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
+                          <span>
+                            {lang === 'bn' ? 'যোগদানের তারিখ:' : 'Joined:'} {joinedDate}
+                          </span>
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Avatar Upload Controls */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <input
+                      ref={profileAvatarInputRef}
+                      type="file"
+                      accept="image/jpeg,image/jpg,image/png,image/webp,image/*,.jpg,.jpeg,.png,.webp"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        e.currentTarget.value = '';
+                        if (file) {
+                          void handleUploadProfileAvatar(file);
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      disabled={uploadingAvatar}
+                      onClick={() => profileAvatarInputRef.current?.click()}
+                      className="px-3.5 py-2 rounded-xl border border-[#E21B70]/40 bg-[#FFF0F6]/60 hover:bg-[#FFF0F6] text-[#E21B70] text-xs font-bold inline-flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <Camera className="w-3.5 h-3.5" />
+                      <span>
+                        {uploadingAvatar
+                          ? lang === 'bn'
+                            ? 'আপলোড হচ্ছে...'
+                            : 'Uploading...'
+                          : lang === 'bn'
+                          ? 'প্রোফাইল ছবি পরিবর্তন'
+                          : 'Change Photo'}
+                      </span>
+                    </button>
+                    {profileAvatarUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setProfileAvatarUrl('')}
+                        className="px-3 py-2 rounded-xl border border-neutral-200 text-neutral-600 hover:text-red-600 text-xs font-semibold inline-flex items-center gap-1"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>{lang === 'bn' ? 'মুছুন' : 'Remove'}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Fleet & Zone Info */}
+                  <div className="rounded-xl bg-[#FAFAFB] border border-neutral-200/80 p-3.5 space-y-2 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-neutral-500">
+                        {lang === 'bn' ? 'ফ্লিট / রেস্টুরেন্ট' : 'Fleet Affiliation'}
+                      </span>
+                      <span className="font-bold text-[#2E3138] text-right">
+                        {rider.restaurantName ||
+                          (lang === 'bn' ? 'Foodora BD নিজস্ব ফ্লিট' : 'Foodora BD Platform Fleet')}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-neutral-500">
+                        {lang === 'bn' ? 'যানবাহন ও জোন' : 'Vehicle & Zone'}
+                      </span>
+                      <span className="font-semibold text-[#2E3138] text-right">
+                        {rider.vehicleType} · {rider.zone}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-neutral-500">
+                        {lang === 'bn' ? 'ডিসপ্যাচ স্ট্যাটাস' : 'Dispatch Status'}
+                      </span>
+                      <span
+                        className={`font-bold ${
+                          rider.isAvailable ? 'text-emerald-700' : 'text-neutral-600'
+                        }`}
+                      >
+                        {rider.isAvailable
+                          ? lang === 'bn'
+                            ? 'অনলাইন (অর্ডার গ্রহণযোগ্য)'
+                            : 'Online & Available'
+                          : lang === 'bn'
+                          ? 'অফলাইন'
+                          : 'Offline'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* 4 Performance Metric Tiles */}
+                  <div className="grid grid-cols-2 gap-3 tabular-nums">
+                    <div className="rounded-xl border border-neutral-200 p-3.5">
+                      <p className="text-[11px] text-neutral-500">
+                        {lang === 'bn' ? 'সম্পন্ন ডেলিভারি' : 'Deliveries Completed'}
+                      </p>
+                      <p className="text-lg font-extrabold text-[#2E3138] mt-1 font-mono">
+                        {stats.deliveredCount}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-neutral-200 p-3.5">
+                      <p className="text-[11px] text-neutral-500">
+                        {lang === 'bn' ? 'মোট আয়' : 'Lifetime Earnings'}
+                      </p>
+                      <p className="text-lg font-extrabold text-[#E21B70] mt-1 font-mono">
+                        {formatBdt(stats.totalEarnings, lang)}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-neutral-200 p-3.5">
+                      <p className="text-[11px] text-neutral-500">
+                        {lang === 'bn' ? 'সফলতার হার' : 'Completion Rate'}
+                      </p>
+                      <p className="text-lg font-extrabold text-emerald-700 mt-1 font-mono">
+                        {stats.completionRatePct}%
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-neutral-200 p-3.5">
+                      <p className="text-[11px] text-neutral-500">
+                        {lang === 'bn' ? 'গড় আয় / অর্ডার' : 'Avg / Delivery'}
+                      </p>
+                      <p className="text-lg font-extrabold text-[#2E3138] mt-1 font-mono">
+                        {formatBdt(stats.avgEarningPerOrder, lang)}
+                      </p>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Right Column: Editable Rider Profile Details Form */}
+                <section className="lg:col-span-7 bg-white rounded-2xl border border-neutral-200 p-5 sm:p-6 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-neutral-100">
+                    <div>
+                      <h2 className="text-base font-bold text-[#2E3138] flex items-center gap-2">
+                        <User className="w-4 h-4 text-[#E21B70]" />
+                        <span>
+                          {lang === 'bn'
+                            ? 'রাইডার প্রোফাইল তথ্য এডিট করুন'
+                            : 'Edit Rider Profile Details'}
+                        </span>
+                      </h2>
+                      <p className="text-xs text-neutral-500 mt-0.5">
+                        {lang === 'bn'
+                          ? 'নাম, মোবাইল নম্বর, যানবাহন ও কর্মরত এলাকা হালনাগাদ রাখুন — কাস্টমার ট্র্যাকিংয়েও এটি আপডেট হবে।'
+                          : 'Keep your name, phone, vehicle, and working zone up to date across dispatch & customer tracking.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {profileSaveError && (
+                    <div
+                      role="alert"
+                      className="px-3.5 py-2.5 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-700"
+                    >
+                      {profileSaveError}
+                    </div>
+                  )}
+                  {profileSaveSuccess && (
+                    <div className="px-3.5 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-700 flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      <span>{profileSaveSuccess}</span>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSaveRiderProfile} className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label
+                          htmlFor="rider-profile-fullname"
+                          className="block text-xs font-semibold text-neutral-700 mb-1"
+                        >
+                          {lang === 'bn' ? 'পূর্ণ নাম' : 'Full Name'} *
+                        </label>
+                        <input
+                          id="rider-profile-fullname"
+                          required
+                          value={profileFullName}
+                          onChange={(e) => setProfileFullName(e.target.value)}
+                          placeholder={lang === 'bn' ? 'আপনার পূর্ণ নাম' : 'e.g. Tariqul Islam'}
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-200 text-sm focus:outline-none focus:border-[#E21B70]"
+                        />
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor="rider-profile-phone"
+                          className="block text-xs font-semibold text-neutral-700 mb-1"
+                        >
+                          {lang === 'bn' ? 'মোবাইল নম্বর' : 'Phone Number'} *
+                        </label>
+                        <input
+                          id="rider-profile-phone"
+                          required
+                          value={profilePhone}
+                          onChange={(e) => setProfilePhone(e.target.value)}
+                          placeholder="+880 1711-000000"
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-200 text-sm font-mono focus:outline-none focus:border-[#E21B70]"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                          {lang === 'bn' ? 'লগইন ইমেইল (পরিবর্তনযোগ্য নয়)' : 'Login Email'}
+                        </label>
+                        <input
+                          type="email"
+                          readOnly
+                          value={rider.email}
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-200 bg-neutral-50 text-neutral-500 text-sm cursor-not-allowed"
+                        />
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor="rider-profile-nid"
+                          className="block text-xs font-semibold text-neutral-700 mb-1"
+                        >
+                          {isBicycleVehicleType(profileVehicleType)
+                            ? lang === 'bn'
+                              ? 'এনআইডি নম্বর (ঐচ্ছিক)'
+                              : 'NID Number (Optional)'
+                            : lang === 'bn'
+                            ? 'এনআইডি / ড্রাইভিং লাইসেন্স নম্বর'
+                            : 'NID / Driving License Number'}
+                        </label>
+                        <input
+                          id="rider-profile-nid"
+                          value={profileNidNumber}
+                          onChange={(e) => setProfileNidNumber(e.target.value)}
+                          placeholder={
+                            isBicycleVehicleType(profileVehicleType)
+                              ? lang === 'bn'
+                                ? 'শুধু NID দিন (ঐচ্ছিক)'
+                                : 'e.g. 1995269123456 (NID only)'
+                              : lang === 'bn'
+                              ? 'যেমন: 1995269123456'
+                              : 'e.g. 1995269123456'
+                          }
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-200 text-sm font-mono focus:outline-none focus:border-[#E21B70]"
+                        />
+                        {isBicycleVehicleType(profileVehicleType) && (
+                          <p className="text-[11px] text-emerald-700 mt-1">
+                            {lang === 'bn'
+                              ? 'সাইকেলের জন্য ড্রাইভিং লাইসেন্সের দরকার নেই।'
+                              : 'Bicycle riders do not need a driving license.'}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                          {lang === 'bn' ? 'যানবাহনের ধরন' : 'Vehicle Type'} *
+                        </label>
+                        <SelectWithCustom
+                          required
+                          lang={lang}
+                          value={profileVehicleType}
+                          onChange={setProfileVehicleType}
+                          presets={VEHICLE_TYPE_PRESET_OPTIONS.map((v) => ({ value: v, label: v }))}
+                          storageKey="rider_vehicles"
+                          ariaLabel="Rider profile vehicle type"
+                          placeholder={lang === 'bn' ? 'যেমন: Motorbike, Bicycle' : 'e.g. Motorbike, Bicycle'}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                          {lang === 'bn' ? 'কর্মরত এলাকা / জোন' : 'Working Area / Zone'} *
+                        </label>
+                        <SelectWithCustom
+                          required
+                          lang={lang}
+                          value={profileZone}
+                          onChange={setProfileZone}
+                          presets={getBangladeshAreaSelectPresets(lang)}
+                          storageKey="rider_zones"
+                          ariaLabel="Rider profile working zone"
+                          placeholder={lang === 'bn' ? 'এলাকা বা শহর লিখুন...' : 'Enter Bangladesh city/area...'}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-[#FAFAFB] border border-neutral-200/80">
+                      <div>
+                        <p className="text-xs font-bold text-[#2E3138]">
+                          {lang === 'bn'
+                            ? 'ডিসপ্যাচ অনলাইন অ্যাভেইলেবিলিটি'
+                            : 'Available for Order Dispatch'}
+                        </p>
+                        <p className="text-[11px] text-neutral-500">
+                          {lang === 'bn'
+                            ? 'চালু থাকলে নতুন ডেলিভারি রিকোয়েস্ট এবং অটো-অ্যাসাইন পাবেন।'
+                            : 'When enabled, you appear online for incoming orders and restaurant assignments.'}
+                        </p>
+                      </div>
+                      <label className="inline-flex items-center gap-2 cursor-pointer shrink-0">
+                        <input
+                          type="checkbox"
+                          checked={profileIsAvailable}
+                          onChange={(e) => setProfileIsAvailable(e.target.checked)}
+                          className="w-4 h-4 accent-[#E21B70] rounded"
+                        />
+                        <span className="text-xs font-bold text-[#2E3138]">
+                          {profileIsAvailable
+                            ? lang === 'bn'
+                              ? 'অনলাইন'
+                              : 'Online'
+                            : lang === 'bn'
+                            ? 'অফলাইন'
+                            : 'Offline'}
+                        </span>
+                      </label>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('map')}
+                          className="px-3.5 py-2.5 rounded-xl border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-[#2E3138] inline-flex items-center gap-1.5"
+                        >
+                          <MapPin className="w-3.5 h-3.5 text-[#E21B70]" />
+                          <span>{lang === 'bn' ? 'GPS লোকেশন দেখুন' : 'GPS Location'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('earnings')}
+                          className="px-3.5 py-2.5 rounded-xl border border-neutral-200 hover:border-[#E21B70] text-xs font-semibold text-[#2E3138] inline-flex items-center gap-1.5"
+                        >
+                          <Wallet className="w-3.5 h-3.5 text-[#E21B70]" />
+                          <span>{lang === 'bn' ? 'আয় ও হিস্ট্রি' : 'Earnings'}</span>
+                        </button>
+                      </div>
+
+                      <button
+                        type="submit"
+                        disabled={savingProfile}
+                        className="px-5 py-2.5 rounded-xl bg-[#E21B70] hover:bg-[#C4135E] text-white text-xs font-bold shadow-sm disabled:opacity-50 inline-flex items-center gap-1.5"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>
+                          {savingProfile
+                            ? lang === 'bn'
+                              ? 'সংরক্ষণ হচ্ছে...'
+                              : 'Saving Profile...'
+                            : lang === 'bn'
+                            ? 'রাইডার প্রোফাইল সেভ করুন'
+                            : 'Save Rider Profile'}
+                        </span>
+                      </button>
+                    </div>
+                  </form>
+                </section>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1899,12 +3280,18 @@ export function RiderDashboard({
               </div>
               <div>
                 <label className="block font-semibold text-neutral-700 mb-1">
-                  NID Number (Optional)
+                  {isBicycleVehicleType(jobAppVehicle)
+                    ? 'NID Number (Optional — No driving license needed)'
+                    : 'NID / Driving License Number (Optional)'}
                 </label>
                 <input
                   value={jobAppNid}
                   onChange={(e) => setJobAppNid(e.target.value)}
-                  placeholder="National ID"
+                  placeholder={
+                    isBicycleVehicleType(jobAppVehicle)
+                      ? 'National ID (no driving license needed for Bicycle)'
+                      : 'National ID or Driving License'
+                  }
                   className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm"
                 />
               </div>

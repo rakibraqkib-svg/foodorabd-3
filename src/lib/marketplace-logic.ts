@@ -2781,11 +2781,21 @@ export function resolveMapPinAppearance(input: {
 }
 
 export type AiProviderType =
+  | 'foodora'
+  | 'pollinations'
   | 'gemini'
+  | 'openrouter'
   | 'openai'
   | 'groq'
   | 'deepseek'
   | 'anthropic'
+  | 'mistral'
+  | 'xai'
+  | 'together'
+  | 'cerebras'
+  | 'perplexity'
+  | 'cohere'
+  | 'huggingface'
   | 'custom_openai';
 
 export interface AiProviderRowLike {
@@ -2801,6 +2811,97 @@ export interface AiProviderRowLike {
   sortOrder?: number | null;
 }
 
+export interface AiEnvAvailabilityFlags {
+  hasGeminiKey?: boolean;
+  hasOpenRouterKey?: boolean;
+  hasOpenAIKey?: boolean;
+  hasGroqKey?: boolean;
+  hasDeepSeekKey?: boolean;
+  hasAnthropicKey?: boolean;
+  hasMistralKey?: boolean;
+  hasXaiKey?: boolean;
+  hasTogetherKey?: boolean;
+  hasCerebrasKey?: boolean;
+  hasPerplexityKey?: boolean;
+  hasCohereKey?: boolean;
+  hasHuggingFaceKey?: boolean;
+}
+
+function resolveAiEnvFlags(flagOrBool: boolean | AiEnvAvailabilityFlags): Required<AiEnvAvailabilityFlags> {
+  if (typeof flagOrBool === 'boolean') {
+    return {
+      hasGeminiKey: flagOrBool,
+      hasOpenRouterKey: false,
+      hasOpenAIKey: false,
+      hasGroqKey: false,
+      hasDeepSeekKey: false,
+      hasAnthropicKey: false,
+      hasMistralKey: false,
+      hasXaiKey: false,
+      hasTogetherKey: false,
+      hasCerebrasKey: false,
+      hasPerplexityKey: false,
+      hasCohereKey: false,
+      hasHuggingFaceKey: false,
+    };
+  }
+  return {
+    hasGeminiKey: Boolean(flagOrBool?.hasGeminiKey),
+    hasOpenRouterKey: Boolean(flagOrBool?.hasOpenRouterKey),
+    hasOpenAIKey: Boolean(flagOrBool?.hasOpenAIKey),
+    hasGroqKey: Boolean(flagOrBool?.hasGroqKey),
+    hasDeepSeekKey: Boolean(flagOrBool?.hasDeepSeekKey),
+    hasAnthropicKey: Boolean(flagOrBool?.hasAnthropicKey),
+    hasMistralKey: Boolean(flagOrBool?.hasMistralKey),
+    hasXaiKey: Boolean(flagOrBool?.hasXaiKey),
+    hasTogetherKey: Boolean(flagOrBool?.hasTogetherKey),
+    hasCerebrasKey: Boolean(flagOrBool?.hasCerebrasKey),
+    hasPerplexityKey: Boolean(flagOrBool?.hasPerplexityKey),
+    hasCohereKey: Boolean(flagOrBool?.hasCohereKey),
+    hasHuggingFaceKey: Boolean(flagOrBool?.hasHuggingFaceKey),
+  };
+}
+
+export function hasEnvKeyForAiProviderType(
+  providerType: string,
+  envFlags: boolean | AiEnvAvailabilityFlags = false
+): boolean {
+  const flags = resolveAiEnvFlags(envFlags);
+  switch (providerType) {
+    case 'foodora':
+    case 'pollinations':
+      return true;
+    case 'gemini':
+      return flags.hasGeminiKey;
+    case 'openrouter':
+      return flags.hasOpenRouterKey;
+    case 'openai':
+      return flags.hasOpenAIKey;
+    case 'groq':
+      return flags.hasGroqKey;
+    case 'deepseek':
+      return flags.hasDeepSeekKey;
+    case 'anthropic':
+      return flags.hasAnthropicKey;
+    case 'mistral':
+      return flags.hasMistralKey;
+    case 'xai':
+      return flags.hasXaiKey;
+    case 'together':
+      return flags.hasTogetherKey;
+    case 'cerebras':
+      return flags.hasCerebrasKey;
+    case 'perplexity':
+      return flags.hasPerplexityKey;
+    case 'cohere':
+      return flags.hasCohereKey;
+    case 'huggingface':
+      return flags.hasHuggingFaceKey;
+    default:
+      return false;
+  }
+}
+
 export const DEFAULT_AI_PROVIDERS: Array<{
   code: string;
   name: string;
@@ -2812,14 +2913,54 @@ export const DEFAULT_AI_PROVIDERS: Array<{
   sortOrder: number;
 }> = [
   {
-    code: 'gemini',
-    name: 'Google Gemini',
-    providerType: 'gemini',
-    model: 'gemini-4-hydrogen',
+    code: 'foodora',
+    name: 'Foodora Own AI',
+    providerType: 'foodora',
+    model: 'foodora-bd-assistant',
     apiBaseUrl: '',
     isActive: true,
     isDefault: true,
     sortOrder: 1,
+  },
+  {
+    code: 'openrouter',
+    name: 'OpenRouter (Gemma 4)',
+    providerType: 'openrouter',
+    model: 'google/gemma-4-31b-it:free',
+    apiBaseUrl: 'https://openrouter.ai/api/v1',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 2,
+  },
+  {
+    code: 'pollinations',
+    name: 'Pollinations Free AI (No Key)',
+    providerType: 'pollinations',
+    model: 'openai-fast',
+    apiBaseUrl: 'https://text.pollinations.ai',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 3,
+  },
+  {
+    code: 'gemini',
+    name: 'Google Gemini 4',
+    providerType: 'gemini',
+    model: 'gemini-4-hydrogen',
+    apiBaseUrl: '',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 4,
+  },
+  {
+    code: 'openrouter_llama',
+    name: 'OpenRouter (Llama 3.3 Free)',
+    providerType: 'openrouter',
+    model: 'meta-llama/llama-3.3-70b-instruct:free',
+    apiBaseUrl: 'https://openrouter.ai/api/v1',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 5,
   },
   {
     code: 'chatgpt',
@@ -2827,9 +2968,109 @@ export const DEFAULT_AI_PROVIDERS: Array<{
     providerType: 'openai',
     model: 'gpt-4o-mini',
     apiBaseUrl: 'https://api.openai.com/v1',
-    isActive: false,
+    isActive: true,
     isDefault: false,
-    sortOrder: 2,
+    sortOrder: 6,
+  },
+  {
+    code: 'groq',
+    name: 'Groq (Llama 3.3 70B)',
+    providerType: 'groq',
+    model: 'llama-3.3-70b-versatile',
+    apiBaseUrl: 'https://api.groq.com/openai/v1',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 7,
+  },
+  {
+    code: 'deepseek',
+    name: 'DeepSeek V3 AI',
+    providerType: 'deepseek',
+    model: 'deepseek-chat',
+    apiBaseUrl: 'https://api.deepseek.com/v1',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 8,
+  },
+  {
+    code: 'claude',
+    name: 'Anthropic Claude',
+    providerType: 'anthropic',
+    model: 'claude-3-5-haiku-latest',
+    apiBaseUrl: 'https://api.anthropic.com',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 9,
+  },
+  {
+    code: 'mistral',
+    name: 'Mistral AI',
+    providerType: 'mistral',
+    model: 'mistral-small-latest',
+    apiBaseUrl: 'https://api.mistral.ai/v1',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 10,
+  },
+  {
+    code: 'grok',
+    name: 'xAI Grok',
+    providerType: 'xai',
+    model: 'grok-2-latest',
+    apiBaseUrl: 'https://api.x.ai/v1',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 11,
+  },
+  {
+    code: 'together',
+    name: 'Together AI',
+    providerType: 'together',
+    model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free',
+    apiBaseUrl: 'https://api.together.xyz/v1',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 12,
+  },
+  {
+    code: 'cerebras',
+    name: 'Cerebras AI',
+    providerType: 'cerebras',
+    model: 'llama-3.3-70b',
+    apiBaseUrl: 'https://api.cerebras.ai/v1',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 13,
+  },
+  {
+    code: 'perplexity',
+    name: 'Perplexity Sonar',
+    providerType: 'perplexity',
+    model: 'sonar',
+    apiBaseUrl: 'https://api.perplexity.ai',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 14,
+  },
+  {
+    code: 'cohere',
+    name: 'Cohere Command',
+    providerType: 'cohere',
+    model: 'command-a-03-2025',
+    apiBaseUrl: 'https://api.cohere.com/compatibility/v1',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 15,
+  },
+  {
+    code: 'huggingface',
+    name: 'HuggingFace Qwen 2.5',
+    providerType: 'huggingface',
+    model: 'Qwen/Qwen2.5-72B-Instruct',
+    apiBaseUrl: 'https://router.huggingface.co/v1',
+    isActive: true,
+    isDefault: false,
+    sortOrder: 16,
   },
 ];
 
@@ -2841,6 +3082,20 @@ export const AI_PROVIDER_PRESETS: Array<{
   apiBaseUrl: string;
 }> = [
   {
+    code: 'openrouter',
+    name: 'OpenRouter (Gemma 4)',
+    providerType: 'openrouter',
+    model: 'google/gemma-4-31b-it:free',
+    apiBaseUrl: 'https://openrouter.ai/api/v1',
+  },
+  {
+    code: 'pollinations',
+    name: 'Pollinations Free AI (No Key)',
+    providerType: 'pollinations',
+    model: 'openai-fast',
+    apiBaseUrl: 'https://text.pollinations.ai',
+  },
+  {
     code: 'chatgpt',
     name: 'ChatGPT (OpenAI)',
     providerType: 'openai',
@@ -2849,7 +3104,7 @@ export const AI_PROVIDER_PRESETS: Array<{
   },
   {
     code: 'groq',
-    name: 'Groq (Llama 3.3)',
+    name: 'Groq (Llama 3.3 70B)',
     providerType: 'groq',
     model: 'llama-3.3-70b-versatile',
     apiBaseUrl: 'https://api.groq.com/openai/v1',
@@ -2867,6 +3122,55 @@ export const AI_PROVIDER_PRESETS: Array<{
     providerType: 'anthropic',
     model: 'claude-3-5-haiku-latest',
     apiBaseUrl: 'https://api.anthropic.com',
+  },
+  {
+    code: 'mistral',
+    name: 'Mistral AI',
+    providerType: 'mistral',
+    model: 'mistral-small-latest',
+    apiBaseUrl: 'https://api.mistral.ai/v1',
+  },
+  {
+    code: 'grok',
+    name: 'xAI Grok',
+    providerType: 'xai',
+    model: 'grok-2-latest',
+    apiBaseUrl: 'https://api.x.ai/v1',
+  },
+  {
+    code: 'together',
+    name: 'Together AI',
+    providerType: 'together',
+    model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free',
+    apiBaseUrl: 'https://api.together.xyz/v1',
+  },
+  {
+    code: 'cerebras',
+    name: 'Cerebras AI',
+    providerType: 'cerebras',
+    model: 'llama-3.3-70b',
+    apiBaseUrl: 'https://api.cerebras.ai/v1',
+  },
+  {
+    code: 'perplexity',
+    name: 'Perplexity Sonar',
+    providerType: 'perplexity',
+    model: 'sonar',
+    apiBaseUrl: 'https://api.perplexity.ai',
+  },
+  {
+    code: 'cohere',
+    name: 'Cohere Command',
+    providerType: 'cohere',
+    model: 'command-a-03-2025',
+    apiBaseUrl: 'https://api.cohere.com/compatibility/v1',
+  },
+  {
+    code: 'huggingface',
+    name: 'HuggingFace Qwen 2.5',
+    providerType: 'huggingface',
+    model: 'Qwen/Qwen2.5-72B-Instruct',
+    apiBaseUrl: 'https://router.huggingface.co/v1',
   },
 ];
 
@@ -2906,10 +3210,16 @@ export function isValidExternalAiBaseUrl(rawUrl: string): boolean {
 
 export function isAiProviderConfigured(
   row: Pick<AiProviderRowLike, 'providerType' | 'apiKey' | 'apiBaseUrl'>,
-  hasGeminiEnvKey = false
+  envFlags: boolean | AiEnvAvailabilityFlags = false
 ): boolean {
+  if (row.providerType === 'foodora' || row.providerType === 'pollinations') {
+    return true;
+  }
   if (row.providerType === 'gemini') {
-    return Boolean(hasGeminiEnvKey);
+    return hasEnvKeyForAiProviderType('gemini', envFlags);
+  }
+  if (hasEnvKeyForAiProviderType(row.providerType, envFlags)) {
+    return true;
   }
   const hasKey = Boolean(row.apiKey && row.apiKey.trim());
   if (!hasKey) return false;
@@ -2921,14 +3231,24 @@ export function isAiProviderConfigured(
 
 export function toPublicAiProviderView(
   row: AiProviderRowLike,
-  hasGeminiEnvKey = false
+  envFlags: boolean | AiEnvAvailabilityFlags = false
 ) {
   const allowedTypes: AiProviderType[] = [
+    'foodora',
+    'pollinations',
     'gemini',
+    'openrouter',
     'openai',
     'groq',
     'deepseek',
     'anthropic',
+    'mistral',
+    'xai',
+    'together',
+    'cerebras',
+    'perplexity',
+    'cohere',
+    'huggingface',
     'custom_openai',
   ];
   const providerType = (allowedTypes.includes(row.providerType as AiProviderType)
@@ -2942,23 +3262,223 @@ export function toPublicAiProviderView(
     model: row.model,
     isActive: Boolean(row.isActive),
     isDefault: Boolean(row.isDefault),
-    isConfigured: isAiProviderConfigured({ ...row, providerType }, hasGeminiEnvKey),
+    isConfigured: isAiProviderConfigured({ ...row, providerType }, envFlags),
     sortOrder: Number(row.sortOrder ?? 10),
   };
 }
 
 export function toAdminAiProviderView(
   row: AiProviderRowLike,
-  hasGeminiEnvKey = false
+  envFlags: boolean | AiEnvAvailabilityFlags = false
 ) {
-  const pub = toPublicAiProviderView(row, hasGeminiEnvKey);
+  const flags = resolveAiEnvFlags(envFlags);
+  const pub = toPublicAiProviderView(row, flags);
   const cleanKey = typeof row.apiKey === 'string' ? row.apiKey.trim() : '';
+  const hasEnvForType = hasEnvKeyForAiProviderType(pub.providerType, flags);
   return {
     ...pub,
     apiBaseUrl: row.apiBaseUrl || '',
-    hasApiKey: pub.providerType === 'gemini' ? Boolean(hasGeminiEnvKey) : Boolean(cleanKey),
-    apiKeyPreview: pub.providerType === 'gemini' ? (hasGeminiEnvKey ? 'Server Env Configured' : 'Missing Env Key') : maskSecretValue(cleanKey),
+    hasApiKey:
+      pub.providerType === 'foodora' || pub.providerType === 'pollinations'
+        ? true
+        : pub.providerType === 'gemini'
+        ? flags.hasGeminiKey
+        : Boolean(cleanKey || hasEnvForType),
+    apiKeyPreview:
+      pub.providerType === 'foodora'
+        ? flags.hasGeminiKey
+          ? 'Foodora Own AI + Gemini'
+          : 'Built-in Foodora AI Ready'
+        : pub.providerType === 'pollinations'
+        ? 'Free Keyless AI Ready'
+        : pub.providerType === 'gemini'
+        ? flags.hasGeminiKey
+          ? 'Server Env Configured'
+          : 'Missing Env Key'
+        : cleanKey
+        ? maskSecretValue(cleanKey)
+        : hasEnvForType
+        ? 'Server Env Configured'
+        : '',
   };
+}
+
+export interface OpenRouterHistoryEntry {
+  role: 'user' | 'model';
+  text: string;
+  reasoning_details?: unknown;
+}
+
+export function buildOpenRouterChatPayload(options: {
+  model: string;
+  systemInstruction: string;
+  history: OpenRouterHistoryEntry[];
+  message: string;
+  strictProvider?: boolean;
+  enableReasoning?: boolean;
+}) {
+  const cleanModel = (options.model || '').trim() || 'google/gemma-4-31b-it:free';
+  const strictProvider = options.strictProvider !== false;
+  const enableReasoning = options.enableReasoning !== false;
+
+  const messages: Array<{
+    role: 'system' | 'user' | 'assistant';
+    content: string;
+    reasoning_details?: unknown;
+  }> = [
+    { role: 'system', content: options.systemInstruction },
+    ...options.history.slice(-8).map((item) => {
+      if (item.role === 'model') {
+        const msg: {
+          role: 'assistant';
+          content: string;
+          reasoning_details?: unknown;
+        } = {
+          role: 'assistant',
+          content: item.text,
+        };
+        if (enableReasoning && item.reasoning_details !== undefined) {
+          msg.reasoning_details = item.reasoning_details;
+        }
+        return msg;
+      }
+      return {
+        role: 'user' as const,
+        content: item.text,
+      };
+    }),
+    { role: 'user', content: options.message },
+  ];
+
+  const payload: Record<string, unknown> = {
+    model: cleanModel,
+    messages,
+  };
+
+  if (enableReasoning) {
+    payload.reasoning = { enabled: true };
+  }
+
+  if (strictProvider && (cleanModel.includes('gemma-4') || cleanModel.startsWith('google/'))) {
+    payload.provider = {
+      only: ['google-ai-studio'],
+      allow_fallbacks: false,
+    };
+  }
+
+  return payload;
+}
+
+export function buildMessengerUrl(rawUrl?: string): string {
+  const clean = String(rawUrl || '').trim();
+  const fallback = 'https://www.facebook.com/messages/t/mdrakib.roni.1';
+  if (!clean) return fallback;
+  try {
+    const parsed = new URL(clean);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+    return fallback;
+  } catch {
+    const slug = clean.replace(/^@/, '').replace(/^\/+/, '');
+    return slug ? `https://www.facebook.com/messages/t/${encodeURIComponent(slug)}` : fallback;
+  }
+}
+
+export function buildWhatsAppSupportUrl(rawPhone?: string, prefillText?: string): string {
+  const digitsRaw = String(rawPhone || '').replace(/[^\d]/g, '');
+  let normalized = digitsRaw || '8801712345678';
+  if (normalized.startsWith('01') && normalized.length === 11) {
+    normalized = `88${normalized}`;
+  } else if (normalized.startsWith('1') && normalized.length === 10) {
+    normalized = `880${normalized}`;
+  }
+  const base = `https://wa.me/${normalized}`;
+  const cleanText = String(prefillText || '').trim();
+  return cleanText ? `${base}?text=${encodeURIComponent(cleanText)}` : base;
+}
+
+function shouldReplyInBanglaForAiHelp(
+  message: string,
+  langPreference: AiHelpLangPreference = 'auto',
+  uiLang: 'en' | 'bn' = 'en'
+): boolean {
+  if (langPreference === 'bn') return true;
+  if (langPreference === 'en') return false;
+  if (/[\u0980-\u09FF]/.test(message)) return true;
+  if (
+    /\b(keno|kothay|kivabe|kibhabe|amar|apnar|taka|khawar|khabar|nai|ache|hobe|korbo|den|chai|dhonnobad)\b/i.test(
+      message
+    )
+  ) {
+    return true;
+  }
+  return uiLang === 'bn';
+}
+
+export function generateFoodoraOwnAiReply(params: {
+  message: string;
+  langPreference?: AiHelpLangPreference;
+  uiLang?: 'en' | 'bn';
+  area?: string;
+  activeOrderNumber?: string;
+  openRestaurants?: Array<{ name: string; area: string; cuisine: string }>;
+}): string {
+  const q = params.message.trim().toLowerCase();
+  const bn = shouldReplyInBanglaForAiHelp(
+    params.message,
+    params.langPreference || 'auto',
+    params.uiLang || 'en'
+  );
+  const openList = (params.openRestaurants || []).slice(0, 4);
+  const openNames = openList.map((r) => `${r.name} (${r.area})`).join(', ');
+
+  if (/(messenger|whatsapp|support|contact|helpline|hotline|মেসেঞ্জার|হোয়াটসঅ্যাপ|সাপোর্ট|যোগাযোগ)/i.test(q)) {
+    return bn
+      ? 'Foodora BD সাপোর্টের জন্য এই চ্যাট উইন্ডোর উপরের **Messenger** অথবা **WhatsApp** বাটনে ক্লিক করে সরাসরি আমাদের সাথে কথা বলতে পারেন, অথবা এই **Website Live Chat**-এই আপনার প্রশ্ন লিখুন।'
+      : 'You can reach Foodora BD Support directly via the **Messenger** or **WhatsApp** buttons at the top of this chat (or in the website footer), or keep chatting right here in **Website Live Chat**!';
+  }
+
+  if (/(unavailable|closed|bandho|bondho|অর্ডার নেওয়া|বন্ধ|available|store open)/i.test(q)) {
+    return bn
+      ? 'কোনো রেস্টুরেন্ট "unavailable" দেখালে বুঝতে হবে সেটির "Store Open" বন্ধ আছে অথবা অ্যাডমিন অনুমোদন (approved) বাকি আছে। পার্টনার ড্যাশবোর্ডের Store Switch থেকে Store Open চালু করলেই অর্ডার নেওয়া শুরু হবে। চাইলে হোমপেজের চালু থাকা অন্য রেস্টুরেন্ট থেকেও অর্ডার করতে পারেন।'
+      : 'A restaurant appears unavailable when its "Store Open" toggle is switched OFF in the Partner/Admin Dashboard or its approval status is still pending. Re-opening the store toggle immediately re-enables ordering, or you can pick another Open restaurant on the home feed.';
+  }
+
+  if (/(job|apply|join|salary|নিয়োগ|জব|কাজ|আবেদন)/i.test(q)) {
+    return bn
+      ? 'রাইডার বা রেস্টুরেন্ট পার্টনার হতে চাইলে উপরের "Rider Job" বা "Partner" লিংকে ক্লিক করুন। বাইসাইকেল রাইডারদের ড্রাইভিং লাইসেন্স ছাড়াই শুধুমাত্র ঐচ্ছিক NID দিয়ে আবেদন করার সুবিধা রয়েছে।'
+      : 'To join as a delivery rider or restaurant partner, open "Rider Job" or "Partner" from the top navigation. Bicycle riders can join without a driving license using an optional NID.';
+  }
+
+  if (/(pay|bkash|nagad|ssl|cod|cash|promo|coupon|discount|পেমেন্ট|বিকাশ|নগদ|ক্যাশ|প্রোমো)/i.test(q)) {
+    return bn
+      ? 'Foodora BD-তে bKash, Nagad, SSLCommerz এবং Cash on Delivery (COD) সব মাধ্যমই চালু আছে। চেকআউটে FOODORA50 প্রোমো কোড ব্যবহার করলে নির্দিষ্ট শর্তে ডিসকাউন্ট পাওয়া যায়। পেমেন্ট মেথড ও API গেটওয়ে সুপার অ্যাডমিনের Backend Control থেকেও কনফিগার করা যায়।'
+      : 'Foodora BD supports bKash, Nagad, SSLCommerz, and Cash on Delivery (COD). You can apply promo codes like FOODORA50 at checkout, and Super Admins can manage live/sandbox gateways under Backend Control.';
+  }
+
+  if (/(track|rider|eta|gps|ট্র্যাক|রাইডার|অর্ডার.*(কোথায়|kothay|status)|(কোথায়|kothay).*(order|rider|ডেলিভারি))/i.test(q)) {
+    const ordRef = params.activeOrderNumber ? ` (${params.activeOrderNumber})` : '';
+    return bn
+      ? `অর্ডার ট্র্যাক করতে হেডারের "Track Rider" বাটনে ক্লিক করুন${ordRef} অথবা চেকআউট ইমেইল ও অর্ডার নম্বর দিন। সেখানে ম্যাপে রাইডারের লাইভ GPS অবস্থান, দূরত্ব ও পৌঁছানোর আনুমানিক সময় (ETA) দেখতে পাবেন।`
+      : `Click "Track Rider" in the top bar${ordRef} or search using your Checkout Email + Order Number to view live rider GPS coordinates, route path, and ETA.`;
+  }
+
+  if (/(owner|vendor|partner|branch|stock|variant|variation|addon|dispatch|শাখা|স্টক|ভেন্ডর|পার্টনার|ভ্যারিয়েশন)/i.test(q)) {
+    return bn
+      ? 'একজন পার্টনার ১টি মূল রেস্টুরেন্ট খুলে এর অধীনে **Add Branch** দিয়ে একাধিক শাখা যোগ করতে পারেন। Menu ও Stock ট্যাবে প্রোডাক্ট ভ্যারিয়েশন, অ্যাড-অন ও In Stock আপডেট এবং অর্ডার ডিসপ্যাচ সবই সরাসরি করা যায়।'
+      : 'Each partner can open 1 primary restaurant and add multiple branches via **Add Branch**. Inside the Partner Portal you can dispatch orders, update stock/variations, and post Rider Jobs.';
+  }
+
+  if (/(restaurant|menu|food|biriyani|kacchi|burger|pizza|খাওয়া|খাবার|রেস্টুরেন্ট|অর্ডার)/i.test(q)) {
+    return bn
+      ? `${params.area ? `${params.area} এলাকায় ` : ''}হোমপেজের "Order Popular Food Now" বা রেস্টুরেন্ট কার্ড থেকে যেকোনো ডিশ কার্টে যোগ করে অর্ডার করতে পারবেন।${openNames ? ` এখন খোলা আছে: ${openNames}।` : ''} চাইলে পছন্দের খাবারের নাম বলুন, আমি খুঁজে দিতে সাহায্য করবো।`
+      : `Pick any dish from "Order Popular Food Now" or browse open restaurants${params.area ? ` around ${params.area}` : ''} to add items and checkout.${openNames ? ` Currently open: ${openNames}.` : ''} Tell me what craving you have and I can point you to it!`;
+  }
+
+  return bn
+    ? `আমি Foodora BD-এর নিজস্ব AI সহায়ক।${openNames ? ` এখন সক্রিয় কিছু রেস্টুরেন্ট: ${openNames}।` : ''} অর্ডার করা, রাইডার লাইভ ট্র্যাকিং, শাখা যোগ করা, bKash/COD পেমেন্ট কিংবা Messenger / WhatsApp সাপোর্ট সম্পর্কে যেকোনো প্রশ্ন করতে পারেন।`
+    : `I am Foodora BD's built-in AI assistant.${openNames ? ` Currently open stores include: ${openNames}.` : ''} Ask me anything about ordering food, live rider tracking, branch setup, payments, or Messenger/WhatsApp support.`;
 }
 
 export function validateRiderJobPayload(input: {
@@ -3179,6 +3699,289 @@ export function validateVendorAddRiderPayload(input: {
     },
   };
 }
+
+export function formatRiderShortOrderCode(orderNumber: string, orderId?: number): string {
+  const clean = String(orderNumber || '').trim();
+  const digitsMatch = clean.match(/(\d{3,6})$/);
+  if (digitsMatch) return digitsMatch[1];
+  if (typeof orderId === 'number' && Number.isFinite(orderId)) {
+    return String(orderId).padStart(4, '0');
+  }
+  return clean.slice(-4) || '0000';
+}
+
+export function calculateRiderLegEtaMin(
+  fromLat: number,
+  fromLng: number,
+  toLat: number,
+  toLng: number,
+  minMinutes = 2
+): number {
+  const km = haversineDistanceKm(fromLat, fromLng, toLat, toLng);
+  if (!Number.isFinite(km)) return minMinutes;
+  const mins = Math.round(km * 3.2 + 1);
+  return Math.max(minMinutes, Math.min(45, mins));
+}
+
+export function resolveRiderCashCollectAmount(
+  paymentMethod: string,
+  totalAmount: number,
+  editedAmount?: number | null
+): {
+  isCod: boolean;
+  amountToCollect: number;
+  statusLabelEn: string;
+  statusLabelBn: string;
+} {
+  const isCod = String(paymentMethod || '').toLowerCase() === 'cod';
+  if (!isCod) {
+    return {
+      isCod: false,
+      amountToCollect: 0,
+      statusLabelEn: 'Paid online',
+      statusLabelBn: 'অনলাইনে পরিশোধিত',
+    };
+  }
+  const base = Number.isFinite(Number(totalAmount)) ? Math.max(0, Number(totalAmount)) : 0;
+  const finalAmount =
+    editedAmount !== null && editedAmount !== undefined && Number.isFinite(Number(editedAmount))
+      ? Math.max(0, Number(editedAmount))
+      : base;
+  return {
+    isCod: true,
+    amountToCollect: finalAmount,
+    statusLabelEn: 'Collect cash',
+    statusLabelBn: 'ক্যাশ সংগ্রহ করুন',
+  };
+}
+
+export function parseUploadedImageDataUrl(
+  rawDataUrl: string,
+  filename?: string
+):
+  | { valid: true; ext: 'jpg' | 'png' | 'webp' | 'gif'; base64Data: string; mimeType: string }
+  | { valid: false; reason: string } {
+  const trimmed = String(rawDataUrl || '').trim();
+  const commaIdx = trimmed.indexOf(',');
+  if (commaIdx === -1 || !trimmed.toLowerCase().startsWith('data:')) {
+    return { valid: false, reason: 'Only PNG, JPG, WEBP, or GIF images are supported' };
+  }
+
+  const header = trimmed.slice(5, commaIdx).toLowerCase();
+  if (!header.includes(';base64')) {
+    return { valid: false, reason: 'Image payload must be base64 encoded' };
+  }
+
+  const rawMime = header.split(';')[0].trim();
+  const cleanBase64 = trimmed.slice(commaIdx + 1).replace(/\s+/g, '');
+  if (!cleanBase64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(cleanBase64)) {
+    return { valid: false, reason: 'Corrupted base64 image payload' };
+  }
+
+  const mimeToExt: Record<string, 'jpg' | 'png' | 'webp' | 'gif'> = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/pjpeg': 'jpg',
+    'image/jfif': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+  };
+
+  let ext = mimeToExt[rawMime];
+
+  // Fallback for Android/file-picker uploads reported as application/octet-stream or empty MIME
+  if (!ext && (rawMime === 'application/octet-stream' || rawMime === '' || rawMime === 'image/*')) {
+    const buf = Buffer.from(cleanBase64.slice(0, 32), 'base64');
+    if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+      ext = 'jpg';
+    } else if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+      ext = 'png';
+    } else if (
+      buf.length >= 12 &&
+      buf.subarray(0, 4).toString('ascii') === 'RIFF' &&
+      buf.subarray(8, 12).toString('ascii') === 'WEBP'
+    ) {
+      ext = 'webp';
+    } else if (buf.length >= 4 && buf.subarray(0, 3).toString('ascii') === 'GIF') {
+      ext = 'gif';
+    } else {
+      const lowerName = String(filename || '').toLowerCase();
+      if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) ext = 'jpg';
+      else if (lowerName.endsWith('.png')) ext = 'png';
+      else if (lowerName.endsWith('.webp')) ext = 'webp';
+      else if (lowerName.endsWith('.gif')) ext = 'gif';
+    }
+  }
+
+  if (!ext) {
+    return { valid: false, reason: 'Only PNG, JPG, WEBP, or GIF images are supported' };
+  }
+
+  const extToMime: Record<'jpg' | 'png' | 'webp' | 'gif', string> = {
+    jpg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    gif: 'image/gif',
+  };
+
+  return {
+    valid: true,
+    ext,
+    base64Data: cleanBase64,
+    mimeType: extToMime[ext],
+  };
+}
+
+export interface RiderProfileUpdateInput {
+  fullName: string;
+  phone: string;
+  vehicleType: string;
+  zone: string;
+  nidNumber?: string;
+  isAvailable?: boolean;
+  avatarUrl?: string;
+}
+
+export function sanitizeRiderProfileUpdate(
+  input: Partial<RiderProfileUpdateInput>
+):
+  | { valid: true; data: Required<RiderProfileUpdateInput> }
+  | { valid: false; error: string } {
+  const fullName = String(input.fullName || '').trim();
+  if (fullName.length < 2 || fullName.length > 80) {
+    return { valid: false, error: 'Full name must be between 2 and 80 characters.' };
+  }
+
+  const phone = String(input.phone || '').trim();
+  const digitsOnly = phone.replace(/[^\d]/g, '');
+  if (digitsOnly.length < 8 || phone.length > 24) {
+    return { valid: false, error: 'Please enter a valid phone number.' };
+  }
+
+  const vehicleType = String(input.vehicleType || '').trim();
+  if (vehicleType.length < 2 || vehicleType.length > 50) {
+    return { valid: false, error: 'Please specify a valid vehicle type.' };
+  }
+
+  const zone = String(input.zone || '').trim();
+  if (zone.length < 2 || zone.length > 100) {
+    return { valid: false, error: 'Please select or enter a valid working zone.' };
+  }
+
+  const nidNumber = String(input.nidNumber ?? '').trim().slice(0, 40);
+  const isAvailable = typeof input.isAvailable === 'boolean' ? input.isAvailable : true;
+
+  const avatarUrl = String(input.avatarUrl ?? '').trim();
+  if (
+    avatarUrl &&
+    !avatarUrl.startsWith('/uploads/') &&
+    !avatarUrl.startsWith('https://') &&
+    !avatarUrl.startsWith('http://') &&
+    !avatarUrl.startsWith('data:image/')
+  ) {
+    return { valid: false, error: 'Profile photo URL must be a valid uploaded image.' };
+  }
+
+  return {
+    valid: true,
+    data: {
+      fullName,
+      phone,
+      vehicleType,
+      zone,
+      nidNumber,
+      isAvailable,
+      avatarUrl,
+    },
+  };
+}
+
+export function calculateRiderProfileStats(
+  rider: { totalDeliveries?: number; totalEarnings?: number } | null | undefined,
+  assignedOrders: Array<{ status: string; deliveryFee?: number }>
+) {
+  const deliveredOrders = assignedOrders.filter((o) => o.status === 'delivered');
+  const cancelledOrders = assignedOrders.filter((o) => o.status === 'cancelled');
+  const activeOrders = assignedOrders.filter(
+    (o) => !['delivered', 'cancelled'].includes(o.status)
+  );
+
+  const deliveredCount = Math.max(rider?.totalDeliveries ?? 0, deliveredOrders.length);
+  const cancelledCount = cancelledOrders.length;
+  const totalFinished = deliveredCount + cancelledCount;
+  const completionRatePct =
+    totalFinished > 0 ? Math.round((deliveredCount / totalFinished) * 100) : 100;
+  const totalEarnings = rider?.totalEarnings ?? 0;
+  const avgEarningPerOrder =
+    deliveredCount > 0 ? Math.round(totalEarnings / deliveredCount) : 0;
+
+  return {
+    deliveredCount,
+    cancelledCount,
+    activeCount: activeOrders.length,
+    completionRatePct,
+    totalEarnings,
+    avgEarningPerOrder,
+  };
+}
+
+export function isBicycleVehicleType(vehicleType: string | null | undefined): boolean {
+  const clean = String(vehicleType || '').trim().toLowerCase();
+  if (!clean) return false;
+  return (
+    clean === 'bicycle' ||
+    clean === 'cycle' ||
+    clean === 'bycicle' ||
+    clean === 'bycikel' ||
+    clean.includes('bicycle') ||
+    clean.includes('pushbike') ||
+    clean.includes('সাইকেল')
+  );
+}
+
+export function canOwnerOpenNewRestaurant(
+  existingOwnedCount: number,
+  actorRole: string
+): { allowed: boolean; error?: string } {
+  const role = String(actorRole || '').trim().toLowerCase();
+  if (role === 'admin' || role === 'super_admin') {
+    return { allowed: true };
+  }
+  if (existingOwnedCount >= 1) {
+    return {
+      allowed: false,
+      error:
+        'Each partner account can open 1 restaurant. Please add a new branch under your existing restaurant instead.',
+    };
+  }
+  return { allowed: true };
+}
+
+export function buildBranchRestaurantNames(
+  primaryName: string,
+  primaryNameBn: string,
+  branchLabel: string,
+  branchLabelBn?: string
+): { name: string; nameBn: string } {
+  const stripBranchSuffix = (raw: string) =>
+    String(raw || '')
+      .split(/\s+[—–-]\s+/)[0]
+      .trim();
+
+  const baseEn = stripBranchSuffix(primaryName) || 'Foodora Partner';
+  const baseBn = stripBranchSuffix(primaryNameBn) || baseEn;
+  const cleanBranchEn = String(branchLabel || '').trim();
+  const cleanBranchBn = String(branchLabelBn || '').trim() || cleanBranchEn;
+
+  return {
+    name: `${baseEn} — ${cleanBranchEn}`,
+    nameBn: `${baseBn} — ${cleanBranchBn}`,
+  };
+}
+
+
+
 
 
 

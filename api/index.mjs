@@ -13,7 +13,7 @@ import fs2 from "node:fs";
 import crypto4 from "node:crypto";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
-import { and as and2, desc as desc3, eq as eq5, ne, or as or2, sql as sql3 } from "drizzle-orm";
+import { and as and2, asc as asc2, desc as desc3, eq as eq5, inArray as inArray3, ne, notInArray, or as or2, sql as sql3 } from "drizzle-orm";
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { z } from "zod";
 
@@ -24,6 +24,7 @@ import { Pool } from "pg";
 // src/db/schema.ts
 var schema_exports = {};
 __export(schema_exports, {
+  aiProviders: () => aiProviders,
   auditLogs: () => auditLogs,
   commissionLedger: () => commissionLedger,
   coupons: () => coupons,
@@ -41,8 +42,11 @@ __export(schema_exports, {
   restaurantPayouts: () => restaurantPayouts,
   restaurants: () => restaurants,
   reviews: () => reviews,
+  riderJobApplications: () => riderJobApplications,
+  riderJobs: () => riderJobs,
   riders: () => riders,
-  users: () => users
+  users: () => users,
+  vendorAdminMessages: () => vendorAdminMessages
 });
 import {
   boolean,
@@ -204,8 +208,8 @@ var orders = pgTable("orders", {
   customerUid: text("customer_uid").notNull(),
   customerName: text("customer_name").notNull(),
   customerPhone: text("customer_phone").notNull(),
-  customerEmail: text("customer_email").notNull().default(""),
-  trackingToken: text("tracking_token").notNull().default(""),
+  customerEmail: text("customer_email").default(""),
+  trackingToken: text("tracking_token").default(""),
   restaurantId: integer("restaurant_id").references(() => restaurants.id).notNull(),
   restaurantName: text("restaurant_name").notNull(),
   deliveryAddress: text("delivery_address").notNull(),
@@ -292,6 +296,8 @@ var restaurantPayouts = pgTable("restaurant_payouts", {
 var riders = pgTable("riders", {
   id: serial("id").primaryKey(),
   uid: text("uid").notNull().unique(),
+  restaurantId: integer("restaurant_id"),
+  addedByUid: text("added_by_uid").default(""),
   fullName: text("full_name").notNull(),
   phone: text("phone").notNull(),
   email: text("email").notNull(),
@@ -360,6 +366,70 @@ var auditLogs = pgTable("audit_logs", {
   targetId: text("target_id").notNull(),
   details: text("details").default(""),
   createdAt: timestamp("created_at").defaultNow().notNull()
+});
+var riderJobs = pgTable("rider_jobs", {
+  id: serial("id").primaryKey(),
+  restaurantId: integer("restaurant_id").references(() => restaurants.id, { onDelete: "cascade" }).notNull(),
+  restaurantName: text("restaurant_name").notNull(),
+  ownerUid: text("owner_uid").notNull(),
+  title: text("title").notNull(),
+  titleBn: text("title_bn").notNull(),
+  zone: text("zone").notNull(),
+  vehicleType: text("vehicle_type").notNull().default("Motorbike / Bicycle"),
+  salaryRange: text("salary_range").notNull().default("\u09F315,000 - \u09F322,000 / month"),
+  shiftHours: text("shift_hours").notNull().default("Full-time \xB7 11:00 AM - 11:00 PM"),
+  vacancies: integer("vacancies").notNull().default(1),
+  description: text("description").notNull().default(""),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull()
+});
+var riderJobApplications = pgTable("rider_job_applications", {
+  id: serial("id").primaryKey(),
+  jobId: integer("job_id").references(() => riderJobs.id, { onDelete: "cascade" }).notNull(),
+  restaurantId: integer("restaurant_id").references(() => restaurants.id, { onDelete: "cascade" }).notNull(),
+  applicantUid: text("applicant_uid").default(""),
+  fullName: text("full_name").notNull(),
+  phone: text("phone").notNull(),
+  email: text("email").notNull(),
+  vehicleType: text("vehicle_type").notNull().default("Motorbike"),
+  zone: text("zone").notNull(),
+  nidNumber: text("nid_number").default(""),
+  experienceNote: text("experience_note").default(""),
+  status: text("status").notNull().default("pending"),
+  // pending | hired | rejected
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull()
+});
+var vendorAdminMessages = pgTable("vendor_admin_messages", {
+  id: serial("id").primaryKey(),
+  restaurantId: integer("restaurant_id").references(() => restaurants.id, { onDelete: "cascade" }).notNull(),
+  restaurantName: text("restaurant_name").notNull(),
+  ownerUid: text("owner_uid").notNull(),
+  senderUid: text("sender_uid").notNull(),
+  senderName: text("sender_name").notNull(),
+  senderRole: text("sender_role").notNull(),
+  // restaurant_owner | admin | super_admin
+  message: text("message").notNull(),
+  isReadByAdmin: boolean("is_read_by_admin").notNull().default(false),
+  isReadByVendor: boolean("is_read_by_vendor").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull()
+});
+var aiProviders = pgTable("ai_providers", {
+  id: serial("id").primaryKey(),
+  code: text("code").notNull().unique(),
+  // gemini | chatgpt | groq | deepseek | claude | custom
+  name: text("name").notNull(),
+  providerType: text("provider_type").notNull().default("openai"),
+  // gemini | openai | groq | deepseek | anthropic | custom_openai
+  model: text("model").notNull(),
+  apiBaseUrl: text("api_base_url").default(""),
+  apiKey: text("api_key").default(""),
+  isActive: boolean("is_active").notNull().default(true),
+  isDefault: boolean("is_default").notNull().default(false),
+  sortOrder: integer("sort_order").notNull().default(10),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull()
 });
 
 // src/db/index.ts
@@ -474,7 +544,11 @@ var EXPECTED_TABLES = [
   "favorites",
   "notifications",
   "platform_settings",
-  "audit_logs"
+  "audit_logs",
+  "rider_jobs",
+  "rider_job_applications",
+  "vendor_admin_messages",
+  "ai_providers"
 ];
 async function runCreateTablesIfMissing() {
   const existingRes = await db.execute(sql`
@@ -503,6 +577,13 @@ async function runCreateTablesIfMissing() {
         ALTER TABLE orders
         ADD COLUMN IF NOT EXISTS customer_email TEXT NOT NULL DEFAULT '',
         ADD COLUMN IF NOT EXISTS tracking_token TEXT NOT NULL DEFAULT '';
+      `);
+    }
+    if (existingSet.has("riders")) {
+      await db.execute(sql`
+        ALTER TABLE riders
+        ADD COLUMN IF NOT EXISTS restaurant_id INTEGER,
+        ADD COLUMN IF NOT EXISTS added_by_uid TEXT NOT NULL DEFAULT '';
       `);
     }
   } catch (err) {
@@ -791,6 +872,8 @@ async function createMissingTables(existingSet) {
       CREATE TABLE IF NOT EXISTS riders (
         id SERIAL PRIMARY KEY,
         uid TEXT NOT NULL UNIQUE,
+        restaurant_id INTEGER,
+        added_by_uid TEXT DEFAULT '',
         full_name TEXT NOT NULL,
         phone TEXT NOT NULL,
         email TEXT NOT NULL,
@@ -878,6 +961,82 @@ async function createMissingTables(existingSet) {
         target_id TEXT NOT NULL,
         details TEXT DEFAULT '',
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+  if (!existingSet.has("rider_jobs")) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS rider_jobs (
+        id SERIAL PRIMARY KEY,
+        restaurant_id INTEGER NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+        restaurant_name TEXT NOT NULL,
+        owner_uid TEXT NOT NULL,
+        title TEXT NOT NULL,
+        title_bn TEXT NOT NULL,
+        zone TEXT NOT NULL,
+        vehicle_type TEXT NOT NULL DEFAULT 'Motorbike / Bicycle',
+        salary_range TEXT NOT NULL DEFAULT '৳15,000 - ৳22,000 / month',
+        shift_hours TEXT NOT NULL DEFAULT 'Full-time · 11:00 AM - 11:00 PM',
+        vacancies INTEGER NOT NULL DEFAULT 1,
+        description TEXT NOT NULL DEFAULT '',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+  if (!existingSet.has("rider_job_applications")) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS rider_job_applications (
+        id SERIAL PRIMARY KEY,
+        job_id INTEGER NOT NULL REFERENCES rider_jobs(id) ON DELETE CASCADE,
+        restaurant_id INTEGER NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+        applicant_uid TEXT DEFAULT '',
+        full_name TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        email TEXT NOT NULL,
+        vehicle_type TEXT NOT NULL DEFAULT 'Motorbike',
+        zone TEXT NOT NULL,
+        nid_number TEXT DEFAULT '',
+        experience_note TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+  if (!existingSet.has("vendor_admin_messages")) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS vendor_admin_messages (
+        id SERIAL PRIMARY KEY,
+        restaurant_id INTEGER NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+        restaurant_name TEXT NOT NULL,
+        owner_uid TEXT NOT NULL,
+        sender_uid TEXT NOT NULL,
+        sender_name TEXT NOT NULL,
+        sender_role TEXT NOT NULL,
+        message TEXT NOT NULL,
+        is_read_by_admin BOOLEAN NOT NULL DEFAULT FALSE,
+        is_read_by_vendor BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+  }
+  if (!existingSet.has("ai_providers")) {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS ai_providers (
+        id SERIAL PRIMARY KEY,
+        code TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        provider_type TEXT NOT NULL DEFAULT 'openai',
+        model TEXT NOT NULL,
+        api_base_url TEXT DEFAULT '',
+        api_key TEXT DEFAULT '',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        is_default BOOLEAN NOT NULL DEFAULT FALSE,
+        sort_order INTEGER NOT NULL DEFAULT 10,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
     `);
   }
@@ -2035,11 +2194,11 @@ function calculateOrderFinancials(params) {
   };
 }
 var VALID_TRANSITIONS = {
-  confirmed: ["accepted", "preparing", "cancelled"],
-  accepted: ["preparing", "ready", "cancelled"],
-  preparing: ["ready", "cancelled"],
+  confirmed: ["accepted", "preparing", "ready", "rider_assigned", "cancelled"],
+  accepted: ["preparing", "ready", "rider_assigned", "cancelled"],
+  preparing: ["ready", "rider_assigned", "cancelled"],
   ready: ["rider_assigned", "picked_up", "on_the_way", "delivered", "cancelled"],
-  rider_assigned: ["picked_up", "on_the_way", "cancelled"],
+  rider_assigned: ["picked_up", "on_the_way", "delivered", "cancelled"],
   picked_up: ["on_the_way", "delivered"],
   on_the_way: ["delivered"],
   delivered: [],
@@ -2942,7 +3101,7 @@ function buildAiHelpSystemInstruction(params) {
     '- Why "This restaurant is currently unavailable for orders" appears: It means either the restaurant has "Store Open" switched OFF (isOpen = false) in Vendor/Admin Dashboard, or its status is not "approved" yet (e.g. pending/suspended). Re-enabling "Store Open" in Partner/Admin Dashboard or picking an Open restaurant resolves it immediately.',
     "- Nationwide Map & Location: Users can search any city/thana across all 64 districts of Bangladesh, enter a custom area, click anywhere on the interactive map or drag the pin to set that exact location, or press Back / click outside the map modal to return.",
     '- Live Rider Tracking & ETA: Users can click "Track Rider" in the header or look up orders via Checkout Email + Order Number to see live rider GPS coordinates, nearest standby rider, and estimated arrival time (ETA).',
-    "- Partner & Rider Portals: Restaurant owners can register, add custom cuisines/categories/areas, and integrate Partner APIs; Riders anywhere in Bangladesh can apply to join and share live GPS locations.",
+    "- Partner & Rider Portals: Restaurant owners can register, manage Orders & Dispatch (including assigning riders), toggle product stock/availability, post Rider Jobs & hire riders, message Platform Admin directly, and integrate Partner APIs; Riders anywhere in Bangladesh can apply to join or apply to restaurant rider jobs and share live GPS locations.",
     contextNotes
   ].filter(Boolean).join("\n");
 }
@@ -3210,6 +3369,449 @@ function mergeAddressSuggestions(localItems, remoteItems, limit = 12) {
   for (const item of remoteItems) pushUnique(item);
   return out.slice(0, Math.max(1, limit));
 }
+function resolveAiEnvFlags(flagOrBool) {
+  if (typeof flagOrBool === "boolean") {
+    return { hasGeminiKey: flagOrBool, hasOpenRouterKey: false };
+  }
+  return {
+    hasGeminiKey: Boolean(flagOrBool?.hasGeminiKey),
+    hasOpenRouterKey: Boolean(flagOrBool?.hasOpenRouterKey)
+  };
+}
+var DEFAULT_AI_PROVIDERS = [
+  {
+    code: "foodora",
+    name: "Foodora Own AI",
+    providerType: "foodora",
+    model: "foodora-bd-assistant",
+    apiBaseUrl: "",
+    isActive: true,
+    isDefault: true,
+    sortOrder: 1
+  },
+  {
+    code: "openrouter",
+    name: "OpenRouter (Gemma 4)",
+    providerType: "openrouter",
+    model: "google/gemma-4-31b-it:free",
+    apiBaseUrl: "https://openrouter.ai/api/v1",
+    isActive: true,
+    isDefault: false,
+    sortOrder: 2
+  },
+  {
+    code: "gemini",
+    name: "Google Gemini",
+    providerType: "gemini",
+    model: "gemini-4-hydrogen",
+    apiBaseUrl: "",
+    isActive: true,
+    isDefault: false,
+    sortOrder: 3
+  },
+  {
+    code: "chatgpt",
+    name: "ChatGPT (OpenAI)",
+    providerType: "openai",
+    model: "gpt-4o-mini",
+    apiBaseUrl: "https://api.openai.com/v1",
+    isActive: false,
+    isDefault: false,
+    sortOrder: 4
+  }
+];
+function normalizeAiProviderCode(input) {
+  return String(input || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 32);
+}
+function isValidExternalAiBaseUrl(rawUrl) {
+  const clean = String(rawUrl || "").trim();
+  if (!clean) return false;
+  try {
+    const parsed = new URL(clean);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host.endsWith(".local") || host.startsWith("10.") || host.startsWith("192.168.") || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || host === "169.254.169.254") {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isAiProviderConfigured(row, envFlags = false) {
+  const flags = resolveAiEnvFlags(envFlags);
+  if (row.providerType === "foodora") {
+    return true;
+  }
+  if (row.providerType === "gemini") {
+    return flags.hasGeminiKey;
+  }
+  if (row.providerType === "openrouter") {
+    return Boolean(row.apiKey && row.apiKey.trim() || flags.hasOpenRouterKey);
+  }
+  const hasKey = Boolean(row.apiKey && row.apiKey.trim());
+  if (!hasKey) return false;
+  if (row.providerType === "custom_openai") {
+    return isValidExternalAiBaseUrl(row.apiBaseUrl || "");
+  }
+  return true;
+}
+function toPublicAiProviderView(row, envFlags = false) {
+  const allowedTypes = [
+    "foodora",
+    "gemini",
+    "openrouter",
+    "openai",
+    "groq",
+    "deepseek",
+    "anthropic",
+    "custom_openai"
+  ];
+  const providerType = allowedTypes.includes(row.providerType) ? row.providerType : "custom_openai";
+  return {
+    code: normalizeAiProviderCode(row.code),
+    name: row.name,
+    providerType,
+    model: row.model,
+    isActive: Boolean(row.isActive),
+    isDefault: Boolean(row.isDefault),
+    isConfigured: isAiProviderConfigured({ ...row, providerType }, envFlags),
+    sortOrder: Number(row.sortOrder ?? 10)
+  };
+}
+function toAdminAiProviderView(row, envFlags = false) {
+  const flags = resolveAiEnvFlags(envFlags);
+  const pub = toPublicAiProviderView(row, flags);
+  const cleanKey = typeof row.apiKey === "string" ? row.apiKey.trim() : "";
+  const hasOpenRouterEnv = pub.providerType === "openrouter" && flags.hasOpenRouterKey;
+  return {
+    ...pub,
+    apiBaseUrl: row.apiBaseUrl || "",
+    hasApiKey: pub.providerType === "foodora" ? true : pub.providerType === "gemini" ? flags.hasGeminiKey : Boolean(cleanKey || hasOpenRouterEnv),
+    apiKeyPreview: pub.providerType === "foodora" ? flags.hasGeminiKey ? "Foodora Own AI + Gemini" : "Built-in Foodora AI Ready" : pub.providerType === "gemini" ? flags.hasGeminiKey ? "Server Env Configured" : "Missing Env Key" : cleanKey ? maskSecretValue(cleanKey) : hasOpenRouterEnv ? "Server Env Configured" : ""
+  };
+}
+function buildOpenRouterChatPayload(options) {
+  const cleanModel = (options.model || "").trim() || "google/gemma-4-31b-it:free";
+  const messages = [
+    { role: "system", content: options.systemInstruction },
+    ...options.history.slice(-8).map((item) => {
+      if (item.role === "model") {
+        const msg = {
+          role: "assistant",
+          content: item.text
+        };
+        if (item.reasoning_details !== void 0) {
+          msg.reasoning_details = item.reasoning_details;
+        }
+        return msg;
+      }
+      return {
+        role: "user",
+        content: item.text
+      };
+    }),
+    { role: "user", content: options.message }
+  ];
+  const payload = {
+    model: cleanModel,
+    messages,
+    reasoning: { enabled: true }
+  };
+  if (cleanModel.includes("gemma-4") || cleanModel.startsWith("google/")) {
+    payload.provider = {
+      only: ["google-ai-studio"],
+      allow_fallbacks: false
+    };
+  }
+  return payload;
+}
+function shouldReplyInBanglaForAiHelp(message, langPreference = "auto", uiLang = "en") {
+  if (langPreference === "bn") return true;
+  if (langPreference === "en") return false;
+  if (/[\u0980-\u09FF]/.test(message)) return true;
+  if (/\b(keno|kothay|kivabe|kibhabe|amar|apnar|taka|khawar|khabar|nai|ache|hobe|korbo|den|chai|dhonnobad)\b/i.test(
+    message
+  )) {
+    return true;
+  }
+  return uiLang === "bn";
+}
+function generateFoodoraOwnAiReply(params) {
+  const q = params.message.trim().toLowerCase();
+  const bn = shouldReplyInBanglaForAiHelp(
+    params.message,
+    params.langPreference || "auto",
+    params.uiLang || "en"
+  );
+  const openList = (params.openRestaurants || []).slice(0, 4);
+  const openNames = openList.map((r) => `${r.name} (${r.area})`).join(", ");
+  if (/(unavailable|closed|bandho|bondho|অর্ডার নেওয়া|বন্ধ|available|store open)/i.test(q)) {
+    return bn ? '\u0995\u09CB\u09A8\u09CB \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F "unavailable" \u09A6\u09C7\u0996\u09BE\u09B2\u09C7 \u09AC\u09C1\u099D\u09A4\u09C7 \u09B9\u09AC\u09C7 \u09B8\u09C7\u099F\u09BF\u09B0 "Store Open" \u09AC\u09A8\u09CD\u09A7 \u0986\u099B\u09C7 \u0985\u09A5\u09AC\u09BE \u0985\u09CD\u09AF\u09BE\u09A1\u09AE\u09BF\u09A8 \u0985\u09A8\u09C1\u09AE\u09CB\u09A6\u09A8 (approved) \u09AC\u09BE\u0995\u09BF \u0986\u099B\u09C7\u0964 \u09AA\u09BE\u09B0\u09CD\u099F\u09A8\u09BE\u09B0 \u09A1\u09CD\u09AF\u09BE\u09B6\u09AC\u09CB\u09B0\u09CD\u09A1\u09C7\u09B0 Store Switch \u09A5\u09C7\u0995\u09C7 Store Open \u099A\u09BE\u09B2\u09C1 \u0995\u09B0\u09B2\u09C7\u0987 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09A8\u09C7\u0993\u09DF\u09BE \u09B6\u09C1\u09B0\u09C1 \u09B9\u09AC\u09C7\u0964 \u099A\u09BE\u0987\u09B2\u09C7 \u09B9\u09CB\u09AE\u09AA\u09C7\u099C\u09C7\u09B0 \u099A\u09BE\u09B2\u09C1 \u09A5\u09BE\u0995\u09BE \u0985\u09A8\u09CD\u09AF \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u09A5\u09C7\u0995\u09C7\u0993 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09B0\u09A4\u09C7 \u09AA\u09BE\u09B0\u09C7\u09A8\u0964' : 'A restaurant appears unavailable when its "Store Open" toggle is switched OFF in the Partner/Admin Dashboard or its approval status is still pending. Re-opening the store toggle immediately re-enables ordering, or you can pick another Open restaurant on the home feed.';
+  }
+  if (/(job|apply|join|salary|নিয়োগ|জব|কাজ|আবেদন)/i.test(q)) {
+    return bn ? '\u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u09AC\u09BE \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u09AA\u09BE\u09B0\u09CD\u099F\u09A8\u09BE\u09B0 \u09B9\u09A4\u09C7 \u099A\u09BE\u0987\u09B2\u09C7 \u0989\u09AA\u09B0\u09C7\u09B0 "Rider Job" \u09AC\u09BE "Partner" \u09B2\u09BF\u0982\u0995\u09C7 \u0995\u09CD\u09B2\u09BF\u0995 \u0995\u09B0\u09C1\u09A8\u0964 \u09AB\u09CD\u09B2\u09BF\u099F \u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u09B9\u09BF\u09B8\u09C7\u09AC\u09C7 \u099C\u09DF\u09C7\u09A8 \u0995\u09B0\u09B2\u09C7 \u09B8\u09B0\u09BE\u09B8\u09B0\u09BF \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \u0995\u09BF\u0989 \u09AA\u09BE\u09AC\u09C7\u09A8, \u0985\u09A5\u09AC\u09BE Rider Jobs \u09AC\u09CB\u09B0\u09CD\u09A1 \u09A5\u09C7\u0995\u09C7 \u09A8\u09BF\u09B0\u09CD\u09A6\u09BF\u09B7\u09CD\u099F \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F\u09C7\u09B0 \u09AE\u09BE\u09B8\u09BF\u0995/\u09B6\u09BF\u09AB\u099F \u09AD\u09BF\u09A4\u09CD\u09A4\u09BF\u0995 \u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u099A\u09BE\u0995\u09B0\u09BF\u09A4\u09C7 \u0986\u09AC\u09C7\u09A6\u09A8 \u0995\u09B0\u09A4\u09C7 \u09AA\u09BE\u09B0\u09AC\u09C7\u09A8\u0964' : 'To join as a delivery rider or restaurant partner, open "Rider Job" or "Partner" from the top navigation. You can join the active delivery fleet right away or apply to restaurant-posted Rider Jobs directly from the Rider Jobs tab.';
+  }
+  if (/(pay|bkash|nagad|ssl|cod|cash|promo|coupon|discount|পেমেন্ট|বিকাশ|নগদ|ক্যাশ|প্রোমো)/i.test(q)) {
+    return bn ? "Foodora BD-\u09A4\u09C7 bKash, Nagad, SSLCommerz \u098F\u09AC\u0982 Cash on Delivery (COD) \u09B8\u09AC \u09AE\u09BE\u09A7\u09CD\u09AF\u09AE\u0987 \u099A\u09BE\u09B2\u09C1 \u0986\u099B\u09C7\u0964 \u099A\u09C7\u0995\u0986\u0989\u099F\u09C7 FOODORA50 \u09AA\u09CD\u09B0\u09CB\u09AE\u09CB \u0995\u09CB\u09A1 \u09AC\u09CD\u09AF\u09AC\u09B9\u09BE\u09B0 \u0995\u09B0\u09B2\u09C7 \u09A8\u09BF\u09B0\u09CD\u09A6\u09BF\u09B7\u09CD\u099F \u09B6\u09B0\u09CD\u09A4\u09C7 \u09A1\u09BF\u09B8\u0995\u09BE\u0989\u09A8\u09CD\u099F \u09AA\u09BE\u0993\u09DF\u09BE \u09AF\u09BE\u09DF\u0964 \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F \u09AE\u09C7\u09A5\u09A1 \u0993 API \u0997\u09C7\u099F\u0993\u09DF\u09C7 \u09B8\u09C1\u09AA\u09BE\u09B0 \u0985\u09CD\u09AF\u09BE\u09A1\u09AE\u09BF\u09A8\u09C7\u09B0 Backend Control \u09A5\u09C7\u0995\u09C7\u0993 \u0995\u09A8\u09AB\u09BF\u0997\u09BE\u09B0 \u0995\u09B0\u09BE \u09AF\u09BE\u09DF\u0964" : "Foodora BD supports bKash, Nagad, SSLCommerz, and Cash on Delivery (COD). You can apply promo codes like FOODORA50 at checkout, and Super Admins can manage live/sandbox gateways under Backend Control.";
+  }
+  if (/(track|rider|eta|gps|ট্র্যাক|রাইডার|অর্ডার.*(কোথায়|kothay|status)|(কোথায়|kothay).*(order|rider|ডেলিভারি))/i.test(q)) {
+    const ordRef = params.activeOrderNumber ? ` (${params.activeOrderNumber})` : "";
+    return bn ? `\u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u099F\u09CD\u09B0\u09CD\u09AF\u09BE\u0995 \u0995\u09B0\u09A4\u09C7 \u09B9\u09C7\u09A1\u09BE\u09B0\u09C7\u09B0 "Track Rider" \u09AC\u09BE\u099F\u09A8\u09C7 \u0995\u09CD\u09B2\u09BF\u0995 \u0995\u09B0\u09C1\u09A8${ordRef} \u0985\u09A5\u09AC\u09BE \u099A\u09C7\u0995\u0986\u0989\u099F \u0987\u09AE\u09C7\u0987\u09B2 \u0993 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09A8\u09AE\u09CD\u09AC\u09B0 \u09A6\u09BF\u09A8\u0964 \u09B8\u09C7\u0996\u09BE\u09A8\u09C7 \u09AE\u09CD\u09AF\u09BE\u09AA\u09C7 \u09B0\u09BE\u0987\u09A1\u09BE\u09B0\u09C7\u09B0 \u09B2\u09BE\u0987\u09AD GPS \u0985\u09AC\u09B8\u09CD\u09A5\u09BE\u09A8, \u09A6\u09C2\u09B0\u09A4\u09CD\u09AC \u0993 \u09AA\u09CC\u0981\u099B\u09BE\u09A8\u09CB\u09B0 \u0986\u09A8\u09C1\u09AE\u09BE\u09A8\u09BF\u0995 \u09B8\u09AE\u09DF (ETA) \u09A6\u09C7\u0996\u09A4\u09C7 \u09AA\u09BE\u09AC\u09C7\u09A8\u0964 \u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u09A1\u09CD\u09AF\u09BE\u09B6\u09AC\u09CB\u09B0\u09CD\u09A1\u09C7 \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \u09AE\u09CD\u09AF\u09BE\u09A8 \u09AA\u09BF\u0995\u0986\u09AA \u0993 \u09A1\u09CD\u09B0\u09AA-\u0985\u09AB \u099B\u09AC\u09BF\u0993 \u0986\u09AA\u09B2\u09CB\u09A1 \u0995\u09B0\u09A4\u09C7 \u09AA\u09BE\u09B0\u09AC\u09C7\u09A8\u0964` : `Click "Track Rider" in the top bar${ordRef} or search using your Checkout Email + Order Number to view live rider GPS coordinates, route path, and ETA. On the Rider Dashboard, riders receive pickup & drop-off navigation, cash/online payment summary, and drop-off photo proof.`;
+  }
+  if (/(owner|vendor|partner|stock|variant|variation|addon|dispatch|স্টক|ভেন্ডর|পার্টনার|ভ্যারিয়েশন)/i.test(q)) {
+    return bn ? "\u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u09AE\u09BE\u09B2\u09BF\u0995 (Partner Portal) \u09A5\u09C7\u0995\u09C7 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u09A1\u09BF\u09B8\u09AA\u09CD\u09AF\u09BE\u099A \u0993 \u09A8\u09BF\u099C\u09B8\u09CD\u09AC \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \u09AE\u09CD\u09AF\u09BE\u09A8 \u09AF\u09CB\u0997/\u0985\u09CD\u09AF\u09BE\u09B8\u09BE\u0987\u09A8 \u0995\u09B0\u09BE \u09AF\u09BE\u09DF\u0964 Menu \u0993 Stock \u099F\u09CD\u09AF\u09BE\u09AC\u09C7 \u0997\u09BF\u09DF\u09C7 \u09AA\u09CD\u09B0\u09A4\u09BF\u099F\u09BF \u0996\u09BE\u09AC\u09BE\u09B0\u09C7\u09B0 \u09AA\u09CD\u09B0\u09CB\u09A1\u09BE\u0995\u09CD\u099F \u09AD\u09CD\u09AF\u09BE\u09B0\u09BF\u09DF\u09C7\u09B6\u09A8 (\u09AF\u09C7\u09AE\u09A8 Half/Full), \u0985\u09CD\u09AF\u09BE\u09A1-\u0985\u09A8 \u0993 In Stock \u09B8\u09CD\u099F\u09CD\u09AF\u09BE\u099F\u09BE\u09B8 \u09B8\u09BE\u09A5\u09C7 \u09B8\u09BE\u09A5\u09C7 \u0986\u09AA\u09A1\u09C7\u099F \u0995\u09B0\u09BE \u09AF\u09BE\u09DF, \u0986\u09B0 Rider Jobs \u09A5\u09C7\u0995\u09C7 \u09A8\u09A4\u09C1\u09A8 \u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u09A8\u09BF\u09DF\u09CB\u0997\u0993 \u09A6\u09C7\u0993\u09DF\u09BE \u09AF\u09BE\u09DF\u0964" : "In the Partner Portal, restaurant owners can dispatch orders, add or assign their own delivery riders, edit menu items with custom product variations & add-ons, toggle In Stock availability live, and post Rider Jobs or message Platform Admin directly.";
+  }
+  if (/(restaurant|menu|food|biriyani|kacchi|burger|pizza|খাওয়া|খাবার|রেস্টুরেন্ট|অর্ডার)/i.test(q)) {
+    return bn ? `${params.area ? `${params.area} \u098F\u09B2\u09BE\u0995\u09BE\u09DF ` : ""}\u09B9\u09CB\u09AE\u09AA\u09C7\u099C\u09C7\u09B0 "Order Popular Food Now" \u09AC\u09BE \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u0995\u09BE\u09B0\u09CD\u09A1 \u09A5\u09C7\u0995\u09C7 \u09AF\u09C7\u0995\u09CB\u09A8\u09CB \u09A1\u09BF\u09B6 \u0995\u09BE\u09B0\u09CD\u099F\u09C7 \u09AF\u09CB\u0997 \u0995\u09B0\u09C7 \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09B0\u09A4\u09C7 \u09AA\u09BE\u09B0\u09AC\u09C7\u09A8\u0964${openNames ? ` \u098F\u0996\u09A8 \u0996\u09CB\u09B2\u09BE \u0986\u099B\u09C7: ${openNames}\u0964` : ""} \u099A\u09BE\u0987\u09B2\u09C7 \u09AA\u099B\u09A8\u09CD\u09A6\u09C7\u09B0 \u0996\u09BE\u09AC\u09BE\u09B0\u09C7\u09B0 \u09A8\u09BE\u09AE \u09AC\u09B2\u09C1\u09A8, \u0986\u09AE\u09BF \u0996\u09C1\u0981\u099C\u09C7 \u09A6\u09BF\u09A4\u09C7 \u09B8\u09BE\u09B9\u09BE\u09AF\u09CD\u09AF \u0995\u09B0\u09AC\u09CB\u0964` : `Pick any dish from "Order Popular Food Now" or browse open restaurants${params.area ? ` around ${params.area}` : ""} to add items and checkout.${openNames ? ` Currently open: ${openNames}.` : ""} Tell me what craving you have and I can point you to it!`;
+  }
+  return bn ? `\u0986\u09AE\u09BF Foodora BD-\u098F\u09B0 \u09A8\u09BF\u099C\u09B8\u09CD\u09AC AI \u09B8\u09B9\u09BE\u09DF\u0995\u0964${openNames ? ` \u098F\u0996\u09A8 \u09B8\u0995\u09CD\u09B0\u09BF\u09DF \u0995\u09BF\u099B\u09C1 \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F: ${openNames}\u0964` : ""} \u0985\u09B0\u09CD\u09A1\u09BE\u09B0 \u0995\u09B0\u09BE, \u09B0\u09BE\u0987\u09A1\u09BE\u09B0 \u09B2\u09BE\u0987\u09AD \u099F\u09CD\u09B0\u09CD\u09AF\u09BE\u0995\u09BF\u0982, \u09A1\u09C7\u09B2\u09BF\u09AD\u09BE\u09B0\u09BF \u09AE\u09CD\u09AF\u09BE\u09A8 \u099C\u09AC, \u09B0\u09C7\u09B8\u09CD\u099F\u09C1\u09B0\u09C7\u09A8\u09CD\u099F \u09AA\u09BE\u09B0\u09CD\u099F\u09A8\u09BE\u09B0 \u09A1\u09CD\u09AF\u09BE\u09B6\u09AC\u09CB\u09B0\u09CD\u09A1 \u09AC\u09BE bKash/COD \u09AA\u09C7\u09AE\u09C7\u09A8\u09CD\u099F \u09B8\u09AE\u09CD\u09AA\u09B0\u09CD\u0995\u09C7 \u09AF\u09C7\u0995\u09CB\u09A8\u09CB \u09AA\u09CD\u09B0\u09B6\u09CD\u09A8 \u0995\u09B0\u09A4\u09C7 \u09AA\u09BE\u09B0\u09C7\u09A8\u0964` : `I am Foodora BD's built-in AI assistant.${openNames ? ` Currently open stores include: ${openNames}.` : ""} Ask me anything about ordering food, live rider GPS tracking, Rider Dashboard pickup/drop-off steps, restaurant partner tools, or payments.`;
+}
+function validateRiderJobPayload(input) {
+  const restaurantId = Number(input.restaurantId);
+  if (!Number.isInteger(restaurantId) || restaurantId <= 0) {
+    return { valid: false, reason: "Please select a valid restaurant for the rider job." };
+  }
+  const title = typeof input.title === "string" ? input.title.trim() : "";
+  if (title.length < 3 || title.length > 120) {
+    return { valid: false, reason: "Job title must be between 3 and 120 characters." };
+  }
+  const titleBn = typeof input.titleBn === "string" && input.titleBn.trim().length > 0 ? input.titleBn.trim() : title;
+  const zone = typeof input.zone === "string" ? input.zone.trim() : "";
+  if (zone.length < 2 || zone.length > 120) {
+    return { valid: false, reason: "Delivery zone / area is required." };
+  }
+  const vehicleType = typeof input.vehicleType === "string" && input.vehicleType.trim().length >= 2 ? input.vehicleType.trim() : "Motorbike / Bicycle";
+  const salaryRange = typeof input.salaryRange === "string" && input.salaryRange.trim().length >= 2 ? input.salaryRange.trim() : "\u09F315,000 - \u09F322,000 / month";
+  const shiftHours = typeof input.shiftHours === "string" && input.shiftHours.trim().length >= 2 ? input.shiftHours.trim() : "Full-time \xB7 11:00 AM - 11:00 PM";
+  const vacanciesRaw = Number(input.vacancies ?? 1);
+  const vacancies = Number.isInteger(vacanciesRaw) && vacanciesRaw >= 1 && vacanciesRaw <= 100 ? vacanciesRaw : 1;
+  const description = typeof input.description === "string" ? input.description.trim().slice(0, 600) : "";
+  return {
+    valid: true,
+    data: {
+      restaurantId,
+      title,
+      titleBn,
+      zone,
+      vehicleType,
+      salaryRange,
+      shiftHours,
+      vacancies,
+      description
+    }
+  };
+}
+function normalizeVariationsList(raw, fallbackRegular = true) {
+  if (!Array.isArray(raw)) {
+    return fallbackRegular ? [{ name: "Regular", priceDelta: 0 }] : [];
+  }
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const rec = entry;
+    const name = typeof rec.name === "string" ? rec.name.trim().slice(0, 80) : "";
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const numDelta = Number(rec.priceDelta ?? 0);
+    const priceDelta = Number.isFinite(numDelta) ? Math.max(-5e4, Math.min(5e4, Math.round(numDelta))) : 0;
+    out.push({ name, priceDelta });
+  }
+  if (out.length === 0 && fallbackRegular) {
+    return [{ name: "Regular", priceDelta: 0 }];
+  }
+  return out;
+}
+function normalizeAddonsList(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const rec = entry;
+    const name = typeof rec.name === "string" ? rec.name.trim().slice(0, 80) : "";
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const numPrice = Number(rec.price ?? 0);
+    const price = Number.isFinite(numPrice) ? Math.max(0, Math.min(5e4, Math.round(numPrice))) : 0;
+    out.push({ name, price });
+  }
+  return out;
+}
+function validateVendorAddRiderPayload(input) {
+  const restaurantId = Number(input.restaurantId);
+  if (!Number.isInteger(restaurantId) || restaurantId <= 0) {
+    return { valid: false, reason: "Please select a valid restaurant store." };
+  }
+  const fullName = typeof input.fullName === "string" ? input.fullName.trim() : "";
+  if (fullName.length < 2 || fullName.length > 100) {
+    return { valid: false, reason: "Delivery man full name must be at least 2 characters." };
+  }
+  const rawPhone = typeof input.phone === "string" ? input.phone.trim() : "";
+  const digits = rawPhone.replace(/[\s\-()]/g, "");
+  let normalizedPhone = "";
+  if (/^\+?8801[3-9]\d{8}$/.test(digits)) {
+    normalizedPhone = digits.startsWith("+") ? digits : `+${digits}`;
+  } else if (/^01[3-9]\d{8}$/.test(digits)) {
+    normalizedPhone = `+88${digits}`;
+  } else {
+    return { valid: false, reason: "Please enter a valid Bangladesh mobile number (e.g. 017XXXXXXXX)." };
+  }
+  const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
+  if (!email || !email.includes("@") || email.length < 5) {
+    return { valid: false, reason: "Please provide a valid email address for the delivery man." };
+  }
+  const password = typeof input.password === "string" ? input.password : "";
+  if (password.trim().length > 0 && password.trim().length < 6) {
+    return { valid: false, reason: "Login password must be at least 6 characters (or leave blank)." };
+  }
+  const vehicleType = typeof input.vehicleType === "string" && input.vehicleType.trim().length >= 2 ? input.vehicleType.trim().slice(0, 60) : "Motorbike";
+  const zone = typeof input.zone === "string" && input.zone.trim().length >= 2 ? input.zone.trim().slice(0, 120) : "Gulshan 2";
+  const nidNumber = typeof input.nidNumber === "string" ? input.nidNumber.trim().slice(0, 50) : "";
+  return {
+    valid: true,
+    data: {
+      restaurantId,
+      fullName,
+      phone: normalizedPhone,
+      email,
+      ...password.trim() ? { password: password.trim() } : {},
+      vehicleType,
+      zone,
+      nidNumber
+    }
+  };
+}
+function parseUploadedImageDataUrl(rawDataUrl, filename) {
+  const trimmed = String(rawDataUrl || "").trim();
+  const commaIdx = trimmed.indexOf(",");
+  if (commaIdx === -1 || !trimmed.toLowerCase().startsWith("data:")) {
+    return { valid: false, reason: "Only PNG, JPG, WEBP, or GIF images are supported" };
+  }
+  const header = trimmed.slice(5, commaIdx).toLowerCase();
+  if (!header.includes(";base64")) {
+    return { valid: false, reason: "Image payload must be base64 encoded" };
+  }
+  const rawMime = header.split(";")[0].trim();
+  const cleanBase64 = trimmed.slice(commaIdx + 1).replace(/\s+/g, "");
+  if (!cleanBase64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(cleanBase64)) {
+    return { valid: false, reason: "Corrupted base64 image payload" };
+  }
+  const mimeToExt = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/pjpeg": "jpg",
+    "image/jfif": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif"
+  };
+  let ext = mimeToExt[rawMime];
+  if (!ext && (rawMime === "application/octet-stream" || rawMime === "" || rawMime === "image/*")) {
+    const buf = Buffer.from(cleanBase64.slice(0, 32), "base64");
+    if (buf.length >= 3 && buf[0] === 255 && buf[1] === 216 && buf[2] === 255) {
+      ext = "jpg";
+    } else if (buf.length >= 4 && buf[0] === 137 && buf[1] === 80 && buf[2] === 78 && buf[3] === 71) {
+      ext = "png";
+    } else if (buf.length >= 12 && buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP") {
+      ext = "webp";
+    } else if (buf.length >= 4 && buf.subarray(0, 3).toString("ascii") === "GIF") {
+      ext = "gif";
+    } else {
+      const lowerName = String(filename || "").toLowerCase();
+      if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) ext = "jpg";
+      else if (lowerName.endsWith(".png")) ext = "png";
+      else if (lowerName.endsWith(".webp")) ext = "webp";
+      else if (lowerName.endsWith(".gif")) ext = "gif";
+    }
+  }
+  if (!ext) {
+    return { valid: false, reason: "Only PNG, JPG, WEBP, or GIF images are supported" };
+  }
+  const extToMime = {
+    jpg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    gif: "image/gif"
+  };
+  return {
+    valid: true,
+    ext,
+    base64Data: cleanBase64,
+    mimeType: extToMime[ext]
+  };
+}
+function sanitizeRiderProfileUpdate(input) {
+  const fullName = String(input.fullName || "").trim();
+  if (fullName.length < 2 || fullName.length > 80) {
+    return { valid: false, error: "Full name must be between 2 and 80 characters." };
+  }
+  const phone = String(input.phone || "").trim();
+  const digitsOnly = phone.replace(/[^\d]/g, "");
+  if (digitsOnly.length < 8 || phone.length > 24) {
+    return { valid: false, error: "Please enter a valid phone number." };
+  }
+  const vehicleType = String(input.vehicleType || "").trim();
+  if (vehicleType.length < 2 || vehicleType.length > 50) {
+    return { valid: false, error: "Please specify a valid vehicle type." };
+  }
+  const zone = String(input.zone || "").trim();
+  if (zone.length < 2 || zone.length > 100) {
+    return { valid: false, error: "Please select or enter a valid working zone." };
+  }
+  const nidNumber = String(input.nidNumber ?? "").trim().slice(0, 40);
+  const isAvailable = typeof input.isAvailable === "boolean" ? input.isAvailable : true;
+  const avatarUrl = String(input.avatarUrl ?? "").trim();
+  if (avatarUrl && !avatarUrl.startsWith("/uploads/") && !avatarUrl.startsWith("https://") && !avatarUrl.startsWith("http://") && !avatarUrl.startsWith("data:image/")) {
+    return { valid: false, error: "Profile photo URL must be a valid uploaded image." };
+  }
+  return {
+    valid: true,
+    data: {
+      fullName,
+      phone,
+      vehicleType,
+      zone,
+      nidNumber,
+      isAvailable,
+      avatarUrl
+    }
+  };
+}
+function isBicycleVehicleType(vehicleType) {
+  const clean = String(vehicleType || "").trim().toLowerCase();
+  if (!clean) return false;
+  return clean === "bicycle" || clean === "cycle" || clean === "bycicle" || clean === "bycikel" || clean.includes("bicycle") || clean.includes("pushbike") || clean.includes("\u09B8\u09BE\u0987\u0995\u09C7\u09B2");
+}
+function canOwnerOpenNewRestaurant(existingOwnedCount, actorRole) {
+  const role = String(actorRole || "").trim().toLowerCase();
+  if (role === "admin" || role === "super_admin") {
+    return { allowed: true };
+  }
+  if (existingOwnedCount >= 1) {
+    return {
+      allowed: false,
+      error: "Each partner account can open 1 restaurant. Please add a new branch under your existing restaurant instead."
+    };
+  }
+  return { allowed: true };
+}
+function buildBranchRestaurantNames(primaryName, primaryNameBn, branchLabel, branchLabelBn) {
+  const stripBranchSuffix = (raw) => String(raw || "").split(/\s+[—–-]\s+/)[0].trim();
+  const baseEn = stripBranchSuffix(primaryName) || "Foodora Partner";
+  const baseBn = stripBranchSuffix(primaryNameBn) || baseEn;
+  const cleanBranchEn = String(branchLabel || "").trim();
+  const cleanBranchBn = String(branchLabelBn || "").trim() || cleanBranchEn;
+  return {
+    name: `${baseEn} \u2014 ${cleanBranchEn}`,
+    nameBn: `${baseBn} \u2014 ${cleanBranchBn}`
+  };
+}
 
 // src/db/queries.ts
 async function getApprovedRestaurants() {
@@ -3424,6 +4026,36 @@ async function ensureDefaultPaymentGateways() {
     }));
   }
 }
+async function ensureDefaultAiProviders() {
+  try {
+    let existing = await withDbRetry(
+      () => db.select().from(aiProviders).orderBy(asc(aiProviders.sortOrder), asc(aiProviders.id))
+    );
+    const existingCodes = new Set(existing.map((row) => row.code));
+    const hasAnyDefault = existing.some((row) => row.isDefault);
+    const missingDefaults = DEFAULT_AI_PROVIDERS.filter((p) => !existingCodes.has(p.code));
+    if (missingDefaults.length > 0) {
+      await db.insert(aiProviders).values(
+        missingDefaults.map((p) => ({
+          ...p,
+          isDefault: existing.length === 0 ? p.isDefault : !hasAnyDefault && p.code === "foodora",
+          apiKey: ""
+        }))
+      ).onConflictDoNothing();
+      existing = await db.select().from(aiProviders).orderBy(asc(aiProviders.sortOrder), asc(aiProviders.id));
+    }
+    return existing;
+  } catch (error) {
+    console.error("Failed to load AI providers:", error);
+    return DEFAULT_AI_PROVIDERS.map((p, idx) => ({
+      id: idx + 1,
+      ...p,
+      apiKey: "",
+      createdAt: /* @__PURE__ */ new Date(),
+      updatedAt: /* @__PURE__ */ new Date()
+    }));
+  }
+}
 async function getVendorWorkspace(ownerUid, isSuperAdmin, requestedRestaurantId) {
   try {
     const rawList = isSuperAdmin ? await db.select().from(restaurants).orderBy(restaurants.id) : await db.select().from(restaurants).where(eq(restaurants.ownerUid, ownerUid)).orderBy(restaurants.id);
@@ -3440,14 +4072,32 @@ async function getVendorWorkspace(ownerUid, isSuperAdmin, requestedRestaurantId)
         menuItems: [],
         orders: [],
         ledger: [],
-        payouts: []
+        payouts: [],
+        riderJobs: [],
+        riderJobApplications: [],
+        unreadMessageCount: 0
       };
     }
-    const menuItems = await db.select().from(foodItems).where(eq(foodItems.restaurantId, target.id)).orderBy(desc(foodItems.id));
     const restaurantIdsToQuery = isAllRestaurants ? owned.map((r) => r.id) : [target.id];
+    const restaurantNameMap = new Map(owned.map((r) => [r.id, r.name]));
+    const rawMenuItems = restaurantIdsToQuery.length > 0 ? await db.select().from(foodItems).where(inArray(foodItems.restaurantId, restaurantIdsToQuery)).orderBy(desc(foodItems.id)) : [];
+    const menuItems = rawMenuItems.map((item) => ({
+      ...item,
+      restaurantName: restaurantNameMap.get(item.restaurantId) || target.name
+    }));
     const restOrders = restaurantIdsToQuery.length > 0 ? await db.select().from(orders).where(inArray(orders.restaurantId, restaurantIdsToQuery)).orderBy(desc(orders.createdAt)) : [];
-    const ledger = await db.select().from(commissionLedger).where(eq(commissionLedger.restaurantId, target.id)).orderBy(desc(commissionLedger.createdAt));
-    const payouts = await db.select().from(restaurantPayouts).where(eq(restaurantPayouts.restaurantId, target.id)).orderBy(desc(restaurantPayouts.requestedAt));
+    const [ledger, payouts, jobs, applications, unreadRows] = await Promise.all([
+      restaurantIdsToQuery.length > 0 ? db.select().from(commissionLedger).where(inArray(commissionLedger.restaurantId, restaurantIdsToQuery)).orderBy(desc(commissionLedger.createdAt)) : Promise.resolve([]),
+      restaurantIdsToQuery.length > 0 ? db.select().from(restaurantPayouts).where(inArray(restaurantPayouts.restaurantId, restaurantIdsToQuery)).orderBy(desc(restaurantPayouts.requestedAt)) : Promise.resolve([]),
+      restaurantIdsToQuery.length > 0 ? db.select().from(riderJobs).where(inArray(riderJobs.restaurantId, restaurantIdsToQuery)).orderBy(desc(riderJobs.createdAt)) : Promise.resolve([]),
+      restaurantIdsToQuery.length > 0 ? db.select().from(riderJobApplications).where(inArray(riderJobApplications.restaurantId, restaurantIdsToQuery)).orderBy(desc(riderJobApplications.createdAt)) : Promise.resolve([]),
+      restaurantIdsToQuery.length > 0 ? db.select({ id: vendorAdminMessages.id }).from(vendorAdminMessages).where(
+        and(
+          inArray(vendorAdminMessages.restaurantId, restaurantIdsToQuery),
+          eq(vendorAdminMessages.isReadByVendor, false)
+        )
+      ) : Promise.resolve([])
+    ]);
     return {
       restaurant: target,
       restaurants: owned,
@@ -3455,7 +4105,10 @@ async function getVendorWorkspace(ownerUid, isSuperAdmin, requestedRestaurantId)
       menuItems,
       orders: restOrders,
       ledger,
-      payouts
+      payouts,
+      riderJobs: jobs,
+      riderJobApplications: applications,
+      unreadMessageCount: unreadRows.length
     };
   } catch (error) {
     console.error("Failed to fetch vendor workspace:", error);
@@ -3464,26 +4117,47 @@ async function getVendorWorkspace(ownerUid, isSuperAdmin, requestedRestaurantId)
 }
 async function getRiderWorkspace(riderUid) {
   try {
-    const [riderRows, allOrders, allRestaurants] = await Promise.all([
+    const [riderRows, userRows, allOrders, allRestaurants] = await Promise.all([
       db.select().from(riders).where(eq(riders.uid, riderUid)).limit(1),
+      db.select({ avatarUrl: users.avatarUrl }).from(users).where(eq(users.uid, riderUid)).limit(1),
       db.select().from(orders).orderBy(desc(orders.createdAt)),
-      db.select({ id: restaurants.id, lat: restaurants.lat, lng: restaurants.lng }).from(restaurants)
+      db.select({
+        id: restaurants.id,
+        name: restaurants.name,
+        lat: restaurants.lat,
+        lng: restaurants.lng,
+        address: restaurants.address,
+        phone: restaurants.phone
+      }).from(restaurants)
     ]);
-    const restCoordMap = new Map(allRestaurants.map((r) => [r.id, { lat: r.lat, lng: r.lng }]));
+    const restCoordMap = new Map(
+      allRestaurants.map((r) => [
+        r.id,
+        { name: r.name, lat: r.lat, lng: r.lng, address: r.address, phone: r.phone }
+      ])
+    );
     const withRestCoords = allOrders.map((o) => {
       const coords = restCoordMap.get(o.restaurantId);
       return {
         ...o,
         restaurantLat: coords?.lat,
-        restaurantLng: coords?.lng
+        restaurantLng: coords?.lng,
+        restaurantAddress: coords?.address || "",
+        restaurantPhone: coords?.phone || ""
       };
     });
     const availableOrders = withRestCoords.filter(
       (o) => o.deliveryMode === "platform" && !o.riderUid && ["accepted", "preparing", "ready"].includes(o.status)
     );
     const assignedOrders = withRestCoords.filter((o) => o.riderUid === riderUid);
+    const baseRider = riderRows[0] ?? null;
+    const enrichedRider = baseRider ? {
+      ...baseRider,
+      avatarUrl: userRows[0]?.avatarUrl || "",
+      restaurantName: baseRider.restaurantId ? restCoordMap.get(baseRider.restaurantId)?.name || null : null
+    } : null;
     return {
-      rider: riderRows[0] ?? null,
+      rider: enrichedRider,
       availableOrders,
       assignedOrders
     };
@@ -4930,7 +5604,46 @@ function resolveFallbackFoodImageBuffer() {
     return null;
   }
 }
-function resolveCidEntryToAttachment(entry) {
+function buildOriginFallbackImageUrl(srcUrl) {
+  if (!srcUrl || !/^https?:\/\//i.test(srcUrl)) return null;
+  try {
+    const parsed = new URL(srcUrl);
+    return `${parsed.origin}${DEFAULT_ORDER_EMAIL_IMAGE_PATH}`;
+  } catch {
+    return null;
+  }
+}
+async function fetchRemoteImageAsBuffer(imageUrl, cid) {
+  if (!/^https?:\/\//i.test(imageUrl)) return null;
+  try {
+    const res = await fetch(imageUrl, { signal: AbortSignal.timeout(5e3) });
+    if (!res.ok) return null;
+    const rawType = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const extMap = {
+      "image/jpeg": ".jpg",
+      "image/jpg": ".jpg",
+      "image/png": ".png",
+      "image/webp": ".webp",
+      "image/gif": ".gif"
+    };
+    const normalizedType = rawType === "image/jpg" ? "image/jpeg" : rawType;
+    if (!normalizedType.startsWith("image/")) return null;
+    const arrBuf = await res.arrayBuffer();
+    if (!arrBuf || arrBuf.byteLength === 0 || arrBuf.byteLength > 5 * 1024 * 1024) {
+      return null;
+    }
+    const ext = extMap[normalizedType] || ".jpg";
+    return {
+      filename: `${cid}${ext}`,
+      content: Buffer.from(arrBuf),
+      contentType: normalizedType,
+      cid
+    };
+  } catch {
+    return null;
+  }
+}
+function resolveDiskOrDataCidAttachment(entry, allowFallback) {
   if (entry.kind === "data" && entry.dataBase64 && entry.dataMimeType) {
     const extMap = {
       "image/jpeg": ".jpg",
@@ -4976,6 +5689,7 @@ function resolveCidEntryToAttachment(entry) {
       }
     }
   }
+  if (!allowFallback) return null;
   const fallback = resolveFallbackFoodImageBuffer();
   if (!fallback) return null;
   return {
@@ -4985,7 +5699,7 @@ function resolveCidEntryToAttachment(entry) {
     cid: entry.cid
   };
 }
-function prepareEmailWithInlineCidAttachments(html) {
+async function prepareEmailWithInlineCidAttachmentsAsync(html) {
   const plan = extractEmailInlineCidPlan(html);
   if (plan.images.length === 0) {
     return { html, attachments: [] };
@@ -4993,7 +5707,27 @@ function prepareEmailWithInlineCidAttachments(html) {
   const attachments = [];
   let finalHtml = plan.html;
   for (const entry of plan.images) {
-    const resolved = resolveCidEntryToAttachment(entry);
+    let resolved = resolveDiskOrDataCidAttachment(entry, false);
+    if (!resolved && entry.originalSrcs[0]) {
+      resolved = await fetchRemoteImageAsBuffer(entry.originalSrcs[0], entry.cid);
+    }
+    if (!resolved) {
+      const diskFallback = resolveFallbackFoodImageBuffer();
+      if (diskFallback) {
+        resolved = {
+          filename: diskFallback.filename,
+          content: diskFallback.content,
+          contentType: diskFallback.contentType,
+          cid: entry.cid
+        };
+      }
+    }
+    if (!resolved && entry.originalSrcs[0]) {
+      const remoteFallbackUrl = buildOriginFallbackImageUrl(entry.originalSrcs[0]);
+      if (remoteFallbackUrl && remoteFallbackUrl !== entry.originalSrcs[0]) {
+        resolved = await fetchRemoteImageAsBuffer(remoteFallbackUrl, entry.cid);
+      }
+    }
     if (resolved) {
       attachments.push(resolved);
     } else if (entry.originalSrcs[0]) {
@@ -5013,7 +5747,7 @@ async function sendTransactionalEmail(params) {
     };
   }
   const cfg = await resolveEffectiveConfig();
-  const prepared = prepareEmailWithInlineCidAttachments(params.html);
+  const prepared = await prepareEmailWithInlineCidAttachmentsAsync(params.html);
   let lastSmtpError = "";
   if ((cfg.providerMode === "gmail" || cfg.providerMode === "smtp") && cfg.smtpHost && cfg.smtpUser && cfg.smtpPass) {
     const attempts = [
@@ -5541,6 +6275,26 @@ function broadcastNotificationEvent(payload) {
     }
   }
 }
+function broadcastVendorAdminMessage(payload) {
+  if (clients.size === 0) return;
+  const serialized = JSON.stringify({
+    type: "message:created",
+    payload,
+    ts: Date.now()
+  });
+  for (const client of clients.values()) {
+    const isAdmin = client.role === "admin" || client.role === "super_admin";
+    const isOwner = Boolean(client.uid && client.uid === payload.ownerUid);
+    const hasRestaurant = client.restaurantIds.has(payload.restaurantId);
+    if (isAdmin || isOwner || hasRestaurant) {
+      try {
+        client.send(serialized);
+      } catch {
+        clients.delete(client.id);
+      }
+    }
+  }
+}
 
 // src/services/payments.ts
 import crypto3 from "node:crypto";
@@ -5745,6 +6499,22 @@ app.get("/sitemap.xml", async (req, res) => {
     res.send(buildSitemapXml(getRequestOrigin(req), []));
   }
 });
+app.get(/^\/(google[a-zA-Z0-9_-]+\.html)$/, async (req, res, next) => {
+  const filename = req.params[0] || "";
+  if (!filename) return next();
+  try {
+    const settings = hasDatabaseConfig() ? await getPlatformSettingsRow() : null;
+    const sc = mergeStorefrontConfig(settings?.storefrontConfig);
+    const configuredToken = (sc.googleSiteVerification || process.env.GOOGLE_SITE_VERIFICATION || "").trim();
+    const expectedFilename = configuredToken.endsWith(".html") ? configuredToken : configuredToken.startsWith("google") ? `${configuredToken}.html` : "";
+    if (configuredToken && (filename === expectedFilename || configuredToken === filename)) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.send(`google-site-verification: ${filename}`);
+    }
+  } catch {
+  }
+  return res.status(404).send("Google Search Console verification file not configured.");
+});
 app.get("/api/health", async (_req, res) => {
   res.json({
     ok: true,
@@ -5771,6 +6541,10 @@ app.get("/api/public-config", async (_req, res) => {
     );
     const emailTransport = await getEmailTransportStatus();
     const sc = mergeStorefrontConfig(settings?.storefrontConfig);
+    if (!sc.googleSiteVerification && process.env.GOOGLE_SITE_VERIFICATION) {
+      sc.googleSiteVerification = process.env.GOOGLE_SITE_VERIFICATION.trim();
+    }
+    const settingsWithVerification = settings ? { ...settings, storefrontConfig: sc } : settings;
     const pinnedId = Number(sc.featuredActiveOrderId);
     const activeRow = sc.showActiveDeliveryBar === false ? void 0 : (Number.isInteger(pinnedId) && pinnedId > 0 ? activeOrderRows.find((r) => r.id === pinnedId) : void 0) || activeOrderRows[0];
     res.json({
@@ -5778,7 +6552,7 @@ app.get("/api/public-config", async (_req, res) => {
       gateways: getGatewayAvailability(),
       paymentGateways: paymentGatewaysList,
       emailTransport,
-      settings,
+      settings: settingsWithVerification,
       featuredActiveOrder: activeRow ? {
         orderId: activeRow.id,
         trackingToken: activeRow.trackingToken,
@@ -7389,9 +8163,14 @@ app.post("/api/restaurants/register", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Please complete all restaurant onboarding fields" });
   }
   try {
+    const isOwnerAdmin = req.user.role === "admin" || req.user.role === "super_admin";
+    const existingOwned = await db.select({ id: restaurants.id }).from(restaurants).where(eq5(restaurants.ownerUid, req.user.uid)).limit(1);
+    const limitCheck = canOwnerOpenNewRestaurant(existingOwned.length, req.user.role);
+    if (!limitCheck.allowed) {
+      return res.status(400).json({ error: limitCheck.error });
+    }
     const slugBase = parsed.data.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
     const slug = `${slugBase}-${Date.now().toString(36).slice(-4)}`;
-    const isOwnerAdmin = req.user.role === "admin" || req.user.role === "super_admin";
     const inserted = await db.insert(restaurants).values({
       ownerUid: req.user.uid,
       name: parsed.data.name,
@@ -7433,6 +8212,125 @@ app.post("/api/restaurants/register", requireAuth, async (req, res) => {
     res.status(500).json({ error: error.message || "Failed to register restaurant" });
   }
 });
+app.post(
+  "/api/vendor/branches",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const schema = z.object({
+      primaryRestaurantId: z.number().int().positive().optional(),
+      branchName: z.string().trim().min(2).max(60),
+      branchNameBn: z.string().trim().max(60).optional().default(""),
+      area: z.string().trim().min(2).max(80),
+      address: z.string().trim().min(5).max(200),
+      lat: z.number().min(-90).max(90),
+      lng: z.number().min(-180).max(180),
+      phone: z.string().trim().min(6).max(30),
+      deliveryFee: z.number().int().min(0).max(300).default(49),
+      minOrder: z.number().int().min(50).max(5e3).default(150),
+      deliveryMode: z.enum(["platform", "restaurant", "third_party"]).default("platform"),
+      copyMenu: z.boolean().default(true)
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Please complete all branch fields." });
+    }
+    try {
+      const isSuperAdmin = req.user.role === "admin" || req.user.role === "super_admin";
+      const primaryRows = isSuperAdmin && parsed.data.primaryRestaurantId ? await db.select().from(restaurants).where(eq5(restaurants.id, parsed.data.primaryRestaurantId)).limit(1) : parsed.data.primaryRestaurantId ? await db.select().from(restaurants).where(
+        and2(
+          eq5(restaurants.id, parsed.data.primaryRestaurantId),
+          eq5(restaurants.ownerUid, req.user.uid)
+        )
+      ).limit(1) : await db.select().from(restaurants).where(eq5(restaurants.ownerUid, req.user.uid)).orderBy(asc2(restaurants.id)).limit(1);
+      const primary = primaryRows[0];
+      if (!primary) {
+        return res.status(404).json({
+          error: "Please open your primary restaurant first before adding a branch."
+        });
+      }
+      const branchNames = buildBranchRestaurantNames(
+        primary.name,
+        primary.nameBn,
+        parsed.data.branchName,
+        parsed.data.branchNameBn
+      );
+      const slugBase = branchNames.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+      const slug = `${slugBase}-${Date.now().toString(36).slice(-4)}`;
+      const branchStatus = primary.status === "approved" || isSuperAdmin ? "approved" : "pending";
+      const inserted = await db.insert(restaurants).values({
+        ownerUid: primary.ownerUid,
+        name: branchNames.name,
+        nameBn: branchNames.nameBn,
+        slug,
+        description: primary.description,
+        cuisine: primary.cuisine,
+        area: parsed.data.area,
+        address: parsed.data.address,
+        lat: parsed.data.lat,
+        lng: parsed.data.lng,
+        phone: parsed.data.phone,
+        email: primary.email,
+        logoUrl: primary.logoUrl || "",
+        coverUrl: primary.coverUrl || IMG_BANGLA,
+        tradeLicense: primary.tradeLicense || "",
+        nidNumber: primary.nidNumber || "",
+        payoutMethod: primary.payoutMethod,
+        payoutAccount: primary.payoutAccount,
+        deliveryFee: parsed.data.deliveryFee,
+        minOrder: parsed.data.minOrder,
+        deliveryMode: parsed.data.deliveryMode,
+        commissionRate: primary.commissionRate,
+        isNew: true,
+        status: branchStatus
+      }).returning();
+      const createdBranch = inserted[0];
+      let copiedItemsCount = 0;
+      if (parsed.data.copyMenu) {
+        const sourceItems = await db.select().from(foodItems).where(eq5(foodItems.restaurantId, primary.id));
+        if (sourceItems.length > 0) {
+          await db.insert(foodItems).values(
+            sourceItems.map((it) => ({
+              restaurantId: createdBranch.id,
+              category: it.category,
+              name: it.name,
+              nameBn: it.nameBn,
+              description: it.description,
+              imageUrl: it.imageUrl,
+              price: it.price,
+              discountPrice: it.discountPrice,
+              variationsJson: it.variationsJson,
+              addonsJson: it.addonsJson,
+              inStock: it.inStock,
+              isPopular: it.isPopular,
+              calories: it.calories,
+              prepTimeMin: it.prepTimeMin
+            }))
+          );
+          copiedItemsCount = sourceItems.length;
+        }
+      }
+      await db.insert(auditLogs).values({
+        actorUid: req.user.uid,
+        action: "vendor_added_branch",
+        targetType: "restaurant",
+        targetId: String(createdBranch.id),
+        details: `Added branch "${createdBranch.name}" (${createdBranch.area}) under primary restaurant #${primary.id} (${copiedItemsCount} menu items copied)`
+      });
+      await db.insert(notifications).values({
+        recipientUid: "demo-admin-uid",
+        roleTarget: "super_admin",
+        title: "New Restaurant Branch Added",
+        message: `${createdBranch.name} (${createdBranch.area}) was added as a branch.`,
+        type: "system"
+      });
+      res.status(201).json({ branch: createdBranch, copiedItemsCount });
+    } catch (error) {
+      console.error("Add branch error:", error);
+      res.status(500).json({ error: error.message || "Failed to add restaurant branch" });
+    }
+  }
+);
 app.get(
   "/api/vendor/workspace",
   requireAuth,
@@ -7463,7 +8361,9 @@ app.post(
       imageUrl: z.string().default(IMG_BANGLA),
       price: z.number().int().positive(),
       discountPrice: z.number().int().positive().nullable().optional(),
-      isPopular: z.boolean().default(false)
+      isPopular: z.boolean().default(false),
+      variationsJson: z.array(z.object({ name: z.string(), priceDelta: z.number() })).optional(),
+      addonsJson: z.array(z.object({ name: z.string(), price: z.number() })).optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid food item details" });
@@ -7474,6 +8374,8 @@ app.post(
       if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden: Not owner of this restaurant" });
       }
+      const variationsJson = normalizeVariationsList(parsed.data.variationsJson, true);
+      const addonsJson = normalizeAddonsList(parsed.data.addonsJson);
       const inserted = await db.insert(foodItems).values({
         restaurantId: parsed.data.restaurantId,
         category: parsed.data.category,
@@ -7483,8 +8385,8 @@ app.post(
         imageUrl: parsed.data.imageUrl || restRows[0].coverUrl,
         price: parsed.data.price,
         discountPrice: parsed.data.discountPrice ?? null,
-        variationsJson: [{ name: "Regular", priceDelta: 0 }],
-        addonsJson: [],
+        variationsJson,
+        addonsJson,
         isPopular: parsed.data.isPopular
       }).returning();
       res.status(201).json({ item: inserted[0] });
@@ -7500,6 +8402,25 @@ app.patch(
   async (req, res) => {
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId)) return res.status(400).json({ error: "Invalid item ID" });
+    const schema = z.object({
+      category: z.string().trim().min(1).max(60).optional(),
+      name: z.string().trim().min(1).max(120).optional(),
+      nameBn: z.string().trim().min(1).max(120).optional(),
+      description: z.string().max(600).optional(),
+      imageUrl: z.string().max(600).optional(),
+      inStock: z.boolean().optional(),
+      isAvailable: z.boolean().optional(),
+      isPopular: z.boolean().optional(),
+      isVisibleOnStorefront: z.boolean().optional(),
+      price: z.number().int().positive().max(1e5).optional(),
+      discountPrice: z.number().int().positive().max(1e5).nullable().optional(),
+      variationsJson: z.array(z.object({ name: z.string(), priceDelta: z.number() })).optional(),
+      addonsJson: z.array(z.object({ name: z.string(), price: z.number() })).optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid menu item update" });
+    }
     try {
       const itemRows = await db.select().from(foodItems).where(eq5(foodItems.id, itemId)).limit(1);
       if (itemRows.length === 0) return res.status(404).json({ error: "Food item not found" });
@@ -7508,17 +8429,23 @@ app.patch(
       if (!isAdmin && restRows[0]?.ownerUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      const d = parsed.data;
+      const nextVariations = d.variationsJson !== void 0 ? normalizeVariationsList(d.variationsJson, true) : itemRows[0].variationsJson;
+      const nextAddons = d.addonsJson !== void 0 ? normalizeAddonsList(d.addonsJson) : itemRows[0].addonsJson;
       const updated = await db.update(foodItems).set({
-        category: typeof req.body.category === "string" && req.body.category.trim() ? req.body.category.trim() : itemRows[0].category,
-        name: typeof req.body.name === "string" && req.body.name.trim() ? req.body.name.trim() : itemRows[0].name,
-        nameBn: typeof req.body.nameBn === "string" && req.body.nameBn.trim() ? req.body.nameBn.trim() : itemRows[0].nameBn,
-        description: typeof req.body.description === "string" ? req.body.description : itemRows[0].description,
-        imageUrl: typeof req.body.imageUrl === "string" && req.body.imageUrl.trim() ? req.body.imageUrl.trim() : itemRows[0].imageUrl,
-        inStock: req.body.inStock ?? itemRows[0].inStock,
-        isAvailable: req.body.isAvailable ?? itemRows[0].isAvailable,
-        isPopular: req.body.isPopular ?? itemRows[0].isPopular,
-        price: typeof req.body.price === "number" && req.body.price > 0 ? req.body.price : itemRows[0].price,
-        discountPrice: req.body.discountPrice === null ? null : typeof req.body.discountPrice === "number" && req.body.discountPrice > 0 ? req.body.discountPrice : itemRows[0].discountPrice,
+        category: d.category ?? itemRows[0].category,
+        name: d.name ?? itemRows[0].name,
+        nameBn: d.nameBn ?? itemRows[0].nameBn,
+        description: d.description ?? itemRows[0].description,
+        imageUrl: d.imageUrl && d.imageUrl.trim() ? d.imageUrl.trim() : itemRows[0].imageUrl,
+        inStock: d.inStock ?? itemRows[0].inStock,
+        isAvailable: d.isAvailable ?? itemRows[0].isAvailable,
+        isPopular: d.isPopular ?? itemRows[0].isPopular,
+        isVisibleOnStorefront: d.isVisibleOnStorefront ?? itemRows[0].isVisibleOnStorefront,
+        price: d.price ?? itemRows[0].price,
+        discountPrice: d.discountPrice === void 0 ? itemRows[0].discountPrice : d.discountPrice,
+        variationsJson: nextVariations,
+        addonsJson: nextAddons,
         updatedAt: /* @__PURE__ */ new Date()
       }).where(eq5(foodItems.id, itemId)).returning();
       res.json({ item: updated[0] });
@@ -8020,6 +8947,894 @@ app.patch(
     }
   }
 );
+app.get(
+  "/api/vendor/riders",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    try {
+      const restId = Number(req.query.restaurantId);
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      let targetRest = null;
+      if (Number.isInteger(restId) && restId > 0) {
+        const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, restId)).limit(1);
+        if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
+        if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+        targetRest = restRows[0];
+      }
+      const ownedStores = isAdmin ? [] : await db.select({ id: restaurants.id }).from(restaurants).where(eq5(restaurants.ownerUid, req.user.uid));
+      const ownedSet = new Set(ownedStores.map((s) => s.id));
+      const riderRows = await db.select({
+        id: riders.id,
+        uid: riders.uid,
+        restaurantId: riders.restaurantId,
+        addedByUid: riders.addedByUid,
+        fullName: riders.fullName,
+        phone: riders.phone,
+        email: riders.email,
+        vehicleType: riders.vehicleType,
+        zone: riders.zone,
+        isAvailable: riders.isAvailable,
+        status: riders.status,
+        currentLat: riders.currentLat,
+        currentLng: riders.currentLng,
+        totalDeliveries: riders.totalDeliveries
+      }).from(riders).where(eq5(riders.status, "approved"));
+      const enriched = riderRows.map((r) => {
+        const isOwnRider = Boolean(
+          targetRest && r.restaurantId === targetRest.id || r.restaurantId && ownedSet.has(r.restaurantId) || r.addedByUid === req.user.uid
+        );
+        return {
+          ...r,
+          isOwnRider,
+          distanceKm: targetRest ? Math.round(
+            haversineDistanceKm(r.currentLat, r.currentLng, targetRest.lat, targetRest.lng) * 100
+          ) / 100 : null
+        };
+      }).sort((a, b) => {
+        if (a.isOwnRider !== b.isOwnRider) return a.isOwnRider ? -1 : 1;
+        if (a.isAvailable !== b.isAvailable) return a.isAvailable ? -1 : 1;
+        if (a.distanceKm !== null && b.distanceKm !== null) {
+          return a.distanceKm - b.distanceKm;
+        }
+        return b.totalDeliveries - a.totalDeliveries;
+      });
+      res.json({ riders: enriched });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to load riders" });
+    }
+  }
+);
+app.post(
+  "/api/vendor/riders",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const check = validateVendorAddRiderPayload(req.body || {});
+    if (check.valid === false) {
+      return res.status(400).json({ error: check.reason });
+    }
+    const { restaurantId, fullName, phone, email, password, vehicleType, zone, nidNumber } = check.data;
+    try {
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, restaurantId)).limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
+      const rest = restRows[0];
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      if (!isAdmin && rest.ownerUid !== req.user.uid) {
+        return res.status(403).json({ error: "Forbidden: Not owner of this restaurant" });
+      }
+      const existingUsers = await db.select().from(users).where(sql3`lower(${users.email}) = ${email}`).limit(1);
+      if (existingUsers.length > 0 && (existingUsers[0].role === "admin" || existingUsers[0].role === "super_admin")) {
+        return res.status(409).json({
+          error: "This email belongs to an admin account and cannot be registered as a rider."
+        });
+      }
+      const riderUid = existingUsers[0]?.uid || `rdr-${crypto4.randomBytes(6).toString("hex")}`;
+      if (existingUsers.length === 0) {
+        await db.insert(users).values({
+          uid: riderUid,
+          email,
+          fullName,
+          phone,
+          role: "rider"
+        });
+      } else if (existingUsers[0].role === "customer") {
+        await db.update(users).set({ role: "rider", fullName, phone, updatedAt: /* @__PURE__ */ new Date() }).where(eq5(users.uid, existingUsers[0].uid));
+      }
+      if (password) {
+        await db.insert(localCredentials).values({
+          email,
+          uid: riderUid,
+          passwordHash: hashPasswordScrypt(password)
+        }).onConflictDoUpdate({
+          target: localCredentials.email,
+          set: { passwordHash: hashPasswordScrypt(password) }
+        });
+      }
+      const upserted = await db.insert(riders).values({
+        uid: riderUid,
+        restaurantId: rest.id,
+        addedByUid: req.user.uid,
+        fullName,
+        phone,
+        email,
+        vehicleType,
+        nidNumber,
+        zone,
+        isAvailable: true,
+        status: "approved",
+        currentLat: rest.lat,
+        currentLng: rest.lng,
+        locationUpdatedAt: /* @__PURE__ */ new Date()
+      }).onConflictDoUpdate({
+        target: riders.uid,
+        set: {
+          restaurantId: rest.id,
+          addedByUid: req.user.uid,
+          fullName,
+          phone,
+          email,
+          vehicleType,
+          nidNumber: nidNumber || void 0,
+          zone,
+          isAvailable: true,
+          status: "approved",
+          locationUpdatedAt: /* @__PURE__ */ new Date()
+        }
+      }).returning();
+      await db.insert(auditLogs).values({
+        actorUid: req.user.uid,
+        action: "vendor_added_rider",
+        targetType: "rider",
+        targetId: String(upserted[0].id),
+        details: JSON.stringify({ restaurantId: rest.id, fullName, email, vehicleType })
+      });
+      broadcastNotificationEvent({
+        recipientUid: riderUid,
+        roleTarget: "rider",
+        title: `Added as Rider \xB7 ${rest.name}`,
+        message: `${rest.name} added you as a delivery rider for ${zone}.`,
+        type: "system"
+      });
+      res.status(201).json({
+        rider: {
+          ...upserted[0],
+          isOwnRider: true,
+          distanceKm: 0
+        }
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to add delivery man" });
+    }
+  }
+);
+app.patch(
+  "/api/vendor/riders/:id",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const riderId = Number(req.params.id);
+    if (!Number.isInteger(riderId)) return res.status(400).json({ error: "Invalid rider ID" });
+    const schema = z.object({
+      isAvailable: z.boolean().optional(),
+      fullName: z.string().trim().min(2).max(100).optional(),
+      phone: z.string().trim().min(6).max(30).optional(),
+      vehicleType: z.string().trim().min(2).max(60).optional(),
+      zone: z.string().trim().min(2).max(120).optional()
+    });
+    const parsed = schema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: "Invalid rider update payload" });
+    try {
+      const existing = await db.select().from(riders).where(eq5(riders.id, riderId)).limit(1);
+      if (existing.length === 0) return res.status(404).json({ error: "Rider not found" });
+      const row = existing[0];
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      let ownsRest = row.addedByUid === req.user.uid;
+      if (!ownsRest && row.restaurantId) {
+        const restRows = await db.select({ ownerUid: restaurants.ownerUid }).from(restaurants).where(eq5(restaurants.id, row.restaurantId)).limit(1);
+        ownsRest = restRows[0]?.ownerUid === req.user.uid;
+      }
+      if (!isAdmin && !ownsRest) {
+        return res.status(403).json({
+          error: "Only riders added to your own restaurant can be modified here."
+        });
+      }
+      const d = parsed.data;
+      const updated = await db.update(riders).set({
+        isAvailable: d.isAvailable ?? row.isAvailable,
+        fullName: d.fullName ?? row.fullName,
+        phone: d.phone ?? row.phone,
+        vehicleType: d.vehicleType ?? row.vehicleType,
+        zone: d.zone ?? row.zone
+      }).where(eq5(riders.id, riderId)).returning();
+      res.json({ rider: { ...updated[0], isOwnRider: true } });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to update rider" });
+    }
+  }
+);
+app.delete(
+  "/api/vendor/riders/:id",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const riderId = Number(req.params.id);
+    if (!Number.isInteger(riderId)) return res.status(400).json({ error: "Invalid rider ID" });
+    try {
+      const existing = await db.select().from(riders).where(eq5(riders.id, riderId)).limit(1);
+      if (existing.length === 0) return res.status(404).json({ error: "Rider not found" });
+      const row = existing[0];
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      let ownsRest = row.addedByUid === req.user.uid;
+      if (!ownsRest && row.restaurantId) {
+        const restRows = await db.select({ ownerUid: restaurants.ownerUid }).from(restaurants).where(eq5(restaurants.id, row.restaurantId)).limit(1);
+        ownsRest = restRows[0]?.ownerUid === req.user.uid;
+      }
+      if (!isAdmin && !ownsRest) {
+        return res.status(403).json({ error: "Forbidden: Rider does not belong to your restaurant" });
+      }
+      await db.delete(riders).where(eq5(riders.id, riderId));
+      res.json({ deleted: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to remove rider" });
+    }
+  }
+);
+app.post(
+  "/api/vendor/orders/:id/assign-rider",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const orderId = Number(req.params.id);
+    const schema = z.object({
+      riderUid: z.string().nullable().optional(),
+      autoAssignNearest: z.boolean().optional(),
+      note: z.string().max(240).optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!Number.isInteger(orderId) || !parsed.success) {
+      return res.status(400).json({ error: "Invalid rider assignment request" });
+    }
+    try {
+      const orderRows = await db.select().from(orders).where(eq5(orders.id, orderId)).limit(1);
+      if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
+      const order = orderRows[0];
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, order.restaurantId)).limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
+      const rest = restRows[0];
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      if (!isAdmin && rest.ownerUid !== req.user.uid) {
+        return res.status(403).json({ error: "Forbidden: Order belongs to another restaurant" });
+      }
+      if (order.status === "delivered" || order.status === "cancelled") {
+        return res.status(400).json({
+          error: `Cannot assign rider to a ${order.status} order.`
+        });
+      }
+      let nextRiderUid = order.riderUid || null;
+      let nextRiderName = order.riderName || null;
+      let assignedRiderPhone = "";
+      if (parsed.data.autoAssignNearest) {
+        const approvedRiders = await db.select().from(riders).where(eq5(riders.status, "approved"));
+        const picked = pickNearestStandbyRider(
+          approvedRiders.map((r) => ({
+            uid: r.uid,
+            fullName: r.fullName,
+            phone: r.phone,
+            vehicleType: r.vehicleType,
+            zone: r.zone,
+            isAvailable: r.isAvailable,
+            lat: r.currentLat,
+            lng: r.currentLng,
+            locationUpdatedAt: r.locationUpdatedAt
+          })),
+          rest.lat,
+          rest.lng
+        );
+        if (!picked) {
+          return res.status(404).json({ error: "No approved riders available to assign right now." });
+        }
+        nextRiderUid = picked.rider.uid;
+        nextRiderName = picked.rider.fullName;
+        assignedRiderPhone = picked.rider.phone;
+      } else if (parsed.data.riderUid === null || parsed.data.riderUid === "") {
+        nextRiderUid = null;
+        nextRiderName = null;
+      } else if (parsed.data.riderUid) {
+        const riderRows = await db.select().from(riders).where(eq5(riders.uid, parsed.data.riderUid)).limit(1);
+        if (riderRows.length === 0) {
+          return res.status(404).json({ error: "Selected rider not found" });
+        }
+        nextRiderUid = riderRows[0].uid;
+        nextRiderName = riderRows[0].fullName;
+        assignedRiderPhone = riderRows[0].phone;
+      }
+      const shouldMoveToAssigned = Boolean(nextRiderUid) && ["confirmed", "accepted", "preparing", "ready"].includes(order.status);
+      const nextStatus = shouldMoveToAssigned ? "rider_assigned" : order.status;
+      const updated = await db.update(orders).set({
+        riderUid: nextRiderUid,
+        riderName: nextRiderName,
+        status: nextStatus,
+        deliveryMode: nextRiderUid ? "platform" : order.deliveryMode,
+        deliveryProvider: nextRiderUid ? "Foodora Rider" : order.deliveryProvider,
+        updatedAt: /* @__PURE__ */ new Date()
+      }).where(eq5(orders.id, order.id)).returning();
+      const statusNote = parsed.data.note?.trim() || (nextRiderName ? `Rider ${nextRiderName} assigned by ${order.restaurantName}` : `Rider unassigned by ${order.restaurantName}`);
+      await db.insert(orderStatusHistory).values({
+        orderId: order.id,
+        status: nextStatus,
+        note: statusNote,
+        actorUid: req.user.uid
+      });
+      await db.insert(notifications).values({
+        recipientUid: order.customerUid,
+        roleTarget: "customer",
+        title: nextRiderName ? `Rider Assigned \xB7 ${order.orderNumber}` : `Order Updated \xB7 ${order.orderNumber}`,
+        message: nextRiderName ? `${nextRiderName} is assigned to pick up your order from ${order.restaurantName}.` : statusNote,
+        type: "order",
+        relatedOrderId: order.id
+      });
+      if (nextRiderUid) {
+        await db.insert(notifications).values({
+          recipientUid: nextRiderUid,
+          roleTarget: "rider",
+          title: `Delivery Assigned \xB7 ${order.orderNumber}`,
+          message: `Pickup at ${order.restaurantName} \u2192 Dropoff ${order.deliveryArea}`,
+          type: "order",
+          relatedOrderId: order.id
+        });
+      }
+      const recipientEmail = await resolveCustomerEmailForOrder(
+        updated[0].customerEmail,
+        updated[0].customerUid
+      );
+      if (recipientEmail) {
+        await sendAndLogOrderTrackingEmail({
+          origin: getRequestOrigin(req),
+          orderId: updated[0].id,
+          orderNumber: updated[0].orderNumber,
+          trackingToken: updated[0].trackingToken,
+          customerName: updated[0].customerName,
+          customerEmail: recipientEmail,
+          restaurantName: updated[0].restaurantName,
+          deliveryArea: updated[0].deliveryArea,
+          deliveryAddress: updated[0].deliveryAddress,
+          subtotal: updated[0].subtotal,
+          discountAmount: updated[0].discountAmount,
+          couponCode: updated[0].couponCode,
+          deliveryFee: updated[0].deliveryFee,
+          serviceFee: updated[0].serviceFee,
+          taxAmount: updated[0].taxAmount,
+          totalAmount: updated[0].totalAmount,
+          paymentMethod: updated[0].paymentMethod,
+          paymentStatus: updated[0].paymentStatus,
+          status: updated[0].status,
+          statusEvent: updated[0].status,
+          statusNote,
+          riderName: updated[0].riderName,
+          riderPhone: assignedRiderPhone || null,
+          etaMinutes: updated[0].estimatedMinutes,
+          createdAt: updated[0].createdAt,
+          items: updated[0].itemsSnapshotJson
+        }).catch(() => null);
+      }
+      broadcastOrderEvent("order:updated", {
+        orderId: updated[0].id,
+        orderNumber: updated[0].orderNumber,
+        restaurantId: updated[0].restaurantId,
+        restaurantName: updated[0].restaurantName,
+        restaurantOwnerUid: rest.ownerUid,
+        customerUid: updated[0].customerUid,
+        customerName: updated[0].customerName,
+        riderUid: updated[0].riderUid,
+        riderName: updated[0].riderName,
+        status: updated[0].status,
+        deliveryMode: updated[0].deliveryMode,
+        deliveryArea: updated[0].deliveryArea,
+        totalAmount: updated[0].totalAmount
+      });
+      broadcastNotificationEvent({
+        recipientUid: order.customerUid,
+        roleTarget: "customer",
+        title: `Order ${order.orderNumber}: ${updated[0].status.replace(/_/g, " ")}`,
+        message: statusNote,
+        type: "order",
+        relatedOrderId: order.id
+      });
+      if (nextRiderUid) {
+        broadcastNotificationEvent({
+          recipientUid: nextRiderUid,
+          roleTarget: "rider",
+          title: `New Delivery \xB7 ${order.orderNumber}`,
+          message: `Pickup from ${order.restaurantName} (${order.deliveryArea})`,
+          type: "order",
+          relatedOrderId: order.id
+        });
+      }
+      res.json({ order: updated[0] });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to assign rider" });
+    }
+  }
+);
+app.get("/api/rider-jobs", async (_req, res) => {
+  try {
+    const jobs = await db.select({
+      id: riderJobs.id,
+      restaurantId: riderJobs.restaurantId,
+      restaurantName: riderJobs.restaurantName,
+      ownerUid: riderJobs.ownerUid,
+      title: riderJobs.title,
+      titleBn: riderJobs.titleBn,
+      zone: riderJobs.zone,
+      vehicleType: riderJobs.vehicleType,
+      salaryRange: riderJobs.salaryRange,
+      shiftHours: riderJobs.shiftHours,
+      vacancies: riderJobs.vacancies,
+      description: riderJobs.description,
+      isActive: riderJobs.isActive,
+      createdAt: riderJobs.createdAt,
+      updatedAt: riderJobs.updatedAt
+    }).from(riderJobs).innerJoin(restaurants, eq5(riderJobs.restaurantId, restaurants.id)).where(and2(eq5(riderJobs.isActive, true), eq5(restaurants.status, "approved"))).orderBy(desc3(riderJobs.createdAt));
+    res.json({ jobs });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Failed to load rider jobs" });
+  }
+});
+app.post("/api/rider-jobs/:id/apply", optionalAuth, async (req, res) => {
+  const jobId = Number(req.params.id);
+  const schema = z.object({
+    fullName: z.string().trim().min(2).max(100),
+    phone: z.string().trim().min(6).max(30),
+    email: z.string().trim().email(),
+    vehicleType: z.string().trim().min(2).max(50).default("Motorbike"),
+    zone: z.string().trim().min(2).max(120),
+    nidNumber: z.string().trim().max(50).optional().default(""),
+    experienceNote: z.string().trim().max(400).optional().default("")
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!Number.isInteger(jobId) || !parsed.success) {
+    return res.status(400).json({
+      error: parsed.success ? "Invalid job ID" : parsed.error.issues[0]?.message || "Invalid application"
+    });
+  }
+  try {
+    const jobRows = await db.select().from(riderJobs).where(eq5(riderJobs.id, jobId)).limit(1);
+    if (jobRows.length === 0 || !jobRows[0].isActive) {
+      return res.status(404).json({ error: "This rider job post is no longer open." });
+    }
+    const job = jobRows[0];
+    const inserted = await db.insert(riderJobApplications).values({
+      jobId: job.id,
+      restaurantId: job.restaurantId,
+      applicantUid: req.user?.uid || "",
+      fullName: parsed.data.fullName,
+      phone: parsed.data.phone,
+      email: parsed.data.email.toLowerCase(),
+      vehicleType: parsed.data.vehicleType,
+      zone: parsed.data.zone,
+      nidNumber: parsed.data.nidNumber,
+      experienceNote: parsed.data.experienceNote,
+      status: "pending"
+    }).returning();
+    await db.insert(notifications).values({
+      recipientUid: job.ownerUid,
+      roleTarget: "restaurant_owner",
+      title: `New Rider Applicant \xB7 ${job.restaurantName}`,
+      message: `${parsed.data.fullName} (${parsed.data.vehicleType}) applied for "${job.title}".`,
+      type: "system"
+    });
+    broadcastNotificationEvent({
+      recipientUid: job.ownerUid,
+      roleTarget: "restaurant_owner",
+      title: `New Rider Applicant \xB7 ${job.restaurantName}`,
+      message: `${parsed.data.fullName} applied for ${job.title}`,
+      type: "system"
+    });
+    res.status(201).json({ application: inserted[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Failed to submit rider application" });
+  }
+});
+app.get(
+  "/api/vendor/rider-jobs",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    try {
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      const reqRestId = Number(req.query.restaurantId);
+      const owned = isAdmin ? await db.select().from(restaurants) : await db.select().from(restaurants).where(eq5(restaurants.ownerUid, req.user.uid));
+      let targetIds = owned.map((r) => r.id);
+      if (Number.isInteger(reqRestId) && reqRestId > 0) {
+        if (!isAdmin && !targetIds.includes(reqRestId)) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+        targetIds = [reqRestId];
+      }
+      if (targetIds.length === 0) {
+        return res.json({ jobs: [], applications: [] });
+      }
+      const [jobs, applications] = await Promise.all([
+        db.select().from(riderJobs).where(inArray3(riderJobs.restaurantId, targetIds)).orderBy(desc3(riderJobs.createdAt)),
+        db.select().from(riderJobApplications).where(inArray3(riderJobApplications.restaurantId, targetIds)).orderBy(desc3(riderJobApplications.createdAt))
+      ]);
+      res.json({ jobs, applications });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to load restaurant rider jobs" });
+    }
+  }
+);
+app.post(
+  "/api/vendor/rider-jobs",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const check = validateRiderJobPayload(req.body || {});
+    if (check.valid === false) {
+      return res.status(400).json({ error: check.reason });
+    }
+    try {
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, check.data.restaurantId)).limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
+      const rest = restRows[0];
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      if (!isAdmin && rest.ownerUid !== req.user.uid) {
+        return res.status(403).json({ error: "Forbidden: Not owner of this restaurant" });
+      }
+      const inserted = await db.insert(riderJobs).values({
+        restaurantId: rest.id,
+        restaurantName: rest.name,
+        ownerUid: rest.ownerUid,
+        title: check.data.title,
+        titleBn: check.data.titleBn,
+        zone: check.data.zone,
+        vehicleType: check.data.vehicleType,
+        salaryRange: check.data.salaryRange,
+        shiftHours: check.data.shiftHours,
+        vacancies: check.data.vacancies,
+        description: check.data.description,
+        isActive: true
+      }).returning();
+      res.status(201).json({ job: inserted[0] });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to publish rider job" });
+    }
+  }
+);
+app.patch(
+  "/api/vendor/rider-jobs/:id",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const jobId = Number(req.params.id);
+    if (!Number.isInteger(jobId)) return res.status(400).json({ error: "Invalid job ID" });
+    const schema = z.object({
+      isActive: z.boolean().optional(),
+      title: z.string().trim().min(3).max(120).optional(),
+      titleBn: z.string().trim().min(2).max(120).optional(),
+      zone: z.string().trim().min(2).max(120).optional(),
+      vehicleType: z.string().trim().min(2).max(60).optional(),
+      salaryRange: z.string().trim().min(2).max(80).optional(),
+      shiftHours: z.string().trim().min(2).max(80).optional(),
+      vacancies: z.number().int().min(1).max(100).optional(),
+      description: z.string().max(600).optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid job update" });
+    try {
+      const rows = await db.select().from(riderJobs).where(eq5(riderJobs.id, jobId)).limit(1);
+      if (rows.length === 0) return res.status(404).json({ error: "Rider job not found" });
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, rows[0].restaurantId)).limit(1);
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      if (!isAdmin && restRows[0]?.ownerUid !== req.user.uid) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const d = parsed.data;
+      const updated = await db.update(riderJobs).set({
+        isActive: d.isActive ?? rows[0].isActive,
+        title: d.title ?? rows[0].title,
+        titleBn: d.titleBn ?? rows[0].titleBn,
+        zone: d.zone ?? rows[0].zone,
+        vehicleType: d.vehicleType ?? rows[0].vehicleType,
+        salaryRange: d.salaryRange ?? rows[0].salaryRange,
+        shiftHours: d.shiftHours ?? rows[0].shiftHours,
+        vacancies: d.vacancies ?? rows[0].vacancies,
+        description: d.description ?? rows[0].description,
+        updatedAt: /* @__PURE__ */ new Date()
+      }).where(eq5(riderJobs.id, jobId)).returning();
+      res.json({ job: updated[0] });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to update rider job" });
+    }
+  }
+);
+app.delete(
+  "/api/vendor/rider-jobs/:id",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const jobId = Number(req.params.id);
+    if (!Number.isInteger(jobId)) return res.status(400).json({ error: "Invalid job ID" });
+    try {
+      const rows = await db.select().from(riderJobs).where(eq5(riderJobs.id, jobId)).limit(1);
+      if (rows.length === 0) return res.status(404).json({ error: "Rider job not found" });
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, rows[0].restaurantId)).limit(1);
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      if (!isAdmin && restRows[0]?.ownerUid !== req.user.uid) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      await db.delete(riderJobs).where(eq5(riderJobs.id, jobId));
+      res.json({ deleted: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to delete rider job" });
+    }
+  }
+);
+app.patch(
+  "/api/vendor/rider-applications/:id",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const appId = Number(req.params.id);
+    const schema = z.object({
+      status: z.enum(["pending", "hired", "rejected"])
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!Number.isInteger(appId) || !parsed.success) {
+      return res.status(400).json({ error: "Invalid rider application update" });
+    }
+    try {
+      const appRows = await db.select().from(riderJobApplications).where(eq5(riderJobApplications.id, appId)).limit(1);
+      if (appRows.length === 0) return res.status(404).json({ error: "Application not found" });
+      const appRow = appRows[0];
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, appRow.restaurantId)).limit(1);
+      const rest = restRows[0];
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      if (!isAdmin && rest?.ownerUid !== req.user.uid) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const updated = await db.update(riderJobApplications).set({
+        status: parsed.data.status,
+        updatedAt: /* @__PURE__ */ new Date()
+      }).where(eq5(riderJobApplications.id, appId)).returning();
+      if (parsed.data.status === "hired") {
+        const emailLower = appRow.email.trim().toLowerCase();
+        const existingUsers = await db.select().from(users).where(sql3`lower(${users.email}) = ${emailLower}`).limit(1);
+        let riderUid = appRow.applicantUid?.trim() || existingUsers[0]?.uid || "";
+        if (!riderUid) {
+          riderUid = `rdr-${crypto4.randomBytes(6).toString("hex")}`;
+        }
+        if (existingUsers.length === 0) {
+          await db.insert(users).values({
+            uid: riderUid,
+            email: emailLower,
+            fullName: appRow.fullName,
+            phone: appRow.phone,
+            role: "rider"
+          });
+        } else if (existingUsers[0].role === "customer") {
+          await db.update(users).set({ role: "rider", fullName: appRow.fullName, phone: appRow.phone }).where(eq5(users.uid, existingUsers[0].uid));
+        }
+        await db.insert(riders).values({
+          uid: riderUid,
+          restaurantId: appRow.restaurantId,
+          addedByUid: req.user.uid,
+          fullName: appRow.fullName,
+          phone: appRow.phone,
+          email: emailLower,
+          vehicleType: appRow.vehicleType,
+          zone: appRow.zone,
+          nidNumber: appRow.nidNumber || "",
+          currentLat: rest?.lat ?? 23.7949,
+          currentLng: rest?.lng ?? 90.4043,
+          isAvailable: true,
+          status: "approved"
+        }).onConflictDoUpdate({
+          target: riders.uid,
+          set: {
+            restaurantId: appRow.restaurantId,
+            addedByUid: req.user.uid,
+            fullName: appRow.fullName,
+            phone: appRow.phone,
+            vehicleType: appRow.vehicleType,
+            zone: appRow.zone,
+            isAvailable: true,
+            status: "approved"
+          }
+        });
+        await db.insert(notifications).values({
+          recipientUid: riderUid,
+          roleTarget: "rider",
+          title: `Hired by ${rest?.name || "Restaurant"}!`,
+          message: `You are now an approved rider for ${rest?.name || "Foodora BD"}. Open Rider Portal to start deliveries.`,
+          type: "system"
+        });
+        broadcastNotificationEvent({
+          recipientUid: riderUid,
+          roleTarget: "rider",
+          title: `Rider Application Hired \xB7 ${rest?.name || "Foodora BD"}`,
+          message: `You have been hired as a delivery rider!`,
+          type: "system"
+        });
+      }
+      res.json({ application: updated[0] });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to update rider application" });
+    }
+  }
+);
+app.get(
+  "/api/messages/vendor-admin",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    try {
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      const reqRestId = Number(req.query.restaurantId);
+      const accessibleRestaurants = isAdmin ? await db.select().from(restaurants).orderBy(asc2(restaurants.id)) : await db.select().from(restaurants).where(eq5(restaurants.ownerUid, req.user.uid)).orderBy(asc2(restaurants.id));
+      const allowedIds = accessibleRestaurants.map((r) => r.id);
+      if (Number.isInteger(reqRestId) && reqRestId > 0) {
+        if (!isAdmin && !allowedIds.includes(reqRestId)) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+      }
+      const queryIds = Number.isInteger(reqRestId) && reqRestId > 0 ? [reqRestId] : allowedIds;
+      const messages = queryIds.length > 0 ? await db.select().from(vendorAdminMessages).where(inArray3(vendorAdminMessages.restaurantId, queryIds)).orderBy(asc2(vendorAdminMessages.createdAt)) : [];
+      const threadMap = /* @__PURE__ */ new Map();
+      for (const r of accessibleRestaurants) {
+        threadMap.set(r.id, {
+          restaurantId: r.id,
+          restaurantName: r.name,
+          ownerUid: r.ownerUid,
+          lastMessage: "",
+          lastSenderRole: "",
+          lastAt: "",
+          unreadForAdmin: 0,
+          unreadForVendor: 0
+        });
+      }
+      for (const msg of messages) {
+        const cur = threadMap.get(msg.restaurantId) || {
+          restaurantId: msg.restaurantId,
+          restaurantName: msg.restaurantName,
+          ownerUid: msg.ownerUid,
+          lastMessage: "",
+          lastSenderRole: "",
+          lastAt: "",
+          unreadForAdmin: 0,
+          unreadForVendor: 0
+        };
+        cur.lastMessage = msg.message;
+        cur.lastSenderRole = msg.senderRole;
+        cur.lastAt = new Date(msg.createdAt).toISOString();
+        if (!msg.isReadByAdmin) cur.unreadForAdmin += 1;
+        if (!msg.isReadByVendor) cur.unreadForVendor += 1;
+        threadMap.set(msg.restaurantId, cur);
+      }
+      const threads = Array.from(threadMap.values()).sort((a, b) => {
+        if (a.lastAt && b.lastAt) return b.lastAt.localeCompare(a.lastAt);
+        if (a.lastAt) return -1;
+        if (b.lastAt) return 1;
+        return a.restaurantId - b.restaurantId;
+      });
+      res.json({ messages, threads });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to load messages" });
+    }
+  }
+);
+app.post(
+  "/api/messages/vendor-admin",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const schema = z.object({
+      restaurantId: z.number().int().positive(),
+      message: z.string().trim().min(1, "Message cannot be empty").max(1200)
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid message" });
+    }
+    try {
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, parsed.data.restaurantId)).limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
+      const rest = restRows[0];
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      if (!isAdmin && rest.ownerUid !== req.user.uid) {
+        return res.status(403).json({ error: "Forbidden: Not owner of this restaurant" });
+      }
+      const inserted = await db.insert(vendorAdminMessages).values({
+        restaurantId: rest.id,
+        restaurantName: rest.name,
+        ownerUid: rest.ownerUid,
+        senderUid: req.user.uid,
+        senderName: req.user.fullName,
+        senderRole: req.user.role,
+        message: parsed.data.message,
+        isReadByAdmin: isAdmin,
+        isReadByVendor: !isAdmin
+      }).returning();
+      const saved = inserted[0];
+      if (isAdmin) {
+        await db.insert(notifications).values({
+          recipientUid: rest.ownerUid,
+          roleTarget: "restaurant_owner",
+          title: `Message from Admin \xB7 ${rest.name}`,
+          message: parsed.data.message.slice(0, 140),
+          type: "system"
+        });
+        broadcastNotificationEvent({
+          recipientUid: rest.ownerUid,
+          roleTarget: "restaurant_owner",
+          title: `Message from Admin \xB7 ${rest.name}`,
+          message: parsed.data.message.slice(0, 140),
+          type: "system"
+        });
+      } else {
+        await db.insert(notifications).values({
+          recipientUid: "demo-admin-uid",
+          roleTarget: "super_admin",
+          title: `Vendor Message \xB7 ${rest.name}`,
+          message: parsed.data.message.slice(0, 140),
+          type: "system"
+        });
+        broadcastNotificationEvent({
+          recipientUid: "role-super_admin",
+          roleTarget: "super_admin",
+          title: `Vendor Message \xB7 ${rest.name}`,
+          message: parsed.data.message.slice(0, 140),
+          type: "system"
+        });
+      }
+      broadcastVendorAdminMessage({
+        id: saved.id,
+        restaurantId: saved.restaurantId,
+        restaurantName: saved.restaurantName,
+        ownerUid: saved.ownerUid,
+        senderUid: saved.senderUid,
+        senderName: saved.senderName,
+        senderRole: saved.senderRole,
+        message: saved.message,
+        createdAt: new Date(saved.createdAt).toISOString()
+      });
+      res.status(201).json({ message: saved });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to send message" });
+    }
+  }
+);
+app.patch(
+  "/api/messages/vendor-admin/read",
+  requireAuth,
+  requireRole(["restaurant_owner", "admin", "super_admin"]),
+  async (req, res) => {
+    const schema = z.object({
+      restaurantId: z.number().int().positive()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid restaurantId" });
+    try {
+      const restRows = await db.select().from(restaurants).where(eq5(restaurants.id, parsed.data.restaurantId)).limit(1);
+      if (restRows.length === 0) return res.status(404).json({ error: "Restaurant not found" });
+      const isAdmin = req.user.role === "super_admin" || req.user.role === "admin";
+      if (!isAdmin && restRows[0].ownerUid !== req.user.uid) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (isAdmin) {
+        await db.update(vendorAdminMessages).set({ isReadByAdmin: true }).where(eq5(vendorAdminMessages.restaurantId, parsed.data.restaurantId));
+      } else {
+        await db.update(vendorAdminMessages).set({ isReadByVendor: true }).where(eq5(vendorAdminMessages.restaurantId, parsed.data.restaurantId));
+      }
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to mark messages read" });
+    }
+  }
+);
 app.post(
   "/api/vendor/payouts",
   requireAuth,
@@ -8061,13 +9876,18 @@ app.post("/api/riders/apply", async (req, res) => {
     password: z.string().min(6).max(128).optional().or(z.literal("")),
     vehicleType: z.string().trim().min(2).max(40).default("Motorbike"),
     zone: z.string().trim().min(2).max(120),
-    nidNumber: z.string().trim().min(4).max(50),
+    nidNumber: z.string().trim().max(50).optional().default(""),
     lat: z.number().min(-90).max(90).optional(),
     lng: z.number().min(-180).max(180).optional()
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Please complete all rider job application fields." });
+  }
+  if (!isBicycleVehicleType(parsed.data.vehicleType) && parsed.data.nidNumber.length < 4) {
+    return res.status(400).json({
+      error: "Please enter your NID or Driving License number (or select Bicycle if riding without a license)."
+    });
   }
   const emailLower = parsed.data.email.trim().toLowerCase();
   if (isProtectedSuperAdminEmail(emailLower)) {
@@ -8181,12 +10001,17 @@ app.post("/api/riders/register", requireAuth, async (req, res) => {
     email: z.string().trim().email(),
     vehicleType: z.string().trim().min(2).max(40),
     zone: z.string().trim().min(2).max(120),
-    nidNumber: z.string().trim().min(4).max(50),
+    nidNumber: z.string().trim().max(50).optional().default(""),
     lat: z.number().min(-90).max(90).optional(),
     lng: z.number().min(-180).max(180).optional()
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid rider registration data" });
+  if (!isBicycleVehicleType(parsed.data.vehicleType) && parsed.data.nidNumber.length < 4) {
+    return res.status(400).json({
+      error: "Please enter your NID or Driving License number (Bicycle riders may leave this optional)."
+    });
+  }
   try {
     const startLat = Number.isFinite(parsed.data.lat) ? Math.round(parsed.data.lat * 1e6) / 1e6 : 23.7949;
     const startLng = Number.isFinite(parsed.data.lng) ? Math.round(parsed.data.lng * 1e6) / 1e6 : 90.4144;
@@ -8303,6 +10128,77 @@ app.patch(
       res.json({ rider: updated[0] });
     } catch (error) {
       res.status(500).json({ error: error.message });
+    }
+  }
+);
+app.patch(
+  "/api/rider/profile",
+  requireAuth,
+  requireRole(["rider", "admin", "super_admin"]),
+  async (req, res) => {
+    const check = sanitizeRiderProfileUpdate({
+      fullName: req.body?.fullName,
+      phone: req.body?.phone,
+      vehicleType: req.body?.vehicleType,
+      zone: req.body?.zone,
+      nidNumber: req.body?.nidNumber,
+      isAvailable: req.body?.isAvailable,
+      avatarUrl: req.body?.avatarUrl
+    });
+    if (!check.valid) {
+      return res.status(400).json({ error: check.error });
+    }
+    try {
+      const riderUid = req.user.role === "super_admin" || req.user.role === "admin" ? "demo-rider-uid" : req.user.uid;
+      const existing = await db.select().from(riders).where(eq5(riders.uid, riderUid)).limit(1);
+      if (existing.length === 0) {
+        return res.status(404).json({ error: "Rider profile not found." });
+      }
+      const cur = existing[0];
+      const d = check.data;
+      const updatedRows = await db.update(riders).set({
+        fullName: d.fullName,
+        phone: d.phone,
+        vehicleType: d.vehicleType,
+        zone: d.zone,
+        nidNumber: d.nidNumber,
+        isAvailable: d.isAvailable
+      }).where(eq5(riders.uid, riderUid)).returning();
+      const updatedUserRows = await db.update(users).set({
+        fullName: d.fullName,
+        phone: d.phone,
+        avatarUrl: d.avatarUrl,
+        updatedAt: /* @__PURE__ */ new Date()
+      }).where(eq5(users.uid, riderUid)).returning();
+      if (d.fullName !== cur.fullName) {
+        await db.update(orders).set({ riderName: d.fullName }).where(
+          and2(
+            eq5(orders.riderUid, riderUid),
+            notInArray(orders.status, ["delivered", "cancelled"])
+          )
+        );
+      }
+      let restaurantName = null;
+      if (updatedRows[0].restaurantId) {
+        const restRows = await db.select({ name: restaurants.name }).from(restaurants).where(eq5(restaurants.id, updatedRows[0].restaurantId)).limit(1);
+        restaurantName = restRows[0]?.name || null;
+      }
+      await db.insert(auditLogs).values({
+        actorUid: req.user.uid,
+        action: "rider_updated_profile",
+        targetType: "rider",
+        targetId: String(updatedRows[0].id),
+        details: `${d.fullName} updated rider profile (${d.vehicleType}, ${d.zone}, available=${d.isAvailable})`
+      });
+      res.json({
+        rider: {
+          ...updatedRows[0],
+          avatarUrl: updatedUserRows[0]?.avatarUrl ?? d.avatarUrl ?? "",
+          restaurantName
+        }
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to update rider profile" });
     }
   }
 );
@@ -8444,7 +10340,11 @@ app.patch(
   async (req, res) => {
     const orderId = Number(req.params.id);
     const schema = z.object({
-      status: z.enum(["picked_up", "on_the_way", "delivered"])
+      status: z.enum(["picked_up", "on_the_way", "delivered"]),
+      note: z.string().trim().max(300).optional(),
+      pickupRating: z.enum(["good", "bad"]).optional(),
+      proofPhotoUrl: z.string().trim().max(2e6).optional(),
+      collectedCashAmount: z.number().nonnegative().optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!Number.isInteger(orderId) || !parsed.success) {
@@ -8458,7 +10358,8 @@ app.patch(
       if (!isAdmin && order.riderUid !== req.user.uid) {
         return res.status(403).json({ error: "Forbidden: Order is assigned to another rider" });
       }
-      if (!canTransitionOrderStatus(order.status, parsed.data.status)) {
+      const allowAssignedPickup = parsed.data.status === "picked_up" && Boolean(order.riderUid) && ["confirmed", "accepted", "preparing", "ready", "rider_assigned"].includes(order.status);
+      if (!allowAssignedPickup && !canTransitionOrderStatus(order.status, parsed.data.status)) {
         return res.status(400).json({ error: `Cannot change order from ${order.status} to ${parsed.data.status}` });
       }
       const updated = await db.update(orders).set({
@@ -8466,10 +10367,17 @@ app.patch(
         paymentStatus: parsed.data.status === "delivered" && order.paymentMethod === "cod" ? "paid" : order.paymentStatus,
         updatedAt: /* @__PURE__ */ new Date()
       }).where(eq5(orders.id, order.id)).returning();
+      const noteSegments = [
+        `Rider updated status to ${parsed.data.status.replace(/_/g, " ")}`,
+        parsed.data.pickupRating ? `pickup experience: ${parsed.data.pickupRating}` : "",
+        typeof parsed.data.collectedCashAmount === "number" ? `cash collected: \u09F3${parsed.data.collectedCashAmount}` : "",
+        parsed.data.proofPhotoUrl ? "drop-off proof photo attached" : "",
+        parsed.data.note ? parsed.data.note : ""
+      ].filter(Boolean);
       await db.insert(orderStatusHistory).values({
         orderId: order.id,
         status: parsed.data.status,
-        note: `Rider updated status to ${parsed.data.status.replace(/_/g, " ")}`,
+        note: noteSegments.join(" \xB7 ").slice(0, 480),
         actorUid: req.user.uid
       });
       const statusLabels = {
@@ -8598,22 +10506,22 @@ app.post(
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid image upload payload" });
     }
-    const match = /^data:image\/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=]+)$/i.exec(
-      parsed.data.dataUrl.trim()
-    );
-    if (!match) {
-      return res.status(400).json({ error: "Only PNG, JPG, WEBP, or GIF images are supported" });
+    const parsedImg = parseUploadedImageDataUrl(parsed.data.dataUrl, parsed.data.filename);
+    if (!parsedImg.valid) {
+      return res.status(400).json({ error: parsedImg.reason });
     }
     try {
-      const ext = match[1].toLowerCase() === "jpeg" ? "jpg" : match[1].toLowerCase();
-      const buffer = Buffer.from(match[2], "base64");
-      if (buffer.byteLength > 5 * 1024 * 1024) {
-        return res.status(400).json({ error: "Image must be 5 MB or smaller" });
+      const ext = parsedImg.ext;
+      const buffer = Buffer.from(parsedImg.base64Data, "base64");
+      if (buffer.byteLength > 8 * 1024 * 1024) {
+        return res.status(400).json({ error: "Image must be 8 MB or smaller" });
       }
       const safeStem = (parsed.data.filename || "food").replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9-_]+/g, "-").slice(0, 32) || "food";
       const outName = `${safeStem}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
       if (process.env.VERCEL) {
-        return res.status(201).json({ imageUrl: parsed.data.dataUrl.trim() });
+        return res.status(201).json({
+          imageUrl: `data:${parsedImg.mimeType};base64,${parsedImg.base64Data}`
+        });
       }
       const outPath = path2.join(UPLOADS_DIR2, outName);
       await fs2.promises.writeFile(outPath, buffer);
@@ -9698,6 +11606,40 @@ app.get(
   }
 );
 app.get(
+  "/api/admin/seo-check",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    try {
+      const origin = getRequestOrigin(req);
+      const [settings, approved] = await Promise.all([
+        getPlatformSettingsRow(),
+        getApprovedRestaurants()
+      ]);
+      const sc = mergeStorefrontConfig(settings?.storefrontConfig);
+      const verificationToken = (sc.googleSiteVerification || process.env.GOOGLE_SITE_VERIFICATION || "").trim();
+      const sitemapXml = buildSitemapXml(
+        origin,
+        approved.map((r) => ({ slug: r.slug, updatedAt: r.updatedAt }))
+      );
+      const robotsTxt = buildRobotsTxt(origin);
+      res.json({
+        ok: true,
+        origin,
+        sitemapUrl: `${origin}/sitemap.xml`,
+        robotsUrl: `${origin}/robots.txt`,
+        indexedUrls: approved.length + 1,
+        googleVerificationConfigured: Boolean(verificationToken),
+        verificationPreview: verificationToken ? `${verificationToken.slice(0, 6)}...` : "",
+        sitemapBytes: sitemapXml.length,
+        robotsOk: robotsTxt.includes("Sitemap:")
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "SEO verification check failed" });
+    }
+  }
+);
+app.get(
   "/api/admin/email-settings",
   requireAuth,
   requireRole(["admin", "super_admin"]),
@@ -10064,8 +12006,20 @@ app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
   );
   res.json({ ok: true });
 });
+function getGeminiApiKey() {
+  return (process.env.GEMINI_API_KEY || process.env.AI_STUDIO_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY || "").trim();
+}
+function getOpenRouterApiKey() {
+  return (process.env.OPENROUTER_API_KEY || "").trim();
+}
+function getAiEnvFlags() {
+  return {
+    hasGeminiKey: Boolean(getGeminiApiKey()),
+    hasOpenRouterKey: Boolean(getOpenRouterApiKey())
+  };
+}
 function getGeminiHelpClient() {
-  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+  const apiKey = getGeminiApiKey();
   if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
@@ -10080,10 +12034,12 @@ var aiHelpRequestSchema = z.object({
   message: z.string().trim().min(1, "Please enter a question.").max(1500),
   langPreference: z.enum(["auto", "bn", "en"]).optional().default("auto"),
   uiLang: z.enum(["en", "bn"]).optional().default("en"),
+  providerCode: z.string().trim().max(32).optional(),
   history: z.array(
     z.object({
       role: z.enum(["user", "model"]),
-      text: z.string().trim().min(1).max(1500)
+      text: z.string().trim().min(1).max(3e3),
+      reasoning_details: z.unknown().optional()
     })
   ).optional().default([]),
   context: z.object({
@@ -10130,6 +12086,427 @@ function withTimeout(promise, ms, label) {
     );
   });
 }
+function resolveDefaultBaseUrlForAiType(providerType) {
+  if (providerType === "openrouter") return "https://openrouter.ai/api/v1";
+  if (providerType === "openai") return "https://api.openai.com/v1";
+  if (providerType === "groq") return "https://api.groq.com/openai/v1";
+  if (providerType === "deepseek") return "https://api.deepseek.com/v1";
+  if (providerType === "anthropic") return "https://api.anthropic.com";
+  return "";
+}
+async function callExternalAiProvider(options) {
+  const baseUrl = (options.apiBaseUrl || resolveDefaultBaseUrlForAiType(options.providerType)).trim().replace(/\/+$/, "");
+  if (!isValidExternalAiBaseUrl(baseUrl)) {
+    const err = new Error("Invalid external AI API base URL (HTTPS required).");
+    err.status = 400;
+    throw err;
+  }
+  const controller = new AbortController();
+  const timeoutMs = options.providerType === "openrouter" ? 25e3 : 15e3;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    if (options.providerType === "anthropic") {
+      const res2 = await fetch(`${baseUrl}/v1/messages`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": options.apiKey,
+          "anthropic-version": "2023-06-01"
+        },
+        body: JSON.stringify({
+          model: options.model,
+          max_tokens: 700,
+          system: options.systemInstruction,
+          messages: [
+            ...options.history.slice(-8).map((h) => ({
+              role: h.role === "model" ? "assistant" : "user",
+              content: h.text
+            })),
+            { role: "user", content: options.message }
+          ]
+        })
+      });
+      const json2 = await res2.json().catch(() => ({}));
+      if (!res2.ok) {
+        const err = new Error(json2?.error?.message || `Anthropic API failed (${res2.status})`);
+        err.status = res2.status;
+        throw err;
+      }
+      const text3 = (json2?.content?.[0]?.text || "").trim();
+      if (!text3) throw new Error("Anthropic returned an empty response.");
+      return { reply: text3 };
+    }
+    if (options.providerType === "openrouter") {
+      const payload = buildOpenRouterChatPayload({
+        model: options.model,
+        systemInstruction: options.systemInstruction,
+        history: options.history,
+        message: options.message
+      });
+      const res2 = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${options.apiKey}`,
+          "HTTP-Referer": options.refererOrigin || "https://foodorabd-3-nine.vercel.app",
+          "X-Title": "Foodora BD"
+        },
+        body: JSON.stringify(payload)
+      });
+      const json2 = await res2.json().catch(() => ({}));
+      if (!res2.ok) {
+        const err = new Error(json2?.error?.message || `OpenRouter API failed (${res2.status})`);
+        err.status = res2.status;
+        throw err;
+      }
+      const msg = json2?.choices?.[0]?.message;
+      const text3 = (msg?.content || "").trim();
+      if (!text3) throw new Error("OpenRouter returned an empty response.");
+      return {
+        reply: text3,
+        reasoningDetails: msg?.reasoning_details
+      };
+    }
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${options.apiKey}`
+      },
+      body: JSON.stringify({
+        model: options.model,
+        temperature: 0.4,
+        max_tokens: 700,
+        messages: [
+          { role: "system", content: options.systemInstruction },
+          ...options.history.slice(-8).map((h) => ({
+            role: h.role === "model" ? "assistant" : "user",
+            content: h.text
+          })),
+          { role: "user", content: options.message }
+        ]
+      })
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(json?.error?.message || `AI API failed (${res.status})`);
+      err.status = res.status;
+      throw err;
+    }
+    const text2 = (json?.choices?.[0]?.message?.content || "").trim();
+    if (!text2) throw new Error("AI API returned an empty response.");
+    return { reply: text2 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+app.get("/api/ai/providers", async (_req, res) => {
+  try {
+    const envFlags = getAiEnvFlags();
+    const rows = await ensureDefaultAiProviders();
+    res.json({
+      providers: rows.map((r) => toPublicAiProviderView(r, envFlags)).filter((p) => p.isActive)
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Failed to load AI providers" });
+  }
+});
+app.get(
+  "/api/admin/ai-providers",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (_req, res) => {
+    try {
+      const envFlags = getAiEnvFlags();
+      const rows = await ensureDefaultAiProviders();
+      res.json({
+        aiProviders: rows.map((r) => toAdminAiProviderView(r, envFlags))
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to load admin AI providers" });
+    }
+  }
+);
+app.put(
+  "/api/admin/ai-providers",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    const schema = z.object({
+      code: z.string().min(2).max(32),
+      name: z.string().trim().min(2).max(80),
+      providerType: z.enum([
+        "foodora",
+        "gemini",
+        "openrouter",
+        "openai",
+        "groq",
+        "deepseek",
+        "anthropic",
+        "custom_openai"
+      ]),
+      model: z.string().trim().min(2).max(100),
+      apiBaseUrl: z.string().trim().max(240).optional().default(""),
+      apiKey: z.string().max(400).optional(),
+      isActive: z.boolean().default(true),
+      isDefault: z.boolean().default(false),
+      sortOrder: z.number().int().min(1).max(100).optional().default(10)
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || "Invalid AI provider configuration"
+      });
+    }
+    const code = normalizeAiProviderCode(parsed.data.code);
+    if (code.length < 2) {
+      return res.status(400).json({ error: "Provider code must be at least 2 characters." });
+    }
+    const isBuiltinNoExternalUrl = parsed.data.providerType === "gemini" || parsed.data.providerType === "foodora";
+    const resolvedBaseUrl = isBuiltinNoExternalUrl ? "" : parsed.data.apiBaseUrl || resolveDefaultBaseUrlForAiType(parsed.data.providerType);
+    if (!isBuiltinNoExternalUrl && resolvedBaseUrl) {
+      if (!isValidExternalAiBaseUrl(resolvedBaseUrl)) {
+        return res.status(400).json({
+          error: "API Base URL must be a valid public HTTPS endpoint."
+        });
+      }
+    }
+    try {
+      await ensureDefaultAiProviders();
+      const existing = await db.select().from(aiProviders).where(eq5(aiProviders.code, code)).limit(1);
+      const cur = existing[0];
+      let nextApiKey = "";
+      if (!isBuiltinNoExternalUrl) {
+        const incoming = parsed.data.apiKey;
+        if (incoming === void 0) {
+          nextApiKey = cur?.apiKey || "";
+        } else {
+          const clean = incoming.trim();
+          nextApiKey = !clean || clean.startsWith("\u2022\u2022\u2022\u2022") ? cur?.apiKey || "" : clean;
+        }
+      }
+      if (parsed.data.isDefault) {
+        await db.update(aiProviders).set({ isDefault: false });
+      }
+      const nextValues = {
+        code,
+        name: parsed.data.name,
+        providerType: parsed.data.providerType,
+        model: parsed.data.model,
+        apiBaseUrl: resolvedBaseUrl,
+        apiKey: nextApiKey,
+        isActive: parsed.data.isActive,
+        isDefault: parsed.data.isDefault,
+        sortOrder: parsed.data.sortOrder,
+        updatedAt: /* @__PURE__ */ new Date()
+      };
+      const saved = await db.insert(aiProviders).values(nextValues).onConflictDoUpdate({
+        target: aiProviders.code,
+        set: nextValues
+      }).returning();
+      await db.insert(auditLogs).values({
+        actorUid: req.user.uid,
+        action: cur ? "ai_provider_updated" : "ai_provider_created",
+        targetType: "ai_provider",
+        targetId: code,
+        details: JSON.stringify({
+          name: nextValues.name,
+          providerType: nextValues.providerType,
+          model: nextValues.model,
+          isActive: nextValues.isActive,
+          isDefault: nextValues.isDefault
+        })
+      });
+      res.json({
+        aiProvider: toAdminAiProviderView(saved[0], getAiEnvFlags())
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to save AI provider" });
+    }
+  }
+);
+app.post(
+  "/api/admin/ai-providers/:code/test",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    const code = normalizeAiProviderCode(String(req.params.code || ""));
+    if (!code) return res.status(400).json({ error: "Invalid provider code" });
+    try {
+      await ensureDefaultAiProviders();
+      const rows = await db.select().from(aiProviders).where(eq5(aiProviders.code, code)).limit(1);
+      if (rows.length === 0) return res.status(404).json({ error: "AI provider not found" });
+      const row = rows[0];
+      if (row.providerType === "foodora") {
+        const ai = getGeminiHelpClient();
+        if (ai) {
+          try {
+            const resp = await withTimeout(
+              ai.models.generateContent({
+                model: "gemini-2.5-flash",
+                contents: [{ role: "user", parts: [{ text: "Reply strictly with: OK" }] }]
+              }),
+              7e3,
+              "gemini-2.5-flash"
+            );
+            if ((resp.text || "").trim()) {
+              return res.json({
+                ok: true,
+                message: "Foodora Own AI connected cleanly (Gemini + Built-in Knowledge Engine).",
+                model: row.model
+              });
+            }
+          } catch {
+          }
+        }
+        return res.json({
+          ok: true,
+          message: "Foodora Own AI built-in bilingual assistant is online and ready.",
+          model: row.model
+        });
+      }
+      if (row.providerType === "gemini") {
+        const ai = getGeminiHelpClient();
+        if (!ai) {
+          return res.json({
+            ok: false,
+            message: "GEMINI_API_KEY is missing in Settings > Secrets.",
+            model: row.model
+          });
+        }
+        const testModel = row.model || "gemini-2.5-flash";
+        const resp = await withTimeout(
+          ai.models.generateContent({
+            model: testModel,
+            contents: [{ role: "user", parts: [{ text: "Reply strictly with: OK" }] }]
+          }),
+          8e3,
+          testModel
+        );
+        return res.json({
+          ok: Boolean((resp.text || "").trim()),
+          message: `Connected cleanly to Gemini (${testModel}).`,
+          model: testModel
+        });
+      }
+      const resolvedKey = (row.apiKey || "").trim() || (row.providerType === "openrouter" ? getOpenRouterApiKey() : "");
+      if (!resolvedKey) {
+        return res.json({
+          ok: false,
+          message: `No API key saved for ${row.name}. Add an API key first.`,
+          model: row.model
+        });
+      }
+      const { reply } = await callExternalAiProvider({
+        providerType: row.providerType,
+        model: row.model,
+        apiBaseUrl: row.apiBaseUrl || "",
+        apiKey: resolvedKey,
+        systemInstruction: "You are a concise health check responder.",
+        history: [],
+        message: "Reply strictly with: OK",
+        refererOrigin: getRequestOrigin(req)
+      });
+      return res.json({
+        ok: Boolean(reply),
+        message: `Connected cleanly to ${row.name} (${row.model}).`,
+        model: row.model
+      });
+    } catch (error) {
+      const { message } = extractReadableGeminiError(error);
+      return res.json({
+        ok: false,
+        message
+      });
+    }
+  }
+);
+app.delete(
+  "/api/admin/ai-providers/:code",
+  requireAuth,
+  requireRole(["admin", "super_admin"]),
+  async (req, res) => {
+    const code = normalizeAiProviderCode(String(req.params.code || ""));
+    if (!code) return res.status(400).json({ error: "Invalid provider code" });
+    if (code === "gemini" || code === "foodora") {
+      return res.status(400).json({
+        error: "Built-in Foodora AI and Google Gemini providers cannot be deleted. Disable instead."
+      });
+    }
+    try {
+      await db.delete(aiProviders).where(eq5(aiProviders.code, code));
+      await db.insert(auditLogs).values({
+        actorUid: req.user.uid,
+        action: "ai_provider_deleted",
+        targetType: "ai_provider",
+        targetId: code,
+        details: `Deleted custom AI Help provider ${code}`
+      });
+      res.json({ deleted: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Failed to delete AI provider" });
+    }
+  }
+);
+async function runGeminiHelpCompletion(params) {
+  const ai = getGeminiHelpClient();
+  if (!ai) {
+    const missingErr = new Error("GEMINI_API_KEY is not configured");
+    missingErr.status = 503;
+    throw missingErr;
+  }
+  const contents = [
+    ...params.history.slice(-8).map((item) => ({
+      role: item.role,
+      parts: [{ text: item.text }]
+    })),
+    {
+      role: "user",
+      parts: [{ text: params.message }]
+    }
+  ];
+  const candidateModels = Array.from(
+    new Set(
+      [params.preferredModel, "gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-4-hydrogen"].filter(
+        (m) => Boolean(m && m.trim() && m !== "foodora-bd-assistant")
+      )
+    )
+  );
+  let lastError = null;
+  for (let i = 0; i < candidateModels.length; i += 1) {
+    const modelName = candidateModels[i];
+    try {
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents,
+          config: {
+            systemInstruction: params.systemInstruction,
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
+          }
+        }),
+        9e3,
+        modelName
+      );
+      const text2 = (response.text || "").trim();
+      if (!text2) {
+        const emptyErr = new Error("AI Help returned an empty response.");
+        emptyErr.status = 502;
+        throw emptyErr;
+      }
+      return { reply: text2, model: modelName };
+    } catch (err) {
+      lastError = err;
+      if (i < candidateModels.length - 1) {
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+  }
+  throw lastError || new Error("Gemini API unavailable");
+}
 app.post("/api/ai/help", optionalAuth, async (req, res) => {
   try {
     const parsed = aiHelpRequestSchema.safeParse(req.body);
@@ -10138,13 +12515,7 @@ app.post("/api/ai/help", optionalAuth, async (req, res) => {
         error: parsed.error.issues[0]?.message || "Invalid AI Help request payload."
       });
     }
-    const ai = getGeminiHelpClient();
-    if (!ai) {
-      return res.status(503).json({
-        error: "AI Help is unavailable because GEMINI_API_KEY is not configured in Settings > Secrets."
-      });
-    }
-    const { message, langPreference, uiLang, history, context } = parsed.data;
+    const { message, langPreference, uiLang, providerCode, history, context } = parsed.data;
     const systemInstruction = buildAiHelpSystemInstruction({
       langPreference,
       uiLang,
@@ -10152,64 +12523,90 @@ app.post("/api/ai/help", optionalAuth, async (req, res) => {
       viewType: context?.viewType,
       activeOrderNumber: context?.activeOrderNumber
     });
-    const contents = [
-      ...history.slice(-8).map((item) => ({
-        role: item.role,
-        parts: [{ text: item.text }]
-      })),
-      {
-        role: "user",
-        parts: [{ text: message }]
-      }
-    ];
-    const attempts = [
-      { model: "gemini-3.1-flash-lite", thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 9e3 },
-      { model: "gemini-4-hydrogen", thinkingLevel: ThinkingLevel.LOW, timeoutMs: 9e3 },
-      { model: "gemini-3.1-flash-lite", thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 1e4 }
-    ];
-    let reply = "";
-    let usedModel = attempts[0].model;
-    let lastError = null;
-    for (let i = 0; i < attempts.length; i += 1) {
-      const attempt = attempts[i];
-      try {
-        const response = await withTimeout(
-          ai.models.generateContent({
-            model: attempt.model,
-            contents,
-            config: {
-              systemInstruction,
-              thinkingConfig: { thinkingLevel: attempt.thinkingLevel }
-            }
-          }),
-          attempt.timeoutMs,
-          attempt.model
-        );
-        const text2 = (response.text || "").trim();
-        if (!text2) {
-          const emptyErr = new Error("AI Help returned an empty response.");
-          emptyErr.status = 502;
-          throw emptyErr;
+    const allProviders = await ensureDefaultAiProviders();
+    const activeProviders = allProviders.filter((p) => p.isActive);
+    const envFlags = getAiEnvFlags();
+    const normalizedRequestedCode = providerCode ? normalizeAiProviderCode(providerCode) : "";
+    const chosenProvider = (normalizedRequestedCode ? activeProviders.find((p) => normalizeAiProviderCode(p.code) === normalizedRequestedCode) : void 0) || activeProviders.find((p) => p.isDefault && toPublicAiProviderView(p, envFlags).isConfigured) || activeProviders.find((p) => toPublicAiProviderView(p, envFlags).isConfigured) || activeProviders.find((p) => p.providerType === "foodora") || activeProviders.find((p) => p.providerType === "gemini") || allProviders[0];
+    const chosenType = chosenProvider?.providerType || "foodora";
+    if (chosenType === "foodora") {
+      const openRestaurants = await getApprovedRestaurants().catch(() => []);
+      if (envFlags.hasGeminiKey) {
+        try {
+          const liveRestLine = openRestaurants.filter((r) => r.isOpen).slice(0, 6).map((r) => `${r.name} (${r.area} \xB7 ${r.cuisine})`).join(", ");
+          const enrichedInstruction = liveRestLine ? `${systemInstruction}
+Live Open Restaurants: ${liveRestLine}` : systemInstruction;
+          const geminiOut2 = await runGeminiHelpCompletion({
+            preferredModel: "gemini-2.5-flash",
+            systemInstruction: enrichedInstruction,
+            history,
+            message
+          });
+          return res.json({
+            reply: geminiOut2.reply,
+            model: "foodora-own-ai",
+            providerCode: chosenProvider?.code || "foodora",
+            providerName: chosenProvider?.name || "Foodora Own AI"
+          });
+        } catch {
         }
-        reply = text2;
-        usedModel = attempt.model;
-        break;
-      } catch (err) {
-        lastError = err;
-        const { status } = extractReadableGeminiError(err);
-        const isTransient = status === 503 || status === 504 || status === 429 || status === 502;
-        if (!isTransient || i === attempts.length - 1) {
-          throw err;
-        }
-        await new Promise((r) => setTimeout(r, i === 0 ? 400 : 1e3));
       }
+      const fallbackReply = generateFoodoraOwnAiReply({
+        message,
+        langPreference,
+        uiLang,
+        area: context?.area,
+        activeOrderNumber: context?.activeOrderNumber,
+        openRestaurants: openRestaurants.filter((r) => r.isOpen).slice(0, 6).map((r) => ({ name: r.name, area: r.area, cuisine: r.cuisine }))
+      });
+      return res.json({
+        reply: fallbackReply,
+        model: chosenProvider?.model || "foodora-bd-assistant",
+        providerCode: chosenProvider?.code || "foodora",
+        providerName: chosenProvider?.name || "Foodora Own AI"
+      });
     }
-    if (!reply && lastError) {
-      throw lastError;
+    if (chosenProvider && chosenType !== "gemini") {
+      const apiKey = (chosenProvider.apiKey || "").trim() || (chosenType === "openrouter" ? getOpenRouterApiKey() : "");
+      if (!apiKey) {
+        return res.status(503).json({
+          error: `${chosenProvider.name} API key is not configured yet in Super Admin > Backend Control.`
+        });
+      }
+      const extRes = await callExternalAiProvider({
+        providerType: chosenType,
+        model: chosenProvider.model,
+        apiBaseUrl: chosenProvider.apiBaseUrl || "",
+        apiKey,
+        systemInstruction,
+        history,
+        message,
+        refererOrigin: getRequestOrigin(req)
+      });
+      return res.json({
+        reply: extRes.reply,
+        model: chosenProvider.model,
+        providerCode: chosenProvider.code,
+        providerName: chosenProvider.name,
+        ...extRes.reasoningDetails !== void 0 ? { reasoningDetails: extRes.reasoningDetails } : {}
+      });
     }
+    if (!envFlags.hasGeminiKey) {
+      return res.status(503).json({
+        error: "Google Gemini requires GEMINI_API_KEY in Settings > Secrets, or switch AI Engine to Foodora Own AI / OpenRouter."
+      });
+    }
+    const geminiOut = await runGeminiHelpCompletion({
+      preferredModel: chosenProvider?.model?.trim() || "gemini-2.5-flash",
+      systemInstruction,
+      history,
+      message
+    });
     return res.json({
-      reply,
-      model: usedModel
+      reply: geminiOut.reply,
+      model: geminiOut.model,
+      providerCode: chosenProvider?.code || "gemini",
+      providerName: chosenProvider?.name || "Google Gemini"
     });
   } catch (err) {
     const { status, message } = extractReadableGeminiError(err);
@@ -10236,8 +12633,26 @@ async function startServer() {
     const distPath = path2.resolve(PROJECT_ROOT, "dist");
     if (fs2.existsSync(distPath)) {
       app.use(express.static(distPath));
-      app.get("*", (_req, res) => {
-        res.sendFile(path2.join(distPath, "index.html"));
+      app.get("*", async (_req, res) => {
+        const indexPath = path2.join(distPath, "index.html");
+        try {
+          let html = fs2.readFileSync(indexPath, "utf8");
+          const settings = hasDatabaseConfig() ? await getPlatformSettingsRow().catch(() => null) : null;
+          const sc = mergeStorefrontConfig(settings?.storefrontConfig);
+          const token = (sc.googleSiteVerification || process.env.GOOGLE_SITE_VERIFICATION || "").trim();
+          if (token && !html.includes('name="google-site-verification"')) {
+            const safeToken = token.replace(/["<>]/g, "");
+            html = html.replace(
+              "</head>",
+              `  <meta name="google-site-verification" content="${safeToken}" />
+  </head>`
+            );
+          }
+          res.setHeader("Content-Type", "text/html; charset=utf-8");
+          return res.send(html);
+        } catch {
+          return res.sendFile(indexPath);
+        }
       });
     }
   }

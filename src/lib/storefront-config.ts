@@ -52,6 +52,9 @@ export const DEFAULT_STOREFRONT_CONFIG: StorefrontConfig = {
   seoKeywords:
     'food delivery dhaka, online food order bangladesh, kacchi biriyani dhaka, bKash food delivery, restaurant marketplace bangladesh',
   googleSiteVerification: '',
+  messengerUrl: 'https://www.facebook.com/messages/t/mdrakib.roni.1',
+  whatsappNumber: '+8801712345678',
+  supportEmail: 'support@foodorabd.com',
 };
 
 export function mergeStorefrontConfig(

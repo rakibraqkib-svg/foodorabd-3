@@ -74,6 +74,16 @@ import {
   normalizeVariationsList,
   normalizeAddonsList,
   validateVendorAddRiderPayload,
+  DEFAULT_AI_PROVIDERS,
+  buildOpenRouterChatPayload,
+  generateFoodoraOwnAiReply,
+  formatRiderShortOrderCode,
+  calculateRiderLegEtaMin,
+  resolveRiderCashCollectAmount,
+  parseUploadedImageDataUrl,
+  AI_PROVIDER_PRESETS,
+  buildMessengerUrl,
+  buildWhatsAppSupportUrl,
 } from './marketplace-logic';
 import { DEFAULT_STOREFRONT_CONFIG, mergeStorefrontConfig } from './storefront-config';
 import { BANGLADESH_AREAS, BANGLADESH_SEARCH_PLACES, DHAKA_DELIVERY_ZONES } from './i18n';
@@ -1433,6 +1443,286 @@ test('validateVendorAddRiderPayload validates phone, email, optional password, a
   }
 });
 
+test('DEFAULT_AI_PROVIDERS, Foodora Own AI, and OpenRouter views preserve built-in and env-backed config safely', () => {
+  assert.equal(DEFAULT_AI_PROVIDERS[0].code, 'foodora');
+  assert.equal(DEFAULT_AI_PROVIDERS[0].isDefault, true);
+  assert.equal(DEFAULT_AI_PROVIDERS[1].code, 'openrouter');
+  assert.equal(DEFAULT_AI_PROVIDERS[1].model, 'google/gemma-4-31b-it:free');
 
+  const foodoraRow = {
+    ...DEFAULT_AI_PROVIDERS[0],
+    apiKey: '',
+  };
+  const foodoraPub = toPublicAiProviderView(foodoraRow, { hasGeminiKey: false, hasOpenRouterKey: false });
+  assert.equal(foodoraPub.isConfigured, true);
+  const foodoraAdmin = toAdminAiProviderView(foodoraRow, { hasGeminiKey: true });
+  assert.equal(foodoraAdmin.hasApiKey, true);
+  assert.equal(foodoraAdmin.apiKeyPreview, 'Foodora Own AI + Gemini');
 
+  const openRouterEnvRow = {
+    ...DEFAULT_AI_PROVIDERS[1],
+    apiKey: '',
+  };
+  const orPubEnv = toPublicAiProviderView(openRouterEnvRow, { hasOpenRouterKey: true });
+  assert.equal(orPubEnv.isConfigured, true);
+  const orAdminEnv = toAdminAiProviderView(openRouterEnvRow, { hasOpenRouterKey: true });
+  assert.equal(orAdminEnv.hasApiKey, true);
+  assert.equal(orAdminEnv.apiKeyPreview, 'Server Env Configured');
 
+  const orDbKeyAdmin = toAdminAiProviderView(
+    { ...openRouterEnvRow, apiKey: 'sk-or-v1-secret-1234' },
+    { hasOpenRouterKey: false }
+  );
+  assert.equal(orDbKeyAdmin.hasApiKey, true);
+  assert.equal(orDbKeyAdmin.apiKeyPreview, '••••1234');
+  assert.equal('apiKey' in orDbKeyAdmin, false);
+});
+
+test('buildOpenRouterChatPayload configures Gemma 4 reasoning, google-ai-studio provider lock, and preserves reasoning_details', () => {
+  const reasoningToken = [{ type: 'reasoning.text', text: 'Count r letters carefully: 3.' }];
+  const payload = buildOpenRouterChatPayload({
+    model: 'google/gemma-4-31b-it:free',
+    systemInstruction: 'You are Foodora BD AI Help.',
+    history: [
+      { role: 'user', text: "How many r's are in strawberry?" },
+      { role: 'model', text: 'There are 3 r letters.', reasoning_details: reasoningToken },
+    ],
+    message: 'Are you sure? Think carefully.',
+  });
+
+  assert.equal(payload.model, 'google/gemma-4-31b-it:free');
+  assert.deepEqual(payload.reasoning, { enabled: true });
+  assert.deepEqual(payload.provider, {
+    only: ['google-ai-studio'],
+    allow_fallbacks: false,
+  });
+
+  const msgs = payload.messages as Array<{ role: string; content: string; reasoning_details?: unknown }>;
+  assert.equal(msgs.length, 4);
+  assert.equal(msgs[0].role, 'system');
+  assert.equal(msgs[1].role, 'user');
+  assert.equal(msgs[2].role, 'assistant');
+  assert.deepEqual(msgs[2].reasoning_details, reasoningToken);
+  assert.equal(msgs[3].role, 'user');
+  assert.equal(msgs[3].content, 'Are you sure? Think carefully.');
+});
+
+test('generateFoodoraOwnAiReply answers English, Bangla, and Banglish Foodora queries with live restaurant context', () => {
+  const enTrack = generateFoodoraOwnAiReply({
+    message: 'How can I track my rider ETA?',
+    langPreference: 'auto',
+    uiLang: 'en',
+    activeOrderNumber: 'FD-BD-5541',
+  });
+  assert.ok(enTrack.includes('Track Rider'));
+  assert.ok(enTrack.includes('FD-BD-5541'));
+
+  const bnPay = generateFoodoraOwnAiReply({
+    message: 'বিকাশ বা ক্যাশ অন ডেলিভারি পেমেন্ট করা যাবে?',
+    langPreference: 'auto',
+    uiLang: 'en',
+  });
+  assert.ok(bnPay.includes('bKash'));
+  assert.ok(bnPay.includes('FOODORA50'));
+
+  const banglishMenu = generateFoodoraOwnAiReply({
+    message: 'Amar khuub khabar khawar ichha, kacchi kothay pabo?',
+    langPreference: 'auto',
+    uiLang: 'en',
+    area: 'Gulshan 2',
+    openRestaurants: [{ name: "Sultan's Dine", area: 'Gulshan 2', cuisine: 'Biriyani' }],
+  });
+  assert.ok(banglishMenu.includes('Gulshan 2'));
+  assert.ok(banglishMenu.includes("Sultan's Dine"));
+});
+
+test('Rider sheet helpers format short order codes, leg ETAs, and COD vs Paid online cash collection', () => {
+  assert.equal(formatRiderShortOrderCode('aa98-2442-1639', 12), '1639');
+  assert.equal(formatRiderShortOrderCode('FD-BD-8251', 7), '8251');
+  assert.equal(formatRiderShortOrderCode('ORD', 42), '0042');
+
+  const legEta = calculateRiderLegEtaMin(23.7949, 90.4144, 23.7808, 90.4193, 2);
+  assert.ok(legEta >= 2 && legEta <= 45);
+  assert.equal(calculateRiderLegEtaMin(Number.NaN, 90.4, 23.78, 90.41, 4), 4);
+
+  const onlinePay = resolveRiderCashCollectAmount('bkash', 800);
+  assert.equal(onlinePay.isCod, false);
+  assert.equal(onlinePay.amountToCollect, 0);
+  assert.equal(onlinePay.statusLabelEn, 'Paid online');
+
+  const codDefault = resolveRiderCashCollectAmount('cod', 280.95);
+  assert.equal(codDefault.isCod, true);
+  assert.equal(codDefault.amountToCollect, 280.95);
+  assert.equal(codDefault.statusLabelEn, 'Collect cash');
+
+  const codEdited = resolveRiderCashCollectAmount('cod', 280.95, 250);
+  assert.equal(codEdited.isCod, true);
+  assert.equal(codEdited.amountToCollect, 250);
+});
+
+test('parseUploadedImageDataUrl handles image/jpeg, image/jpg, image/pjpeg, whitespace, and octet-stream JPEG magic bytes', () => {
+  // Valid minimal JPEG header bytes (FF D8 FF E0)
+  const jpegBase64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+
+  const stdJpeg = parseUploadedImageDataUrl(`data:image/jpeg;base64,${jpegBase64}`);
+  assert.equal(stdJpeg.valid, true);
+  if (stdJpeg.valid) {
+    assert.equal(stdJpeg.ext, 'jpg');
+    assert.equal(stdJpeg.mimeType, 'image/jpeg');
+  }
+
+  const pjpeg = parseUploadedImageDataUrl(`data:image/pjpeg;charset=utf-8;base64, ${jpegBase64.slice(0, 4)}\n${jpegBase64.slice(4)}`);
+  assert.equal(pjpeg.valid, true);
+  if (pjpeg.valid) {
+    assert.equal(pjpeg.ext, 'jpg');
+    assert.equal(pjpeg.base64Data, jpegBase64);
+  }
+
+  const octetJpg = parseUploadedImageDataUrl(`data:application/octet-stream;base64,${jpegBase64}`, 'photo.JPG');
+  assert.equal(octetJpg.valid, true);
+  if (octetJpg.valid) {
+    assert.equal(octetJpg.ext, 'jpg');
+  }
+
+  const bad = parseUploadedImageDataUrl('data:application/pdf;base64,JVBERi0xLjQ=');
+  assert.equal(bad.valid, false);
+});
+
+test('sanitizeRiderProfileUpdate and calculateRiderProfileStats validate edits and compute completion metrics', async () => {
+  const logic = await import('./marketplace-logic');
+  const ok = logic.sanitizeRiderProfileUpdate({
+    fullName: '  Kamrul Hasan  ',
+    phone: ' +880 1711-009988 ',
+    vehicleType: 'Motorbike',
+    zone: 'Banani',
+    nidNumber: '1995269123456',
+    isAvailable: false,
+    avatarUrl: '/uploads/rider-12.jpg',
+  });
+  assert.equal(ok.valid, true);
+  if (ok.valid) {
+    assert.equal(ok.data.fullName, 'Kamrul Hasan');
+    assert.equal(ok.data.phone, '+880 1711-009988');
+    assert.equal(ok.data.isAvailable, false);
+    assert.equal(ok.data.avatarUrl, '/uploads/rider-12.jpg');
+  }
+
+  const badPhone = logic.sanitizeRiderProfileUpdate({
+    fullName: 'Kamrul',
+    phone: '123',
+    vehicleType: 'Bicycle',
+    zone: 'Mirpur 10',
+  });
+  assert.equal(badPhone.valid, false);
+
+  const badAvatar = logic.sanitizeRiderProfileUpdate({
+    fullName: 'Kamrul',
+    phone: '01711223344',
+    vehicleType: 'Bicycle',
+    zone: 'Mirpur 10',
+    avatarUrl: 'javascript:alert(1)',
+  });
+  assert.equal(badAvatar.valid, false);
+
+  const stats = logic.calculateRiderProfileStats(
+    { totalDeliveries: 9, totalEarnings: 720 },
+    [
+      { status: 'delivered', deliveryFee: 80 },
+      { status: 'cancelled', deliveryFee: 60 },
+      { status: 'picked_up', deliveryFee: 70 },
+    ]
+  );
+  assert.equal(stats.deliveredCount, 9);
+  assert.equal(stats.cancelledCount, 1);
+  assert.equal(stats.activeCount, 1);
+  assert.equal(stats.completionRatePct, 90);
+  assert.equal(stats.avgEarningPerOrder, 80);
+});
+
+test('isBicycleVehicleType, canOwnerOpenNewRestaurant, and buildBranchRestaurantNames enforce bicycle license exemption and 1-restaurant + multi-branch rules', async () => {
+  const logic = await import('./marketplace-logic');
+  assert.equal(logic.isBicycleVehicleType('Bicycle'), true);
+  assert.equal(logic.isBicycleVehicleType('bycikel'), true);
+  assert.equal(logic.isBicycleVehicleType('সাইকেল'), true);
+  assert.equal(logic.isBicycleVehicleType('Motorbike'), false);
+  assert.equal(logic.isBicycleVehicleType('Scooter'), false);
+
+  assert.equal(logic.canOwnerOpenNewRestaurant(0, 'customer').allowed, true);
+  assert.equal(logic.canOwnerOpenNewRestaurant(0, 'restaurant_owner').allowed, true);
+  const blocked = logic.canOwnerOpenNewRestaurant(1, 'restaurant_owner');
+  assert.equal(blocked.allowed, false);
+  assert.ok(blocked.error?.includes('1 restaurant'));
+  assert.equal(logic.canOwnerOpenNewRestaurant(5, 'super_admin').allowed, true);
+
+  const branchNames = logic.buildBranchRestaurantNames(
+    "Sultan's Dine — Gulshan",
+    'সুলতানস ডাইন — গুলশান',
+    'Banani Branch',
+    'বনানী শাখা'
+  );
+  assert.equal(branchNames.name, "Sultan's Dine — Banani Branch");
+  assert.equal(branchNames.nameBn, 'সুলতানস ডাইন — বনানী শাখা');
+});
+
+test('Expanded AI providers include Pollinations keyless AI, OpenRouter retry payload, and multi-provider env detection', () => {
+  assert.ok(DEFAULT_AI_PROVIDERS.length >= 16);
+  assert.ok(AI_PROVIDER_PRESETS.length >= 12);
+
+  const pollinationsRow = DEFAULT_AI_PROVIDERS.find((p) => p.code === 'pollinations');
+  assert.ok(pollinationsRow);
+  const pollPub = toPublicAiProviderView({ ...pollinationsRow!, apiKey: '' }, {});
+  assert.equal(pollPub.isConfigured, true);
+
+  const mistralRow = DEFAULT_AI_PROVIDERS.find((p) => p.code === 'mistral');
+  assert.ok(mistralRow);
+  assert.equal(
+    toPublicAiProviderView({ ...mistralRow!, apiKey: '' }, { hasMistralKey: true }).isConfigured,
+    true
+  );
+  assert.equal(
+    toPublicAiProviderView({ ...mistralRow!, apiKey: '' }, { hasMistralKey: false }).isConfigured,
+    false
+  );
+
+  const fallbackPayload = buildOpenRouterChatPayload({
+    model: 'google/gemma-4-31b-it:free',
+    systemInstruction: 'Be helpful.',
+    history: [{ role: 'model', text: 'Hi', reasoning_details: { secret: 1 } }],
+    message: 'Test',
+    strictProvider: false,
+    enableReasoning: false,
+  });
+  assert.equal('provider' in fallbackPayload, false);
+  assert.equal('reasoning' in fallbackPayload, false);
+});
+
+test('buildMessengerUrl, buildWhatsAppSupportUrl, and StorefrontConfig defaults support Messenger & WhatsApp contact channels', () => {
+  assert.equal(
+    buildMessengerUrl(DEFAULT_STOREFRONT_CONFIG.messengerUrl),
+    'https://www.facebook.com/messages/t/mdrakib.roni.1'
+  );
+  assert.equal(
+    buildMessengerUrl(''),
+    'https://www.facebook.com/messages/t/mdrakib.roni.1'
+  );
+  assert.equal(
+    buildMessengerUrl('mdrakib.roni.1'),
+    'https://www.facebook.com/messages/t/mdrakib.roni.1'
+  );
+
+  assert.equal(
+    buildWhatsAppSupportUrl('01712345678'),
+    'https://wa.me/8801712345678'
+  );
+  assert.equal(
+    buildWhatsAppSupportUrl('+880 1712-345678', 'Hello Foodora'),
+    'https://wa.me/8801712345678?text=Hello%20Foodora'
+  );
+
+  const supportReply = generateFoodoraOwnAiReply({
+    message: 'WhatsApp or Messenger support link kothay?',
+    langPreference: 'bn',
+  });
+  assert.ok(supportReply.includes('Messenger'));
+  assert.ok(supportReply.includes('WhatsApp'));
+});

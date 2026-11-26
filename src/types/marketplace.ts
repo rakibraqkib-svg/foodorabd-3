@@ -168,6 +168,8 @@ export interface OrderRecord {
   riderName: string | null;
   restaurantLat?: number;
   restaurantLng?: number;
+  restaurantAddress?: string;
+  restaurantPhone?: string;
   estimatedMinutes: number;
   itemsSnapshotJson: OrderSnapshotItem[];
   createdAt: string;
@@ -215,10 +217,12 @@ export interface RiderRecord {
   id: number;
   uid: string;
   restaurantId?: number | null;
+  restaurantName?: string | null;
   addedByUid?: string | null;
   fullName: string;
   phone: string;
   email: string;
+  avatarUrl?: string;
   vehicleType: string;
   nidNumber?: string;
   zone: string;
@@ -229,6 +233,7 @@ export interface RiderRecord {
   locationUpdatedAt?: string;
   totalDeliveries: number;
   totalEarnings: number;
+  createdAt?: string;
 }
 
 export interface OrderEmailLog {
@@ -315,6 +320,9 @@ export interface StorefrontConfig {
   seoDescriptionBn: string;
   seoKeywords: string;
   googleSiteVerification: string;
+  messengerUrl: string;
+  whatsappNumber: string;
+  supportEmail: string;
 }
 
 export interface PlatformSettings {
@@ -454,7 +462,23 @@ export interface VendorAdminMessage {
 export interface PublicAiProvider {
   code: string;
   name: string;
-  providerType: 'gemini' | 'openai' | 'groq' | 'deepseek' | 'anthropic' | 'custom_openai';
+  providerType:
+    | 'foodora'
+    | 'pollinations'
+    | 'gemini'
+    | 'openrouter'
+    | 'openai'
+    | 'groq'
+    | 'deepseek'
+    | 'anthropic'
+    | 'mistral'
+    | 'xai'
+    | 'together'
+    | 'cerebras'
+    | 'perplexity'
+    | 'cohere'
+    | 'huggingface'
+    | 'custom_openai';
   model: string;
   isActive: boolean;
   isDefault: boolean;

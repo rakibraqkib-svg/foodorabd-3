@@ -341,24 +341,29 @@ export async function ensureDefaultPaymentGateways() {
 
 export async function ensureDefaultAiProviders() {
   try {
-    const existing = await withDbRetry(() =>
+    let existing = await withDbRetry(() =>
       db
         .select()
         .from(aiProviders)
         .orderBy(asc(aiProviders.sortOrder), asc(aiProviders.id))
     );
 
-    if (existing.length === 0) {
+    const existingCodes = new Set(existing.map((row) => row.code));
+    const hasAnyDefault = existing.some((row) => row.isDefault);
+    const missingDefaults = DEFAULT_AI_PROVIDERS.filter((p) => !existingCodes.has(p.code));
+
+    if (missingDefaults.length > 0) {
       await db
         .insert(aiProviders)
         .values(
-          DEFAULT_AI_PROVIDERS.map((p) => ({
+          missingDefaults.map((p) => ({
             ...p,
+            isDefault: existing.length === 0 ? p.isDefault : !hasAnyDefault && p.code === 'foodora',
             apiKey: '',
           }))
         )
         .onConflictDoNothing();
-      return await db
+      existing = await db
         .select()
         .from(aiProviders)
         .orderBy(asc(aiProviders.sortOrder), asc(aiProviders.id));
@@ -503,18 +508,39 @@ export async function getVendorWorkspace(
 
 export async function getRiderWorkspace(riderUid: string) {
   try {
-    const [riderRows, allOrders, allRestaurants] = await Promise.all([
+    const [riderRows, userRows, allOrders, allRestaurants] = await Promise.all([
       db.select().from(riders).where(eq(riders.uid, riderUid)).limit(1),
+      db
+        .select({ avatarUrl: users.avatarUrl })
+        .from(users)
+        .where(eq(users.uid, riderUid))
+        .limit(1),
       db.select().from(orders).orderBy(desc(orders.createdAt)),
-      db.select({ id: restaurants.id, lat: restaurants.lat, lng: restaurants.lng }).from(restaurants),
+      db
+        .select({
+          id: restaurants.id,
+          name: restaurants.name,
+          lat: restaurants.lat,
+          lng: restaurants.lng,
+          address: restaurants.address,
+          phone: restaurants.phone,
+        })
+        .from(restaurants),
     ]);
-    const restCoordMap = new Map(allRestaurants.map((r) => [r.id, { lat: r.lat, lng: r.lng }]));
+    const restCoordMap = new Map(
+      allRestaurants.map((r) => [
+        r.id,
+        { name: r.name, lat: r.lat, lng: r.lng, address: r.address, phone: r.phone },
+      ])
+    );
     const withRestCoords = allOrders.map((o) => {
       const coords = restCoordMap.get(o.restaurantId);
       return {
         ...o,
         restaurantLat: coords?.lat,
         restaurantLng: coords?.lng,
+        restaurantAddress: coords?.address || '',
+        restaurantPhone: coords?.phone || '',
       };
     });
     const availableOrders = withRestCoords.filter(
@@ -524,8 +550,18 @@ export async function getRiderWorkspace(riderUid: string) {
         ['accepted', 'preparing', 'ready'].includes(o.status)
     );
     const assignedOrders = withRestCoords.filter((o) => o.riderUid === riderUid);
+    const baseRider = riderRows[0] ?? null;
+    const enrichedRider = baseRider
+      ? {
+          ...baseRider,
+          avatarUrl: userRows[0]?.avatarUrl || '',
+          restaurantName: baseRider.restaurantId
+            ? restCoordMap.get(baseRider.restaurantId)?.name || null
+            : null,
+        }
+      : null;
     return {
-      rider: riderRows[0] ?? null,
+      rider: enrichedRider,
       availableOrders,
       assignedOrders,
     };

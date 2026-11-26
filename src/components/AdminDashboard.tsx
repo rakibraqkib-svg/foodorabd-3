@@ -3204,14 +3204,14 @@ export function AdminDashboard({
                     <Cpu className="w-4 h-4 text-[#E21B70]" />
                     <span>
                       {lang === 'bn'
-                        ? 'AI হেল্প API ইন্টিগ্রেশন (Gemini, ChatGPT, Groq, DeepSeek ও কাস্টম API)'
-                        : 'AI Help API Integrations (Gemini, ChatGPT / OpenAI, Groq, DeepSeek & Custom)'}
+                        ? 'AI হেল্প API ইন্টিগ্রেশন (Foodora AI, OpenRouter, Gemini, ChatGPT ও কাস্টম)'
+                        : 'AI Help API Integrations (Foodora Own AI, OpenRouter, Gemini, ChatGPT & Custom)'}
                     </span>
                   </h3>
                   <p className="text-xs text-neutral-500 mt-0.5">
                     {lang === 'bn'
-                      ? 'বিল্ট-ইন Gemini ছাড়াও ChatGPT (OpenAI), Groq বা কাস্টম AI API কী যোগ করুন। চ্যাট উইজেট থেকে ইউজাররা মডেল সিলেক্ট করতে পারবে।'
-                      : 'Keep built-in Google Gemini or connect ChatGPT (OpenAI), Groq, DeepSeek, Claude, or custom OpenAI-compatible APIs. All keys remain server-side.'}
+                      ? 'বিল্ট-ইন Foodora Own AI ছাড়াও OpenRouter (Gemma 4), Gemini, ChatGPT, Groq বা কাস্টম AI API যোগ করুন।'
+                      : 'Keep built-in Foodora Own AI or connect OpenRouter (Gemma 4), Google Gemini, ChatGPT (OpenAI), Groq, DeepSeek, Claude, or custom OpenAI-compatible APIs.'}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -3265,12 +3265,18 @@ export function AdminDashboard({
                             {provider.providerType} · {provider.model}
                           </p>
                           <p className="text-[11px] text-neutral-500 mt-0.5">
-                            {provider.providerType === 'gemini'
+                            {provider.providerType === 'foodora'
+                              ? provider.apiKeyPreview || 'Built-in Foodora AI Ready'
+                              : provider.providerType === 'pollinations'
+                              ? 'Free Keyless AI Ready'
+                              : provider.providerType === 'gemini'
                               ? provider.isConfigured
                                 ? 'Server Env Key Ready'
                                 : 'Set GEMINI_API_KEY in Secrets'
                               : provider.hasApiKey
                               ? `API Key: ${provider.apiKeyPreview}`
+                              : provider.providerType === 'openrouter'
+                              ? 'Add OpenRouter API key or set OPENROUTER_API_KEY'
                               : 'No API key added yet'}
                           </p>
                         </div>
@@ -3325,7 +3331,7 @@ export function AdminDashboard({
                         >
                           {testingAiCode === provider.code ? 'Testing...' : 'Test'}
                         </button>
-                        {provider.code !== 'gemini' && (
+                        {provider.code !== 'gemini' && provider.code !== 'foodora' && (
                           <button
                             type="button"
                             onClick={() => handleDeleteAiProvider(provider.code)}
@@ -3822,6 +3828,47 @@ export function AdminDashboard({
                       onChange={(e) =>
                         setStorefrontForm({ ...storefrontForm, maintenanceMessage: e.target.value })
                       }
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      Facebook Messenger Support URL
+                    </label>
+                    <input
+                      type="url"
+                      value={storefrontForm.messengerUrl}
+                      onChange={(e) =>
+                        setStorefrontForm({ ...storefrontForm, messengerUrl: e.target.value })
+                      }
+                      placeholder="https://www.facebook.com/messages/t/mdrakib.roni.1"
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg font-mono-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      WhatsApp Contact &amp; Support Number
+                    </label>
+                    <input
+                      value={storefrontForm.whatsappNumber}
+                      onChange={(e) =>
+                        setStorefrontForm({ ...storefrontForm, whatsappNumber: e.target.value })
+                      }
+                      placeholder="+8801712345678"
+                      className="w-full px-3 py-2 border border-neutral-200 rounded-lg font-mono-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      Customer Support Email
+                    </label>
+                    <input
+                      type="email"
+                      value={storefrontForm.supportEmail}
+                      onChange={(e) =>
+                        setStorefrontForm({ ...storefrontForm, supportEmail: e.target.value })
+                      }
+                      placeholder="support@foodorabd.com"
                       className="w-full px-3 py-2 border border-neutral-200 rounded-lg"
                     />
                   </div>
@@ -6303,8 +6350,14 @@ export function AdminDashboard({
                     : `Configure ${aiProviderModal.name}`}
                 </h3>
                 <p className="text-[11px] text-neutral-500 mt-0.5">
-                  {aiProviderModal.providerType === 'gemini'
+                  {aiProviderModal.providerType === 'foodora'
+                    ? 'Foodora Own AI runs natively with bilingual Foodora BD support and optional Gemini enhancement.'
+                    : aiProviderModal.providerType === 'pollinations'
+                    ? 'Pollinations Free AI works out-of-the-box without requiring any API key.'
+                    : aiProviderModal.providerType === 'gemini'
                     ? 'Google Gemini uses the server GEMINI_API_KEY environment secret.'
+                    : aiProviderModal.providerType === 'openrouter'
+                    ? 'OpenRouter supports Gemma 4 (google/gemma-4-31b-it:free) & free fallback routing (paste key below or set OPENROUTER_API_KEY).'
                     : 'External AI API keys are saved strictly server-side and never sent to browsers.'}
                 </p>
               </div>
@@ -6326,38 +6379,74 @@ export function AdminDashboard({
                   disabled={!aiProviderModal.isNew}
                   value={aiProviderModal.code}
                   onChange={(e) => setAiProviderModal({ ...aiProviderModal, code: e.target.value })}
-                  placeholder="e.g. chatgpt, groq, deepseek"
+                  placeholder="e.g. openrouter, chatgpt, groq"
                   className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums disabled:bg-neutral-100"
                 />
               </div>
               <div>
                 <label className="block font-semibold text-neutral-700 mb-1">Provider Type</label>
                 <select
-                  disabled={aiProviderModal.code === 'gemini'}
+                  disabled={aiProviderModal.code === 'gemini' || aiProviderModal.code === 'foodora'}
                   value={aiProviderModal.providerType}
                   onChange={(e) => {
                     const nextType = e.target.value as AiProviderType;
                     const defaultUrls: Record<string, string> = {
+                      foodora: '',
+                      pollinations: 'https://text.pollinations.ai',
                       gemini: '',
+                      openrouter: 'https://openrouter.ai/api/v1',
                       openai: 'https://api.openai.com/v1',
                       groq: 'https://api.groq.com/openai/v1',
                       deepseek: 'https://api.deepseek.com/v1',
                       anthropic: 'https://api.anthropic.com',
+                      mistral: 'https://api.mistral.ai/v1',
+                      xai: 'https://api.x.ai/v1',
+                      together: 'https://api.together.xyz/v1',
+                      cerebras: 'https://api.cerebras.ai/v1',
+                      perplexity: 'https://api.perplexity.ai',
+                      cohere: 'https://api.cohere.com/compatibility/v1',
+                      huggingface: 'https://router.huggingface.co/v1',
                       custom_openai: aiProviderModal.apiBaseUrl || 'https://api.openai.com/v1',
+                    };
+                    const defaultModels: Record<string, string> = {
+                      pollinations: 'openai-fast',
+                      openrouter: 'google/gemma-4-31b-it:free',
+                      openai: 'gpt-4o-mini',
+                      groq: 'llama-3.3-70b-versatile',
+                      deepseek: 'deepseek-chat',
+                      anthropic: 'claude-3-5-haiku-latest',
+                      mistral: 'mistral-small-latest',
+                      xai: 'grok-2-latest',
+                      together: 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free',
+                      cerebras: 'llama-3.3-70b',
+                      perplexity: 'sonar',
+                      cohere: 'command-a-03-2025',
+                      huggingface: 'Qwen/Qwen2.5-72B-Instruct',
                     };
                     setAiProviderModal({
                       ...aiProviderModal,
                       providerType: nextType,
                       apiBaseUrl: defaultUrls[nextType] ?? aiProviderModal.apiBaseUrl,
+                      model: defaultModels[nextType] || aiProviderModal.model,
                     });
                   }}
                   className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg bg-white disabled:bg-neutral-100"
                 >
-                  <option value="gemini">Google Gemini (Server Env)</option>
+                  <option value="foodora">Foodora Own AI (Built-in)</option>
+                  <option value="pollinations">Pollinations Free AI (No Key Needed)</option>
+                  <option value="openrouter">OpenRouter (Gemma 4 / Reasoning)</option>
+                  <option value="gemini">Google Gemini 4 (Server Env)</option>
                   <option value="openai">ChatGPT / OpenAI</option>
                   <option value="groq">Groq Cloud (Llama)</option>
                   <option value="deepseek">DeepSeek</option>
                   <option value="anthropic">Anthropic Claude</option>
+                  <option value="mistral">Mistral AI</option>
+                  <option value="xai">xAI Grok</option>
+                  <option value="together">Together AI</option>
+                  <option value="cerebras">Cerebras AI</option>
+                  <option value="perplexity">Perplexity Sonar</option>
+                  <option value="cohere">Cohere Command</option>
+                  <option value="huggingface">HuggingFace Router</option>
                   <option value="custom_openai">Custom OpenAI-Compatible</option>
                 </select>
               </div>
@@ -6367,7 +6456,7 @@ export function AdminDashboard({
                   required
                   value={aiProviderModal.name}
                   onChange={(e) => setAiProviderModal({ ...aiProviderModal, name: e.target.value })}
-                  placeholder="e.g. ChatGPT (OpenAI)"
+                  placeholder="e.g. OpenRouter (Gemma 4)"
                   className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg"
                 />
               </div>
@@ -6379,12 +6468,12 @@ export function AdminDashboard({
                   onChange={(e) =>
                     setAiProviderModal({ ...aiProviderModal, model: e.target.value })
                   }
-                  placeholder="e.g. gpt-4o-mini or gemini-4-hydrogen"
+                  placeholder="e.g. google/gemma-4-31b-it:free"
                   className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
                 />
               </div>
 
-              {aiProviderModal.providerType !== 'gemini' && (
+              {aiProviderModal.providerType !== 'gemini' && aiProviderModal.providerType !== 'foodora' && (
                 <>
                   <div className="sm:col-span-2">
                     <label className="block font-semibold text-neutral-700 mb-1">
@@ -6397,24 +6486,26 @@ export function AdminDashboard({
                       onChange={(e) =>
                         setAiProviderModal({ ...aiProviderModal, apiBaseUrl: e.target.value })
                       }
-                      placeholder="https://api.openai.com/v1"
+                      placeholder="https://openrouter.ai/api/v1"
                       className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
                     />
                   </div>
-                  <div className="sm:col-span-2">
-                    <label className="block font-semibold text-neutral-700 mb-1">
-                      API Key (Secret)
-                    </label>
-                    <input
-                      type="password"
-                      value={aiProviderModal.apiKey}
-                      onChange={(e) =>
-                        setAiProviderModal({ ...aiProviderModal, apiKey: e.target.value })
-                      }
-                      placeholder="sk-... (leave •••• unchanged to keep current key)"
-                      className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
-                    />
-                  </div>
+                  {aiProviderModal.providerType !== 'pollinations' && (
+                    <div className="sm:col-span-2">
+                      <label className="block font-semibold text-neutral-700 mb-1">
+                        API Key (Secret)
+                      </label>
+                      <input
+                        type="password"
+                        value={aiProviderModal.apiKey}
+                        onChange={(e) =>
+                          setAiProviderModal({ ...aiProviderModal, apiKey: e.target.value })
+                        }
+                        placeholder="sk-or-v1-... or sk-... (leave •••• unchanged to keep current key)"
+                        className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono-nums"
+                      />
+                    </div>
+                  )}
                 </>
               )}
             </div>

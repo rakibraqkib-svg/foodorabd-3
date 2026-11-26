@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import JSZip from 'jszip';
-import { and, asc, desc, eq, inArray, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, ne, notInArray, or, sql } from 'drizzle-orm';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { z } from 'zod';
 import { db, hasDatabaseConfig } from './src/db/index.ts';
@@ -67,18 +67,24 @@ import {
   ADMIN_PIN_DEFAULT_EMAIL,
   type AiHelpLangPreference,
   buildAiHelpSystemInstruction,
+  buildBranchRestaurantNames,
+  buildOpenRouterChatPayload,
   buildRestaurantUnavailableMessage,
   buildRobotsTxt,
   buildSitemapXml,
   calculateCartItemUnitPrice,
   calculateOrderFinancials,
   canActorModifyUserAccount,
+  canOwnerOpenNewRestaurant,
   canTransitionOrderStatus,
   DeliveryMode,
   doesEmailMatchOrder,
   estimateDeliveryFeeAndEta,
+  parseUploadedImageDataUrl,
   evaluateCoupon,
+  generateFoodoraOwnAiReply,
   haversineDistanceKm,
+  isBicycleVehicleType,
   isProtectedSuperAdminEmail,
   isValidExternalAiBaseUrl,
   normalizeAiProviderCode,
@@ -95,6 +101,7 @@ import {
   validateRiderJobPayload,
   normalizeVariationsList,
   normalizeAddonsList,
+  sanitizeRiderProfileUpdate,
   validateVendorAddRiderPayload,
 } from './src/lib/marketplace-logic.ts';
 import { mergeStorefrontConfig } from './src/lib/storefront-config.ts';
@@ -2357,13 +2364,23 @@ app.post('/api/restaurants/register', requireAuth, async (req: AuthRequest, res)
   }
 
   try {
+    const isOwnerAdmin = req.user!.role === 'admin' || req.user!.role === 'super_admin';
+    const existingOwned = await db
+      .select({ id: restaurants.id })
+      .from(restaurants)
+      .where(eq(restaurants.ownerUid, req.user!.uid))
+      .limit(1);
+
+    const limitCheck = canOwnerOpenNewRestaurant(existingOwned.length, req.user!.role);
+    if (!limitCheck.allowed) {
+      return res.status(400).json({ error: limitCheck.error });
+    }
+
     const slugBase = parsed.data.name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)/g, '');
     const slug = `${slugBase}-${Date.now().toString(36).slice(-4)}`;
-
-    const isOwnerAdmin = req.user!.role === 'admin' || req.user!.role === 'super_admin';
 
     const inserted = await db
       .insert(restaurants)
@@ -2417,6 +2434,167 @@ app.post('/api/restaurants/register', requireAuth, async (req: AuthRequest, res)
     res.status(500).json({ error: error.message || 'Failed to register restaurant' });
   }
 });
+
+app.post(
+  '/api/vendor/branches',
+  requireAuth,
+  requireRole(['restaurant_owner', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      primaryRestaurantId: z.number().int().positive().optional(),
+      branchName: z.string().trim().min(2).max(60),
+      branchNameBn: z.string().trim().max(60).optional().default(''),
+      area: z.string().trim().min(2).max(80),
+      address: z.string().trim().min(5).max(200),
+      lat: z.number().min(-90).max(90),
+      lng: z.number().min(-180).max(180),
+      phone: z.string().trim().min(6).max(30),
+      deliveryFee: z.number().int().min(0).max(300).default(49),
+      minOrder: z.number().int().min(50).max(5000).default(150),
+      deliveryMode: z.enum(['platform', 'restaurant', 'third_party']).default('platform'),
+      copyMenu: z.boolean().default(true),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Please complete all branch fields.' });
+    }
+
+    try {
+      const isSuperAdmin = req.user!.role === 'admin' || req.user!.role === 'super_admin';
+      const primaryRows =
+        isSuperAdmin && parsed.data.primaryRestaurantId
+          ? await db
+              .select()
+              .from(restaurants)
+              .where(eq(restaurants.id, parsed.data.primaryRestaurantId))
+              .limit(1)
+          : parsed.data.primaryRestaurantId
+          ? await db
+              .select()
+              .from(restaurants)
+              .where(
+                and(
+                  eq(restaurants.id, parsed.data.primaryRestaurantId),
+                  eq(restaurants.ownerUid, req.user!.uid)
+                )
+              )
+              .limit(1)
+          : await db
+              .select()
+              .from(restaurants)
+              .where(eq(restaurants.ownerUid, req.user!.uid))
+              .orderBy(asc(restaurants.id))
+              .limit(1);
+
+      const primary = primaryRows[0];
+      if (!primary) {
+        return res.status(404).json({
+          error: 'Please open your primary restaurant first before adding a branch.',
+        });
+      }
+
+      const branchNames = buildBranchRestaurantNames(
+        primary.name,
+        primary.nameBn,
+        parsed.data.branchName,
+        parsed.data.branchNameBn
+      );
+
+      const slugBase = branchNames.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '');
+      const slug = `${slugBase}-${Date.now().toString(36).slice(-4)}`;
+
+      const branchStatus =
+        primary.status === 'approved' || isSuperAdmin ? 'approved' : 'pending';
+
+      const inserted = await db
+        .insert(restaurants)
+        .values({
+          ownerUid: primary.ownerUid,
+          name: branchNames.name,
+          nameBn: branchNames.nameBn,
+          slug,
+          description: primary.description,
+          cuisine: primary.cuisine,
+          area: parsed.data.area,
+          address: parsed.data.address,
+          lat: parsed.data.lat,
+          lng: parsed.data.lng,
+          phone: parsed.data.phone,
+          email: primary.email,
+          logoUrl: primary.logoUrl || '',
+          coverUrl: primary.coverUrl || IMG_BANGLA,
+          tradeLicense: primary.tradeLicense || '',
+          nidNumber: primary.nidNumber || '',
+          payoutMethod: primary.payoutMethod,
+          payoutAccount: primary.payoutAccount,
+          deliveryFee: parsed.data.deliveryFee,
+          minOrder: parsed.data.minOrder,
+          deliveryMode: parsed.data.deliveryMode,
+          commissionRate: primary.commissionRate,
+          isNew: true,
+          status: branchStatus,
+        })
+        .returning();
+
+      const createdBranch = inserted[0];
+      let copiedItemsCount = 0;
+
+      if (parsed.data.copyMenu) {
+        const sourceItems = await db
+          .select()
+          .from(foodItems)
+          .where(eq(foodItems.restaurantId, primary.id));
+
+        if (sourceItems.length > 0) {
+          await db.insert(foodItems).values(
+            sourceItems.map((it) => ({
+              restaurantId: createdBranch.id,
+              category: it.category,
+              name: it.name,
+              nameBn: it.nameBn,
+              description: it.description,
+              imageUrl: it.imageUrl,
+              price: it.price,
+              discountPrice: it.discountPrice,
+              variationsJson: it.variationsJson,
+              addonsJson: it.addonsJson,
+              inStock: it.inStock,
+              isAvailable: it.isAvailable,
+              isPopular: it.isPopular,
+              isVisibleOnStorefront: it.isVisibleOnStorefront,
+            }))
+          );
+          copiedItemsCount = sourceItems.length;
+        }
+      }
+
+      await db.insert(auditLogs).values({
+        actorUid: req.user!.uid,
+        action: 'vendor_added_branch',
+        targetType: 'restaurant',
+        targetId: String(createdBranch.id),
+        details: `Added branch "${createdBranch.name}" (${createdBranch.area}) under primary restaurant #${primary.id} (${copiedItemsCount} menu items copied)`,
+      });
+
+      await db.insert(notifications).values({
+        recipientUid: 'demo-admin-uid',
+        roleTarget: 'super_admin',
+        title: 'New Restaurant Branch Added',
+        message: `${createdBranch.name} (${createdBranch.area}) was added as a branch.`,
+        type: 'system',
+      });
+
+      res.status(201).json({ branch: createdBranch, copiedItemsCount });
+    } catch (error: any) {
+      console.error('Add branch error:', error);
+      res.status(500).json({ error: error.message || 'Failed to add restaurant branch' });
+    }
+  }
+);
 
 app.get(
   '/api/vendor/workspace',
@@ -4450,13 +4628,18 @@ app.post('/api/riders/apply', async (req, res) => {
     password: z.string().min(6).max(128).optional().or(z.literal('')),
     vehicleType: z.string().trim().min(2).max(40).default('Motorbike'),
     zone: z.string().trim().min(2).max(120),
-    nidNumber: z.string().trim().min(4).max(50),
+    nidNumber: z.string().trim().max(50).optional().default(''),
     lat: z.number().min(-90).max(90).optional(),
     lng: z.number().min(-180).max(180).optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'Please complete all rider job application fields.' });
+  }
+  if (!isBicycleVehicleType(parsed.data.vehicleType) && parsed.data.nidNumber.length < 4) {
+    return res.status(400).json({
+      error: 'Please enter your NID or Driving License number (or select Bicycle if riding without a license).',
+    });
   }
 
   const emailLower = parsed.data.email.trim().toLowerCase();
@@ -4597,12 +4780,17 @@ app.post('/api/riders/register', requireAuth, async (req: AuthRequest, res) => {
     email: z.string().trim().email(),
     vehicleType: z.string().trim().min(2).max(40),
     zone: z.string().trim().min(2).max(120),
-    nidNumber: z.string().trim().min(4).max(50),
+    nidNumber: z.string().trim().max(50).optional().default(''),
     lat: z.number().min(-90).max(90).optional(),
     lng: z.number().min(-180).max(180).optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid rider registration data' });
+  if (!isBicycleVehicleType(parsed.data.vehicleType) && parsed.data.nidNumber.length < 4) {
+    return res.status(400).json({
+      error: 'Please enter your NID or Driving License number (Bicycle riders may leave this optional).',
+    });
+  }
 
   try {
     const startLat = Number.isFinite(parsed.data.lat) ? Math.round((parsed.data.lat as number) * 1e6) / 1e6 : 23.7949;
@@ -4746,6 +4934,103 @@ app.patch(
       res.json({ rider: updated[0] });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+app.patch(
+  '/api/rider/profile',
+  requireAuth,
+  requireRole(['rider', 'admin', 'super_admin']),
+  async (req: AuthRequest, res) => {
+    const check = sanitizeRiderProfileUpdate({
+      fullName: req.body?.fullName,
+      phone: req.body?.phone,
+      vehicleType: req.body?.vehicleType,
+      zone: req.body?.zone,
+      nidNumber: req.body?.nidNumber,
+      isAvailable: req.body?.isAvailable,
+      avatarUrl: req.body?.avatarUrl,
+    });
+    if (!check.valid) {
+      return res.status(400).json({ error: check.error });
+    }
+
+    try {
+      const riderUid =
+        req.user!.role === 'super_admin' || req.user!.role === 'admin'
+          ? 'demo-rider-uid'
+          : req.user!.uid;
+      const existing = await db.select().from(riders).where(eq(riders.uid, riderUid)).limit(1);
+      if (existing.length === 0) {
+        return res.status(404).json({ error: 'Rider profile not found.' });
+      }
+      const cur = existing[0];
+      const d = check.data;
+
+      const updatedRows = await db
+        .update(riders)
+        .set({
+          fullName: d.fullName,
+          phone: d.phone,
+          vehicleType: d.vehicleType,
+          zone: d.zone,
+          nidNumber: d.nidNumber,
+          isAvailable: d.isAvailable,
+        })
+        .where(eq(riders.uid, riderUid))
+        .returning();
+
+      const updatedUserRows = await db
+        .update(users)
+        .set({
+          fullName: d.fullName,
+          phone: d.phone,
+          avatarUrl: d.avatarUrl,
+          updatedAt: new Date(),
+        })
+        .where(eq(users.uid, riderUid))
+        .returning();
+
+      if (d.fullName !== cur.fullName) {
+        await db
+          .update(orders)
+          .set({ riderName: d.fullName })
+          .where(
+            and(
+              eq(orders.riderUid, riderUid),
+              notInArray(orders.status, ['delivered', 'cancelled'])
+            )
+          );
+      }
+
+      let restaurantName: string | null = null;
+      if (updatedRows[0].restaurantId) {
+        const restRows = await db
+          .select({ name: restaurants.name })
+          .from(restaurants)
+          .where(eq(restaurants.id, updatedRows[0].restaurantId))
+          .limit(1);
+        restaurantName = restRows[0]?.name || null;
+      }
+
+      await db.insert(auditLogs).values({
+        actorUid: req.user!.uid,
+        action: 'rider_updated_profile',
+        targetType: 'rider',
+        targetId: String(updatedRows[0].id),
+        details: `${d.fullName} updated rider profile (${d.vehicleType}, ${d.zone}, available=${d.isAvailable})`,
+      });
+
+      res.json({
+        rider: {
+          ...updatedRows[0],
+          avatarUrl: updatedUserRows[0]?.avatarUrl ?? d.avatarUrl ?? '',
+          restaurantName,
+        },
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to update rider profile' });
     }
   }
 );
@@ -4911,6 +5196,10 @@ app.patch(
     const orderId = Number(req.params.id);
     const schema = z.object({
       status: z.enum(['picked_up', 'on_the_way', 'delivered']),
+      note: z.string().trim().max(300).optional(),
+      pickupRating: z.enum(['good', 'bad']).optional(),
+      proofPhotoUrl: z.string().trim().max(2000000).optional(),
+      collectedCashAmount: z.number().nonnegative().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!Number.isInteger(orderId) || !parsed.success) {
@@ -4926,7 +5215,14 @@ app.patch(
       if (!isAdmin && order.riderUid !== req.user!.uid) {
         return res.status(403).json({ error: 'Forbidden: Order is assigned to another rider' });
       }
-      if (!canTransitionOrderStatus(order.status as OrderStatus, parsed.data.status)) {
+      const allowAssignedPickup =
+        parsed.data.status === 'picked_up' &&
+        Boolean(order.riderUid) &&
+        ['confirmed', 'accepted', 'preparing', 'ready', 'rider_assigned'].includes(order.status);
+      if (
+        !allowAssignedPickup &&
+        !canTransitionOrderStatus(order.status as OrderStatus, parsed.data.status)
+      ) {
         return res
           .status(400)
           .json({ error: `Cannot change order from ${order.status} to ${parsed.data.status}` });
@@ -4945,10 +5241,20 @@ app.patch(
         .where(eq(orders.id, order.id))
         .returning();
 
+      const noteSegments = [
+        `Rider updated status to ${parsed.data.status.replace(/_/g, ' ')}`,
+        parsed.data.pickupRating ? `pickup experience: ${parsed.data.pickupRating}` : '',
+        typeof parsed.data.collectedCashAmount === 'number'
+          ? `cash collected: ৳${parsed.data.collectedCashAmount}`
+          : '',
+        parsed.data.proofPhotoUrl ? 'drop-off proof photo attached' : '',
+        parsed.data.note ? parsed.data.note : '',
+      ].filter(Boolean);
+
       await db.insert(orderStatusHistory).values({
         orderId: order.id,
         status: parsed.data.status,
-        note: `Rider updated status to ${parsed.data.status.replace(/_/g, ' ')}`,
+        note: noteSegments.join(' · ').slice(0, 480),
         actorUid: req.user!.uid,
       });
 
@@ -5101,18 +5407,15 @@ app.post(
       return res.status(400).json({ error: 'Invalid image upload payload' });
     }
 
-    const match = /^data:image\/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=]+)$/i.exec(
-      parsed.data.dataUrl.trim()
-    );
-    if (!match) {
-      return res.status(400).json({ error: 'Only PNG, JPG, WEBP, or GIF images are supported' });
+    const parsedImg = parseUploadedImageDataUrl(parsed.data.dataUrl, parsed.data.filename);
+    if (!parsedImg.valid) {
+      return res.status(400).json({ error: parsedImg.reason });
     }
-
     try {
-      const ext = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
-      const buffer = Buffer.from(match[2], 'base64');
-      if (buffer.byteLength > 5 * 1024 * 1024) {
-        return res.status(400).json({ error: 'Image must be 5 MB or smaller' });
+      const ext = parsedImg.ext;
+      const buffer = Buffer.from(parsedImg.base64Data, 'base64');
+      if (buffer.byteLength > 8 * 1024 * 1024) {
+        return res.status(400).json({ error: 'Image must be 8 MB or smaller' });
       }
       const safeStem = (parsed.data.filename || 'food')
         .replace(/\.[^.]+$/, '')
@@ -5121,7 +5424,9 @@ app.post(
         .slice(0, 32) || 'food';
       const outName = `${safeStem}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
       if (process.env.VERCEL) {
-        return res.status(201).json({ imageUrl: parsed.data.dataUrl.trim() });
+        return res.status(201).json({
+          imageUrl: `data:${parsedImg.mimeType};base64,${parsedImg.base64Data}`,
+        });
       }
       const outPath = path.join(UPLOADS_DIR, outName);
       await fs.promises.writeFile(outPath, buffer);
@@ -6915,10 +7220,68 @@ app.post('/api/notifications/:id/read', requireAuth, async (req: AuthRequest, re
   res.json({ ok: true });
 });
 
-// ---------- Bilingual AI Help Assistant (Multi-Provider: Gemini, ChatGPT/OpenAI, Groq, DeepSeek, Claude, Custom) ----------
+// ---------- Bilingual AI Help Assistant (Multi-Provider: Foodora Own AI, OpenRouter Gemma 4, Gemini, ChatGPT, Groq, DeepSeek, Claude, Custom) ----------
+
+function getGeminiApiKey(): string {
+  return (
+    process.env.GEMINI_API_KEY ||
+    process.env.AI_STUDIO_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+    ''
+  ).trim();
+}
+
+function getProviderEnvApiKey(providerType: string): string {
+  switch (providerType) {
+    case 'openrouter':
+      return (process.env.OPENROUTER_API_KEY || '').trim();
+    case 'openai':
+      return (process.env.OPENAI_API_KEY || '').trim();
+    case 'groq':
+      return (process.env.GROQ_API_KEY || '').trim();
+    case 'deepseek':
+      return (process.env.DEEPSEEK_API_KEY || '').trim();
+    case 'anthropic':
+      return (process.env.ANTHROPIC_API_KEY || '').trim();
+    case 'mistral':
+      return (process.env.MISTRAL_API_KEY || '').trim();
+    case 'xai':
+      return (process.env.XAI_API_KEY || '').trim();
+    case 'together':
+      return (process.env.TOGETHER_API_KEY || '').trim();
+    case 'cerebras':
+      return (process.env.CEREBRAS_API_KEY || '').trim();
+    case 'perplexity':
+      return (process.env.PERPLEXITY_API_KEY || '').trim();
+    case 'cohere':
+      return (process.env.COHERE_API_KEY || '').trim();
+    case 'huggingface':
+      return (process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN || '').trim();
+    default:
+      return '';
+  }
+}
+
+function getAiEnvFlags() {
+  return {
+    hasGeminiKey: Boolean(getGeminiApiKey()),
+    hasOpenRouterKey: Boolean(getProviderEnvApiKey('openrouter')),
+    hasOpenAIKey: Boolean(getProviderEnvApiKey('openai')),
+    hasGroqKey: Boolean(getProviderEnvApiKey('groq')),
+    hasDeepSeekKey: Boolean(getProviderEnvApiKey('deepseek')),
+    hasAnthropicKey: Boolean(getProviderEnvApiKey('anthropic')),
+    hasMistralKey: Boolean(getProviderEnvApiKey('mistral')),
+    hasXaiKey: Boolean(getProviderEnvApiKey('xai')),
+    hasTogetherKey: Boolean(getProviderEnvApiKey('together')),
+    hasCerebrasKey: Boolean(getProviderEnvApiKey('cerebras')),
+    hasPerplexityKey: Boolean(getProviderEnvApiKey('perplexity')),
+    hasCohereKey: Boolean(getProviderEnvApiKey('cohere')),
+    hasHuggingFaceKey: Boolean(getProviderEnvApiKey('huggingface')),
+  };
+}
 
 function getGeminiHelpClient(): GoogleGenAI | null {
-  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+  const apiKey = getGeminiApiKey();
   if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
@@ -6939,7 +7302,8 @@ const aiHelpRequestSchema = z.object({
     .array(
       z.object({
         role: z.enum(['user', 'model']),
-        text: z.string().trim().min(1).max(1500),
+        text: z.string().trim().min(1).max(3000),
+        reasoning_details: z.unknown().optional(),
       })
     )
     .optional()
@@ -7003,11 +7367,71 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 function resolveDefaultBaseUrlForAiType(providerType: string): string {
+  if (providerType === 'pollinations') return 'https://text.pollinations.ai';
+  if (providerType === 'openrouter') return 'https://openrouter.ai/api/v1';
   if (providerType === 'openai') return 'https://api.openai.com/v1';
   if (providerType === 'groq') return 'https://api.groq.com/openai/v1';
   if (providerType === 'deepseek') return 'https://api.deepseek.com/v1';
   if (providerType === 'anthropic') return 'https://api.anthropic.com';
+  if (providerType === 'mistral') return 'https://api.mistral.ai/v1';
+  if (providerType === 'xai') return 'https://api.x.ai/v1';
+  if (providerType === 'together') return 'https://api.together.xyz/v1';
+  if (providerType === 'cerebras') return 'https://api.cerebras.ai/v1';
+  if (providerType === 'perplexity') return 'https://api.perplexity.ai';
+  if (providerType === 'cohere') return 'https://api.cohere.com/compatibility/v1';
+  if (providerType === 'huggingface') return 'https://router.huggingface.co/v1';
   return '';
+}
+
+async function runSingleOpenRouterRequest(options: {
+  baseUrl: string;
+  apiKey: string;
+  refererOrigin?: string;
+  payload: Record<string, unknown>;
+  timeoutMs: number;
+}): Promise<{ reply: string; reasoningDetails?: unknown }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  try {
+    const res = await fetch(`${options.baseUrl}/chat/completions`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${options.apiKey}`,
+        'HTTP-Referer': options.refererOrigin || 'https://foodorabd-3-nine.vercel.app',
+        'X-Title': 'Foodora BD',
+      },
+      body: JSON.stringify(options.payload),
+    });
+    const json = (await res.json().catch(() => ({}))) as {
+      choices?: Array<{
+        message?: {
+          content?: string;
+          reasoning_details?: unknown;
+        };
+      }>;
+      error?: { message?: string };
+    };
+    if (!res.ok) {
+      const err = new Error(json?.error?.message || `OpenRouter API failed (${res.status})`);
+      (err as Error & { status?: number }).status = res.status;
+      throw err;
+    }
+    const msg = json?.choices?.[0]?.message;
+    const text = (msg?.content || '').trim();
+    if (!text) {
+      const err = new Error('OpenRouter returned an empty response.');
+      (err as Error & { status?: number }).status = 502;
+      throw err;
+    }
+    return {
+      reply: text,
+      reasoningDetails: msg?.reasoning_details,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function callExternalAiProvider(options: {
@@ -7016,9 +7440,10 @@ async function callExternalAiProvider(options: {
   apiBaseUrl: string;
   apiKey: string;
   systemInstruction: string;
-  history: Array<{ role: 'user' | 'model'; text: string }>;
+  history: Array<{ role: 'user' | 'model'; text: string; reasoning_details?: unknown }>;
   message: string;
-}): Promise<string> {
+  refererOrigin?: string;
+}): Promise<{ reply: string; reasoningDetails?: unknown; actualModel?: string }> {
   const baseUrl = (options.apiBaseUrl || resolveDefaultBaseUrlForAiType(options.providerType))
     .trim()
     .replace(/\/+$/, '');
@@ -7028,8 +7453,96 @@ async function callExternalAiProvider(options: {
     throw err;
   }
 
+  if (options.providerType === 'pollinations') {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 18000);
+    try {
+      const endpoint = baseUrl.endsWith('/openai') ? baseUrl : `${baseUrl}/openai`;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: options.model || 'openai-fast',
+          messages: [
+            { role: 'system', content: options.systemInstruction },
+            ...options.history.slice(-6).map((h) => ({
+              role: h.role === 'model' ? 'assistant' : 'user',
+              content: h.text,
+            })),
+            { role: 'user', content: options.message },
+          ],
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as {
+        choices?: Array<{ message?: { content?: string } }>;
+        error?: { message?: string };
+      };
+      if (!res.ok) {
+        const err = new Error(json?.error?.message || `Pollinations AI failed (${res.status})`);
+        (err as Error & { status?: number }).status = res.status;
+        throw err;
+      }
+      const text = (json?.choices?.[0]?.message?.content || '').trim();
+      if (!text) throw new Error('Pollinations AI returned an empty response.');
+      return { reply: text, actualModel: options.model || 'openai-fast' };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  if (options.providerType === 'openrouter') {
+    const primaryModel = (options.model || '').trim() || 'google/gemma-4-31b-it:free';
+    const attempts: Array<{ model: string; strictProvider: boolean; enableReasoning: boolean }> = [
+      { model: primaryModel, strictProvider: true, enableReasoning: true },
+      { model: primaryModel, strictProvider: false, enableReasoning: false },
+    ];
+    for (const fallbackModel of [
+      'google/gemma-3-27b-it:free',
+      'meta-llama/llama-3.3-70b-instruct:free',
+      'openrouter/free',
+    ]) {
+      if (fallbackModel !== primaryModel) {
+        attempts.push({ model: fallbackModel, strictProvider: false, enableReasoning: false });
+      }
+    }
+
+    let lastErr: unknown = null;
+    for (const attempt of attempts) {
+      try {
+        const payload = buildOpenRouterChatPayload({
+          model: attempt.model,
+          systemInstruction: options.systemInstruction,
+          history: options.history,
+          message: options.message,
+          strictProvider: attempt.strictProvider,
+          enableReasoning: attempt.enableReasoning,
+        });
+        const out = await runSingleOpenRouterRequest({
+          baseUrl,
+          apiKey: options.apiKey,
+          refererOrigin: options.refererOrigin,
+          payload,
+          timeoutMs: 18000,
+        });
+        return { ...out, actualModel: attempt.model };
+      } catch (err) {
+        lastErr = err;
+        const status = (err as { status?: number })?.status;
+        // Stop retrying if the OpenRouter API key itself is rejected (401/403)
+        if (status === 401 || status === 403) {
+          throw err;
+        }
+      }
+    }
+    throw lastErr || new Error('OpenRouter API failed.');
+  }
+
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 14000);
+  const timeoutMs = 15000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     if (options.providerType === 'anthropic') {
       const res = await fetch(`${baseUrl}/v1/messages`, {
@@ -7064,7 +7577,7 @@ async function callExternalAiProvider(options: {
       }
       const text = (json?.content?.[0]?.text || '').trim();
       if (!text) throw new Error('Anthropic returned an empty response.');
-      return text;
+      return { reply: text, actualModel: options.model };
     }
 
     const res = await fetch(`${baseUrl}/chat/completions`, {
@@ -7099,7 +7612,7 @@ async function callExternalAiProvider(options: {
     }
     const text = (json?.choices?.[0]?.message?.content || '').trim();
     if (!text) throw new Error('AI API returned an empty response.');
-    return text;
+    return { reply: text, actualModel: options.model };
   } finally {
     clearTimeout(timer);
   }
@@ -7107,11 +7620,11 @@ async function callExternalAiProvider(options: {
 
 app.get('/api/ai/providers', async (_req, res) => {
   try {
-    const hasGeminiKey = Boolean((process.env.GEMINI_API_KEY || '').trim());
+    const envFlags = getAiEnvFlags();
     const rows = await ensureDefaultAiProviders();
     res.json({
       providers: rows
-        .map((r) => toPublicAiProviderView(r, hasGeminiKey))
+        .map((r) => toPublicAiProviderView(r, envFlags))
         .filter((p) => p.isActive),
     });
   } catch (error: any) {
@@ -7125,10 +7638,10 @@ app.get(
   requireRole(['admin', 'super_admin']),
   async (_req, res) => {
     try {
-      const hasGeminiKey = Boolean((process.env.GEMINI_API_KEY || '').trim());
+      const envFlags = getAiEnvFlags();
       const rows = await ensureDefaultAiProviders();
       res.json({
-        aiProviders: rows.map((r) => toAdminAiProviderView(r, hasGeminiKey)),
+        aiProviders: rows.map((r) => toAdminAiProviderView(r, envFlags)),
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to load admin AI providers' });
@@ -7144,7 +7657,24 @@ app.put(
     const schema = z.object({
       code: z.string().min(2).max(32),
       name: z.string().trim().min(2).max(80),
-      providerType: z.enum(['gemini', 'openai', 'groq', 'deepseek', 'anthropic', 'custom_openai']),
+      providerType: z.enum([
+        'foodora',
+        'pollinations',
+        'gemini',
+        'openrouter',
+        'openai',
+        'groq',
+        'deepseek',
+        'anthropic',
+        'mistral',
+        'xai',
+        'together',
+        'cerebras',
+        'perplexity',
+        'cohere',
+        'huggingface',
+        'custom_openai',
+      ]),
       model: z.string().trim().min(2).max(100),
       apiBaseUrl: z.string().trim().max(240).optional().default(''),
       apiKey: z.string().max(400).optional(),
@@ -7164,12 +7694,15 @@ app.put(
       return res.status(400).json({ error: 'Provider code must be at least 2 characters.' });
     }
 
-    const resolvedBaseUrl =
-      parsed.data.providerType === 'gemini'
-        ? ''
-        : parsed.data.apiBaseUrl || resolveDefaultBaseUrlForAiType(parsed.data.providerType);
+    const isBuiltinNoExternalUrl =
+      parsed.data.providerType === 'gemini' || parsed.data.providerType === 'foodora';
+    const isKeylessProvider =
+      isBuiltinNoExternalUrl || parsed.data.providerType === 'pollinations';
+    const resolvedBaseUrl = isBuiltinNoExternalUrl
+      ? ''
+      : parsed.data.apiBaseUrl || resolveDefaultBaseUrlForAiType(parsed.data.providerType);
 
-    if (parsed.data.providerType !== 'gemini' && resolvedBaseUrl) {
+    if (!isBuiltinNoExternalUrl && resolvedBaseUrl) {
       if (!isValidExternalAiBaseUrl(resolvedBaseUrl)) {
         return res.status(400).json({
           error: 'API Base URL must be a valid public HTTPS endpoint.',
@@ -7187,7 +7720,7 @@ app.put(
       const cur = existing[0];
 
       let nextApiKey = '';
-      if (parsed.data.providerType !== 'gemini') {
+      if (!isKeylessProvider) {
         const incoming = parsed.data.apiKey;
         if (incoming === undefined) {
           nextApiKey = cur?.apiKey || '';
@@ -7237,9 +7770,8 @@ app.put(
         }),
       });
 
-      const hasGeminiKey = Boolean((process.env.GEMINI_API_KEY || '').trim());
       res.json({
-        aiProvider: toAdminAiProviderView(saved[0], hasGeminiKey),
+        aiProvider: toAdminAiProviderView(saved[0], getAiEnvFlags()),
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to save AI provider' });
@@ -7260,6 +7792,53 @@ app.post(
       const rows = await db.select().from(aiProviders).where(eq(aiProviders.code, code)).limit(1);
       if (rows.length === 0) return res.status(404).json({ error: 'AI provider not found' });
       const row = rows[0];
+
+      if (row.providerType === 'foodora') {
+        const ai = getGeminiHelpClient();
+        if (ai) {
+          try {
+            const resp = await withTimeout(
+              ai.models.generateContent({
+                model: 'gemini-4-hydrogen',
+                contents: [{ role: 'user', parts: [{ text: 'Reply strictly with: OK' }] }],
+              }),
+              7000,
+              'gemini-4-hydrogen'
+            );
+            if ((resp.text || '').trim()) {
+              return res.json({
+                ok: true,
+                message: 'Foodora Own AI connected cleanly (Gemini 4 + Built-in Knowledge Engine).',
+                model: row.model,
+              });
+            }
+          } catch {
+            // fallback to built-in check below
+          }
+        }
+        return res.json({
+          ok: true,
+          message: 'Foodora Own AI built-in bilingual assistant is online and ready.',
+          model: row.model,
+        });
+      }
+
+      if (row.providerType === 'pollinations') {
+        const { reply, actualModel } = await callExternalAiProvider({
+          providerType: 'pollinations',
+          model: row.model || 'openai-fast',
+          apiBaseUrl: row.apiBaseUrl || 'https://text.pollinations.ai',
+          apiKey: '',
+          systemInstruction: 'Reply strictly with OK.',
+          history: [],
+          message: 'Reply strictly with: OK',
+        });
+        return res.json({
+          ok: Boolean(reply),
+          message: `Connected cleanly to Pollinations Free AI (${actualModel || row.model}).`,
+          model: actualModel || row.model,
+        });
+      }
 
       if (row.providerType === 'gemini') {
         const ai = getGeminiHelpClient();
@@ -7286,7 +7865,10 @@ app.post(
         });
       }
 
-      if (!row.apiKey || !row.apiKey.trim()) {
+      const resolvedKey =
+        (row.apiKey || '').trim() || getProviderEnvApiKey(row.providerType);
+
+      if (!resolvedKey) {
         return res.json({
           ok: false,
           message: `No API key saved for ${row.name}. Add an API key first.`,
@@ -7294,20 +7876,21 @@ app.post(
         });
       }
 
-      const reply = await callExternalAiProvider({
+      const { reply, actualModel } = await callExternalAiProvider({
         providerType: row.providerType,
         model: row.model,
         apiBaseUrl: row.apiBaseUrl || '',
-        apiKey: row.apiKey.trim(),
+        apiKey: resolvedKey,
         systemInstruction: 'You are a concise health check responder.',
         history: [],
         message: 'Reply strictly with: OK',
+        refererOrigin: getRequestOrigin(req),
       });
 
       return res.json({
         ok: Boolean(reply),
-        message: `Connected cleanly to ${row.name} (${row.model}).`,
-        model: row.model,
+        message: `Connected cleanly to ${row.name} (${actualModel || row.model}).`,
+        model: actualModel || row.model,
       });
     } catch (error: unknown) {
       const { message } = extractReadableGeminiError(error);
@@ -7326,9 +7909,9 @@ app.delete(
   async (req: AuthRequest, res) => {
     const code = normalizeAiProviderCode(String(req.params.code || ''));
     if (!code) return res.status(400).json({ error: 'Invalid provider code' });
-    if (code === 'gemini') {
+    if (code === 'gemini' || code === 'foodora') {
       return res.status(400).json({
-        error: 'Built-in Google Gemini provider cannot be deleted. Disable it instead.',
+        error: 'Built-in Foodora AI and Google Gemini providers cannot be deleted. Disable instead.',
       });
     }
 
@@ -7347,6 +7930,77 @@ app.delete(
     }
   }
 );
+
+async function runGeminiHelpCompletion(params: {
+  preferredModel: string;
+  systemInstruction: string;
+  history: Array<{ role: 'user' | 'model'; text: string }>;
+  message: string;
+}): Promise<{ reply: string; model: string }> {
+  const ai = getGeminiHelpClient();
+  if (!ai) {
+    const missingErr = new Error('GEMINI_API_KEY is not configured');
+    (missingErr as Error & { status?: number }).status = 503;
+    throw missingErr;
+  }
+
+  const contents = [
+    ...params.history.slice(-8).map((item) => ({
+      role: item.role,
+      parts: [{ text: item.text }],
+    })),
+    {
+      role: 'user' as const,
+      parts: [{ text: params.message }],
+    },
+  ];
+
+  const candidateModels = Array.from(
+    new Set(
+      [params.preferredModel, 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'].filter(
+        (m) => Boolean(m && m.trim() && m !== 'foodora-bd-assistant' && !m.includes('gemini-2.5'))
+      )
+    )
+  );
+
+  let lastError: unknown = null;
+  for (let i = 0; i < candidateModels.length; i += 1) {
+    const modelName = candidateModels[i];
+    try {
+      const config: {
+        systemInstruction: string;
+        thinkingConfig?: { thinkingLevel: ThinkingLevel };
+      } = {
+        systemInstruction: params.systemInstruction,
+      };
+      if (modelName.startsWith('gemini-4')) {
+        config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      }
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents,
+          config,
+        }),
+        9000,
+        modelName
+      );
+      const text = (response.text || '').trim();
+      if (!text) {
+        const emptyErr = new Error('AI Help returned an empty response.');
+        (emptyErr as Error & { status?: number }).status = 502;
+        throw emptyErr;
+      }
+      return { reply: text, model: modelName };
+    } catch (err) {
+      lastError = err;
+      if (i < candidateModels.length - 1) {
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+  }
+  throw lastError || new Error('Gemini API unavailable');
+}
 
 app.post('/api/ai/help', optionalAuth, async (req: AuthRequest, res) => {
   try {
@@ -7368,121 +8022,168 @@ app.post('/api/ai/help', optionalAuth, async (req: AuthRequest, res) => {
 
     const allProviders = await ensureDefaultAiProviders();
     const activeProviders = allProviders.filter((p) => p.isActive);
-    const hasGeminiKey = Boolean((process.env.GEMINI_API_KEY || '').trim());
+    const envFlags = getAiEnvFlags();
 
     const normalizedRequestedCode = providerCode ? normalizeAiProviderCode(providerCode) : '';
     const chosenProvider =
       (normalizedRequestedCode
         ? activeProviders.find((p) => normalizeAiProviderCode(p.code) === normalizedRequestedCode)
         : undefined) ||
-      activeProviders.find((p) => p.isDefault && toPublicAiProviderView(p, hasGeminiKey).isConfigured) ||
-      activeProviders.find((p) => toPublicAiProviderView(p, hasGeminiKey).isConfigured) ||
-      activeProviders.find((p) => p.providerType === 'gemini') ||
+      activeProviders.find((p) => p.isDefault && toPublicAiProviderView(p, envFlags).isConfigured) ||
+      activeProviders.find((p) => toPublicAiProviderView(p, envFlags).isConfigured) ||
+      activeProviders.find((p) => p.providerType === 'foodora') ||
+      activeProviders.find((p) => p.providerType === 'pollinations') ||
       allProviders[0];
 
-    if (chosenProvider && chosenProvider.providerType !== 'gemini') {
-      if (!chosenProvider.apiKey || !chosenProvider.apiKey.trim()) {
-        return res.status(503).json({
-          error: `${chosenProvider.name} API key is not configured yet in Super Admin > Backend Control.`,
-        });
+    const chosenType = chosenProvider?.providerType || 'foodora';
+
+    // 1. Foodora Own AI (Tries Gemini backend when configured, seamlessly guarantees built-in bilingual Foodora AI answer)
+    if (chosenType === 'foodora') {
+      const openRestaurants = await getApprovedRestaurants().catch(() => []);
+      if (envFlags.hasGeminiKey) {
+        try {
+          const liveRestLine = openRestaurants
+            .filter((r) => r.isOpen)
+            .slice(0, 6)
+            .map((r) => `${r.name} (${r.area} · ${r.cuisine})`)
+            .join(', ');
+          const enrichedInstruction = liveRestLine
+            ? `${systemInstruction}\nLive Open Restaurants: ${liveRestLine}`
+            : systemInstruction;
+          const geminiOut = await runGeminiHelpCompletion({
+            preferredModel: 'gemini-4-hydrogen',
+            systemInstruction: enrichedInstruction,
+            history,
+            message,
+          });
+          return res.json({
+            reply: geminiOut.reply,
+            model: 'foodora-own-ai',
+            providerCode: chosenProvider?.code || 'foodora',
+            providerName: chosenProvider?.name || 'Foodora Own AI',
+          });
+        } catch {
+          // Fall back cleanly to built-in Foodora knowledge assistant
+        }
       }
-      const reply = await callExternalAiProvider({
-        providerType: chosenProvider.providerType,
-        model: chosenProvider.model,
-        apiBaseUrl: chosenProvider.apiBaseUrl || '',
-        apiKey: chosenProvider.apiKey.trim(),
+
+      const fallbackReply = generateFoodoraOwnAiReply({
+        message,
+        langPreference: langPreference as AiHelpLangPreference,
+        uiLang,
+        area: context?.area,
+        activeOrderNumber: context?.activeOrderNumber,
+        openRestaurants: openRestaurants
+          .filter((r) => r.isOpen)
+          .slice(0, 6)
+          .map((r) => ({ name: r.name, area: r.area, cuisine: r.cuisine })),
+      });
+      return res.json({
+        reply: fallbackReply,
+        model: chosenProvider?.model || 'foodora-bd-assistant',
+        providerCode: chosenProvider?.code || 'foodora',
+        providerName: chosenProvider?.name || 'Foodora Own AI',
+      });
+    }
+
+    // 2. Pollinations Free AI (Keyless real LLM)
+    if (chosenType === 'pollinations') {
+      const extRes = await callExternalAiProvider({
+        providerType: 'pollinations',
+        model: chosenProvider?.model || 'openai-fast',
+        apiBaseUrl: chosenProvider?.apiBaseUrl || 'https://text.pollinations.ai',
+        apiKey: '',
         systemInstruction,
         history,
         message,
+        refererOrigin: getRequestOrigin(req),
       });
       return res.json({
-        reply,
+        reply: extRes.reply,
+        model: extRes.actualModel || chosenProvider?.model || 'openai-fast',
+        providerCode: chosenProvider?.code || 'pollinations',
+        providerName: chosenProvider?.name || 'Pollinations Free AI',
+      });
+    }
+
+    // 3. OpenRouter / OpenAI / Groq / DeepSeek / Anthropic / Mistral / xAI / Together / Cerebras / Perplexity / Cohere / HuggingFace / Custom
+    if (chosenProvider && chosenType !== 'gemini') {
+      const apiKey =
+        (chosenProvider.apiKey || '').trim() || getProviderEnvApiKey(chosenType);
+
+      // If user picked OpenRouter (Gemma 4) without OPENROUTER_API_KEY, route through GEMINI_API_KEY if configured
+      if (!apiKey && chosenType === 'openrouter' && envFlags.hasGeminiKey) {
+        const geminiOut = await runGeminiHelpCompletion({
+          preferredModel: 'gemini-4-hydrogen',
+          systemInstruction,
+          history,
+          message,
+        });
+        return res.json({
+          reply: geminiOut.reply,
+          model: geminiOut.model,
+          providerCode: chosenProvider.code,
+          providerName: `${chosenProvider.name} (Gemini 4 Route)`,
+        });
+      }
+
+      if (!apiKey) {
+        return res.status(503).json({
+          error: `${chosenProvider.name} requires an API key in Super Admin > Backend Control. Switch to Foodora Own AI or Pollinations Free AI to chat instantly.`,
+          suggestedFallback: 'foodora',
+        });
+      }
+
+      const extRes = await callExternalAiProvider({
+        providerType: chosenType,
         model: chosenProvider.model,
+        apiBaseUrl: chosenProvider.apiBaseUrl || '',
+        apiKey,
+        systemInstruction,
+        history,
+        message,
+        refererOrigin: getRequestOrigin(req),
+      });
+
+      return res.json({
+        reply: extRes.reply,
+        model: extRes.actualModel || chosenProvider.model,
         providerCode: chosenProvider.code,
         providerName: chosenProvider.name,
+        ...(extRes.reasoningDetails !== undefined
+          ? { reasoningDetails: extRes.reasoningDetails }
+          : {}),
       });
     }
 
-    const ai = getGeminiHelpClient();
-    if (!ai) {
+    // 4. Direct Google Gemini provider
+    if (!envFlags.hasGeminiKey) {
       return res.status(503).json({
         error:
-          'AI Help is unavailable because GEMINI_API_KEY is not configured in Settings > Secrets.',
+          'Google Gemini requires GEMINI_API_KEY in Settings > Secrets, or switch AI Engine to Foodora Own AI / Pollinations Free AI.',
+        suggestedFallback: 'foodora',
       });
     }
 
-    const contents = [
-      ...history.slice(-8).map((item) => ({
-        role: item.role,
-        parts: [{ text: item.text }],
-      })),
-      {
-        role: 'user' as const,
-        parts: [{ text: message }],
-      },
-    ];
-
-    const preferredGeminiModel = chosenProvider?.model?.trim() || 'gemini-4-hydrogen';
-    const attempts: Array<{ model: string; thinkingLevel: ThinkingLevel; timeoutMs: number }> = [
-      { model: preferredGeminiModel, thinkingLevel: ThinkingLevel.LOW, timeoutMs: 9000 },
-      { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 9000 },
-      { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW, timeoutMs: 10000 },
-    ];
-
-    let reply = '';
-    let usedModel = attempts[0].model;
-    let lastError: unknown = null;
-
-    for (let i = 0; i < attempts.length; i += 1) {
-      const attempt = attempts[i];
-      try {
-        const response = await withTimeout(
-          ai.models.generateContent({
-            model: attempt.model,
-            contents,
-            config: {
-              systemInstruction,
-              thinkingConfig: { thinkingLevel: attempt.thinkingLevel },
-            },
-          }),
-          attempt.timeoutMs,
-          attempt.model
-        );
-        const text = (response.text || '').trim();
-        if (!text) {
-          const emptyErr = new Error('AI Help returned an empty response.');
-          (emptyErr as Error & { status?: number }).status = 502;
-          throw emptyErr;
-        }
-        reply = text;
-        usedModel = attempt.model;
-        break;
-      } catch (err: unknown) {
-        lastError = err;
-        const { status } = extractReadableGeminiError(err);
-        const isTransient = status === 503 || status === 504 || status === 429 || status === 502;
-        if (!isTransient || i === attempts.length - 1) {
-          throw err;
-        }
-        await new Promise((r) => setTimeout(r, i === 0 ? 400 : 1000));
-      }
-    }
-
-    if (!reply && lastError) {
-      throw lastError;
-    }
+    const geminiOut = await runGeminiHelpCompletion({
+      preferredModel: chosenProvider?.model?.trim() || 'gemini-4-hydrogen',
+      systemInstruction,
+      history,
+      message,
+    });
 
     return res.json({
-      reply,
-      model: usedModel,
+      reply: geminiOut.reply,
+      model: geminiOut.model,
       providerCode: chosenProvider?.code || 'gemini',
-      providerName: chosenProvider?.name || 'Google Gemini',
+      providerName: chosenProvider?.name || 'Google Gemini 4',
     });
   } catch (err: unknown) {
     const { status, message } = extractReadableGeminiError(err);
     console.error('POST /api/ai/help error:', message);
     return res.status(status).json({
       error: message,
+      suggestedFallback: 'foodora',
     });
   }
 });
